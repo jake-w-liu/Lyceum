@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-ssr/
+*.local
+
+# Rust / Tauri
+src-tauri/target/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+
+# Test coverage
+coverage/
+
+# Vite cache
+.vite/
+
+# Local Claude Code settings (personal; skills/ are tracked)
+.claude/settings.local.json
+
+.claude
+.vscode
+

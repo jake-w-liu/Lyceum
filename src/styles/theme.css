@@ -1,0 +1,81 @@
+/*
+ * Theme tokens as CSS custom properties.
+ *
+ * The default (no/`dark` attribute) is a VS Code-like dark theme. `light` and
+ * `hc` (high contrast) are scaffolded here; the full theme switcher (and
+ * Monaco theme sync) lands in M7. Set the active theme via the `data-theme`
+ * attribute on <html>.
+ */
+
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #1e1e1e;
+  --bg-elevated: #252526;
+  --bg-activity-bar: #333333;
+  --bg-tab-inactive: #2d2d2d;
+  --bg-tab-active: #1e1e1e;
+  --bg-statusbar: #007acc;
+  --bg-hover: #2a2d2e;
+
+  --fg: #cccccc;
+  --fg-muted: #8a8a8a;
+  --fg-statusbar: #ffffff;
+
+  --border: #2b2b2b;
+  --accent: #0e639c;
+  --accent-hover: #1177bb;
+  --focus: #007fd4;
+  --activity-active-border: #ffffff;
+  --selection: #264f78;
+
+  --ui-font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Helvetica Neue", sans-serif;
+  --mono-font: "SF Mono", "JetBrains Mono", "Fira Code", "Cascadia Code", Menlo, Consolas, monospace;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #ffffff;
+  --bg-elevated: #f3f3f3;
+  --bg-activity-bar: #2c2c2c;
+  --bg-tab-inactive: #ececec;
+  --bg-tab-active: #ffffff;
+  --bg-statusbar: #007acc;
+  --bg-hover: #e8e8e8;
+
+  --fg: #333333;
+  --fg-muted: #6c6c6c;
+  --fg-statusbar: #ffffff;
+
+  --border: #e0e0e0;
+  --accent: #0e639c;
+  --accent-hover: #1177bb;
+  --focus: #007fd4;
+  --activity-active-border: #ffffff;
+  --selection: #add6ff;
+}
+
+:root[data-theme="hc"] {
+  color-scheme: dark;
+
+  --bg: #000000;
+  --bg-elevated: #0a0a0a;
+  --bg-activity-bar: #000000;
+  --bg-tab-inactive: #000000;
+  --bg-tab-active: #000000;
+  --bg-statusbar: #000000;
+  --bg-hover: #1f1f1f;
+
+  --fg: #ffffff;
+  --fg-muted: #d4d4d4;
+  --fg-statusbar: #ffffff;
+
+  --border: #6fc3df;
+  --accent: #0e639c;
+  --accent-hover: #1177bb;
+  --focus: #f38518;
+  --activity-active-border: #f38518;
+  --selection: #ffffff;
+}

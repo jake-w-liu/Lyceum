@@ -1,0 +1,189 @@
+// Keybinding matcher mapping keyboard events to command ids for the workbench keymap.
+
+export interface Keybinding {
+  key: string;
+  command: string;
+  when?: string;
+}
+
+export type KeyContext = Record<string, boolean>;
+
+// The active workbench keymap (editor-internal chords like find/comment/move-line are handled by Monaco itself and are intentionally NOT here):
+export const DEFAULT_KEYMAP: Keybinding[] = [
+  { key: "mod+p", command: "quickOpen.show" },
+  { key: "mod+shift+p", command: "commandPalette.show" },
+  { key: "mod+b", command: "workbench.toggleSidebar" },
+  { key: "mod+backquote", command: "terminal.toggle" },
+  { key: "mod+shift+backquote", command: "terminal.new" },
+  { key: "mod+j", command: "workbench.toggleBottomPanel" },
+  { key: "mod+s", command: "file.save" },
+  { key: "mod+w", command: "editor.closeTab" },
+  { key: "mod+tab", command: "editor.nextTab" },
+  { key: "mod+shift+tab", command: "editor.previousTab" },
+  { key: "mod+shift+v", command: "preview.open" },
+  { key: "mod+shift+f", command: "workbench.searchWorkspace" },
+  { key: "mod+enter", command: "editor.run" },
+  { key: "escape", command: "workbench.dismiss", when: "paletteOpen || quickOpenOpen || modalOpen" },
+];
+
+const MODIFIER_TOKENS = new Set(["mod", "cmd", "ctrl", "alt", "shift", "meta"]);
+
+export function evaluateWhen(expr: string | undefined, ctx: KeyContext): boolean {
+  if (expr === undefined) {
+    return true;
+  }
+  const trimmed = expr.trim();
+  if (trimmed === "") {
+    return true;
+  }
+  const terms = trimmed.split("||");
+  for (const term of terms) {
+    const factors = term.split("&&");
+    let termValue = true;
+    for (const factor of factors) {
+      const token = factor.trim();
+      let negated = false;
+      let id = token;
+      if (id.startsWith("!")) {
+        negated = true;
+        id = id.slice(1).trim();
+      }
+      const value = ctx[id] === true;
+      if ((negated ? !value : value) === false) {
+        termValue = false;
+        break;
+      }
+    }
+    if (termValue) {
+      return true;
+    }
+  }
+  return false;
+}
+
+interface Chord {
+  mod: boolean;
+  cmd: boolean;
+  ctrl: boolean;
+  alt: boolean;
+  shift: boolean;
+  meta: boolean;
+  mainKey: string;
+}
+
+function parseChord(key: string): Chord {
+  const chord: Chord = {
+    mod: false,
+    cmd: false,
+    ctrl: false,
+    alt: false,
+    shift: false,
+    meta: false,
+    mainKey: "",
+  };
+  const tokens = key.split("+");
+  for (const raw of tokens) {
+    const token = raw.toLowerCase();
+    if (MODIFIER_TOKENS.has(token)) {
+      switch (token) {
+        case "mod":
+          chord.mod = true;
+          break;
+        case "cmd":
+          chord.cmd = true;
+          break;
+        case "ctrl":
+          chord.ctrl = true;
+          break;
+        case "alt":
+          chord.alt = true;
+          break;
+        case "shift":
+          chord.shift = true;
+          break;
+        case "meta":
+          chord.meta = true;
+          break;
+      }
+    } else {
+      chord.mainKey = token;
+    }
+  }
+  return chord;
+}
+
+function matchMainKey(token: string, e: KeyboardEvent): boolean {
+  switch (token) {
+    case "backquote":
+      return e.code === "Backquote";
+    case "tab":
+      return e.key === "Tab";
+    case "enter":
+      return e.key === "Enter";
+    case "escape":
+      return e.key === "Escape";
+    case "f12":
+      return e.key === "F12";
+    case "up":
+      return e.key === "ArrowUp";
+    case "down":
+      return e.key === "ArrowDown";
+    case "left":
+      return e.key === "ArrowLeft";
+    case "right":
+      return e.key === "ArrowRight";
+    default:
+      return e.key.toLowerCase() === token;
+  }
+}
+
+function matchChord(chord: Chord, e: KeyboardEvent, isMacOs: boolean): boolean {
+  if (chord.shift !== e.shiftKey) {
+    return false;
+  }
+  if (chord.alt !== e.altKey) {
+    return false;
+  }
+
+  if (chord.mod) {
+    if (isMacOs) {
+      if (e.metaKey !== true || e.ctrlKey !== false) {
+        return false;
+      }
+    } else {
+      if (e.ctrlKey !== true || e.metaKey !== false) {
+        return false;
+      }
+    }
+  } else if (chord.cmd || chord.meta) {
+    if (e.metaKey !== true) {
+      return false;
+    }
+  } else if (chord.ctrl) {
+    if (e.ctrlKey !== true) {
+      return false;
+    }
+  } else {
+    if (e.metaKey !== false || e.ctrlKey !== false) {
+      return false;
+    }
+  }
+
+  return matchMainKey(chord.mainKey, e);
+}
+
+export function matchKeybinding(
+  e: KeyboardEvent,
+  ctx: KeyContext,
+  isMacOs: boolean,
+  keymap: Keybinding[] = DEFAULT_KEYMAP
+): string | null {
+  let result: string | null = null;
+  for (const binding of keymap) {
+    const chord = parseChord(binding.key);
+    if (matchChord(chord, e, isMacOs) && evaluateWhen(binding.when, ctx)) {
+      result = binding.command;
+    }
+  }
+  return result;
+}
