@@ -7,7 +7,8 @@ and the principal data flows.
 
 > **Hard constraint.** This is **not** a 1:1 VS Code clone. It is a focused editor
 > with a VS Code-like layout, common keybindings, code editing, terminal
-> integration, syntax highlighting, PDF preview, and a Julia-first workflow. Only
+> integration, syntax highlighting, Markdown/HTML/PDF/image preview, and a
+> Julia-first workflow. Only
 > original code and permissive open-source dependencies are used; no VS Code source
 > is copied.
 
@@ -20,7 +21,7 @@ and the principal data flows.
 | Frontend | React 19 + TypeScript, built with Vite |
 | Editor | Monaco Editor (`monaco-editor` / `@monaco-editor/react`), lazy-loaded |
 | Terminal | `xterm.js` frontend; real PTY in Rust via the `portable-pty` crate |
-| PDF preview | PDF.js (`pdfjs-dist`), lazy-loaded |
+| Preview | Markdown, sandboxed HTML, PDF.js (`pdfjs-dist`), and raw-byte image previews |
 | Syntax highlighting | Monaco built-in grammars first; Tree-sitter only where weak (Julia, LaTeX) |
 | State | Zustand (small stores), no Redux |
 | Styling | Plain CSS with CSS custom properties for theming, no UI framework |
@@ -51,7 +52,7 @@ directly by the WebView.
 |  |                                                                           |  |
 |  |  App.tsx                                                                   |  |
 |  |   +- ActivityBar  Sidebar  EditorArea(Monaco)  BottomPanel(xterm)  Status |  |
-|  |   +- PdfPanel (PDF.js)                                                     |  |
+|  |   +- Preview surfaces (PdfPanel + inline source preview)                  |  |
 |  |                                                                           |  |
 |  |  Zustand stores  |  Command registry  |  Keybinding registry              |  |
 |  |  src/lib: ipc.ts (invoke wrappers), events.ts (listen), lspClient.ts      |  |
@@ -63,8 +64,8 @@ directly by the WebView.
 |  +---------------------------------------------------------------------------+  |
 |  |  Rust core  (src-tauri/src)                                               |  |
 |  |                                                                           |  |
-|  |   commands::*  fs  terminal  lsp  julia  settings  pdf  app_info          |  |
-|  |   state: AppState (Mutex/Arc registries of PTYs and LSP sessions)         |  |
+|  |   file_ops  fs_ops  search  walk  terminal  julia  lsp  menu  app_info    |  |
+|  |   state: managed Mutex registries for PTYs, runs, and LSP sessions        |  |
 |  +----+-----------------+-------------------------+------------------+-------+  |
 |       | std::fs         | portable-pty            | tokio::process   |          |
 |       v                 v                         v                  v          |
@@ -110,8 +111,8 @@ Vitest), returning safe fallbacks.
   PTY stdout/stderr chunks, PTY exit, LSP notifications/responses (diagnostics,
   log messages), long-running Julia run output, file-watcher change notifications.
 - **Channel naming** is scoped by subsystem and instance id, e.g.
-  `term://{terminalId}/data`, `term://{terminalId}/exit`,
-  `lsp://{sessionId}/message`. Per-instance channels let the frontend route a
+  `terminal:data:<terminalId>`, `terminal:exit:<terminalId>`,
+  `lsp:message:<sessionId>`. Per-instance channels let the frontend route a
   stream to exactly the component that owns it.
 
 ### 2.3 Rule of thumb
@@ -151,7 +152,8 @@ src/
     EditorArea.tsx      Tab strip + lazy-mounted Monaco editor host.
     BottomPanel.tsx     Terminal + problems/output container (xterm host).
     StatusBar.tsx       Cursor position, language, LSP status, run status.
-    PdfPanel.tsx        Lazy PDF.js viewer (tab or side panel per setting).
+    PdfPanel.tsx        Right-side preview panel for PDF, image, and Markdown.
+    HtmlPreview.tsx     Sandboxed inline rendered preview for HTML sources.
     Icon.tsx            Inline SVG icon set (original artwork).
     Resizer.tsx         Drag-to-resize splitters for panels.
   state/
@@ -161,11 +163,10 @@ src/
     settingsStore.ts    Loaded settings; applies to UI + Monaco/terminal.
     lspStore.ts         Per-session status and last-known diagnostics.
   commands/
-    registry.ts         Command registry (register/execute/list).
-    builtins/           Built-in command modules grouped by domain.
+    commandRegistry.ts  Command registry (register/execute/list).
+    builtinCommands.ts  Built-in workbench commands.
   keybindings/
-    registry.ts         Keybinding registry: chord matching -> command id.
-    defaultKeymap.json  Default shortcuts (see docs/KEYBINDINGS.md).
+    keybindingRegistry.ts Keybinding registry + default shortcuts.
   lib/
     ipc.ts              Typed invoke() wrappers (already present: getAppInfo).
     events.ts           Typed listen() helpers and channel-name constants.
@@ -203,30 +204,25 @@ src-tauri/
   src/
     main.rs             Binary entry; calls lyceum_lib::run().
     lib.rs              Builder: plugins, AppState, invoke_handler (command list).
-    app_info.rs         get_app_info command (present in scaffold).
-    commands/
-      mod.rs            Re-exports + the #[tauri::command] surface.
-      fs.rs             read_file, write_file, list_dir, open_folder, watch.
-      terminal.rs       term_create, term_write, term_resize, term_close.
-      lsp.rs            lsp_start, lsp_send, lsp_stop (JSON-RPC bridge).
-      julia.rs          run_file, run_selection (and generic run_command).
-      pdf.rs            read_pdf_bytes (or stream) for the viewer.
-      settings.rs       load_settings, save_settings, load_keymap, save_keymap.
-    state.rs            AppState: registries of PTYs and LSP sessions.
-    pty.rs              portable-pty wrapper: spawn, reader thread, writer.
-    lsp_session.rs      Child LSP process + framed stdio reader/writer.
-    paths.rs            Resolution of config paths via the Tauri path API.
-    error.rs            AppError (serde::Serialize) for command results.
+    app_info.rs         get_app_info data.
+    file_ops.rs         read_file, write_file, read_file_bytes, app_config_path.
+    fs_ops.rs           Explorer file operations (read/create/rename/delete).
+    search.rs           Workspace text search.
+    walk.rs             Quick-open workspace file listing.
+    terminal.rs         PTY manager + terminal_create/write/resize/close.
+    julia.rs            Julia/build process manager + run/cancel commands.
+    lsp.rs              LSP process manager + JSON-RPC framing/bridge.
+    menu.rs             Native app menu mapped to frontend command ids.
 ```
 
 **Responsibility notes**
 
 - `lib.rs` registers every command in a single `invoke_handler!` and constructs
   `AppState` once via `.manage(...)`.
-- `pty.rs` and `lsp_session.rs` own the OS resources and the threads/tasks that
-  read their output; `commands/*` are thin and delegate to these.
-- `paths.rs` is the only module that decides on-disk locations, so persistence is
-  auditable in one file.
+- `terminal.rs`, `julia.rs`, and `lsp.rs` own the OS resources and the
+  threads/tasks that read their output.
+- `file_ops.rs::app_config_path` is the single backend entry point for resolving
+  app-config file locations.
 
 ---
 
@@ -235,7 +231,7 @@ src-tauri/
 The command system is the spine of the UI: **every action is a command**, and
 keybindings only ever resolve to command ids (never to inline handlers).
 
-### 6.1 Command registry (`src/commands/registry.ts`)
+### 6.1 Command registry (`src/commands/commandRegistry.ts`)
 
 ```ts
 interface Command {
@@ -249,22 +245,23 @@ interface Command {
 
 - A singleton `CommandRegistry` exposes `register`, `execute(id, args)`,
   `getAll()` (for the palette), and `isEnabled(id)`.
-- Built-in commands live in `commands/builtins/` grouped by domain (`file.*`,
-  `view.*`, `terminal.*`, `editor.*`, `julia.*`, `lsp.*`, `pdf.*`).
+- Built-in commands are registered in `commands/builtinCommands.ts` with stable
+  ids grouped by prefix (`file.*`, `workbench.*`, `terminal.*`, `editor.*`,
+  `preview.*`, `latex.*`, `julia.*`).
 - The **command palette** (`Cmd/Ctrl+Shift+P`) is just a filtered list over
   `getAll()`; **quick open** (`Cmd/Ctrl+P`) is a file-name picker that ultimately
   executes `file.open`.
 
-### 6.2 Keybinding registry (`src/keybindings/registry.ts`)
+### 6.2 Keybinding registry (`src/keybindings/keybindingRegistry.ts`)
 
-- Maps a normalized chord (e.g. `cmd+shift+p`, `ctrl+k ctrl+s`) to a command id.
-- Loads `keybindings/defaultKeymap.json`, then overlays the user's persisted
-  keymap (see §11). On macOS `Cmd` is primary; on Windows/Linux `Ctrl` is primary;
-  the registry normalizes `mod` to the platform key.
-- A single keydown listener (installed by `useLayoutKeybindings.ts`) matches the
-  active chord (with chord/prefix support), checks the command's `when` predicate,
-  and calls `CommandRegistry.execute(id)`; `Esc` always dismisses the active
-  overlay (palette, quick open, find box, modal). Monaco's own keybindings handle
+- Maps a normalized shortcut (e.g. `mod+shift+p`) to a command id.
+- `DEFAULT_KEYMAP` lives in `keybindingRegistry.ts`; `keymapStore.ts` overlays
+  user keybindings loaded from `keybindings.json` (see §12). On macOS `mod` is
+  `Cmd`; on Windows/Linux it is `Ctrl`.
+- A single keydown listener (installed by `useCommandKeybindings.ts`) matches the
+  active shortcut, checks the command's `when` expression, and calls
+  `commandRegistry.execute(id)`; `Esc` dismisses the active overlay through the
+  `workbench.dismiss` command. Monaco's own keybindings handle
   in-editor edits (move/duplicate line, comment toggle, find, go-to-line) so they
   are not intercepted twice.
 
@@ -280,14 +277,14 @@ process's stdio; the frontend speaks LSP semantics. Server order per the roadmap
 **Julia LanguageServer.jl first**, then Python (**pyright**), then C#
 (**csharp-ls** / **OmniSharp**).
 
-### 7.1 Backend (`lsp_session.rs` + `commands/lsp.rs`)
+### 7.1 Backend (`src-tauri/src/lsp.rs`)
 
-- A server is launched with `tokio::process::Command` over **stdio**
+- A server is launched with `std::process::Command` over **stdio**
   (e.g. Julia: `julia --project=... -e 'using LanguageServer; ...'`).
 - The session implements the LSP **base protocol** framing on the child's stdout:
   read `Content-Length: N\r\n\r\n` headers, then exactly `N` bytes of JSON.
 - A reader task parses each message and **forwards it verbatim** to the frontend as
-  an event on `lsp://{sessionId}/message`. The backend does **not** interpret LSP
+  an event on `lsp:message:<sessionId>`. The backend does **not** interpret LSP
   semantics; it only frames/deframes and routes.
 - Commands:
   - `lsp_start(language, rootUri) -> sessionId`
@@ -316,13 +313,13 @@ This satisfies `F12` (go to definition), `Shift+F12` (find references), and
 - **Frontend:** `xterm.js` renders each terminal; instances are tracked in
   `terminalStore.ts`. `BottomPanel.tsx` hosts the active terminal; the addon
   `xterm-addon-fit` keeps the grid sized to the panel.
-- **Backend:** `pty.rs` uses the **`portable-pty`** crate to spawn a real shell
+- **Backend:** `terminal.rs` uses the **`portable-pty`** crate to spawn a real shell
   (`shellPath` setting, defaulting to the platform shell) in a PTY. A dedicated
   reader thread streams child output to the frontend.
-- **Streaming:** PTY output is emitted as events on `term://{id}/data`; the child
-  exit is signaled on `term://{id}/exit`. **Input** (keystrokes, paste) is sent
-  frontend -> backend with the `term_write(id, bytes)` command; resizing uses
-  `term_resize(id, cols, rows)`.
+- **Streaming:** PTY output is emitted as events on `terminal:data:<id>`; the
+  child exit is signaled on `terminal:exit:<id>`. **Input** (keystrokes, paste)
+  is sent frontend -> backend with the `terminal_write(id, data)` command;
+  resizing uses `terminal_resize(id, cols, rows)`.
 - **Multiple terminals:** each terminal has a unique id; the backend keeps a map
   `id -> PtyHandle` in `AppState`. Creating, switching, and closing terminals is
   command-driven (`Ctrl+\`` toggles the panel; `Ctrl+Shift+\`` creates a
@@ -352,17 +349,26 @@ This satisfies `F12` (go to definition), `Shift+F12` (find references), and
 
 ---
 
-## 10. PDF.js integration
+## 10. Preview integration
 
-- **Library:** PDF.js (`pdfjs-dist`), **lazy-loaded** via `src/lib/pdf.ts`, with
+- **Markdown/HTML:** Markdown renders in place with `MarkdownView.tsx`; HTML
+  renders in place with `HtmlPreview.tsx` inside a sandboxed iframe. Scripts are
+  allowed for ordinary HTML demos, but `allow-same-origin` is intentionally
+  omitted so previewed project HTML does not gain app/WebView privileges.
+- **PDFs:** PDF.js (`pdfjs-dist`) is **lazy-loaded** via `PdfViewer.tsx`, with
   the worker (`pdf.worker`) configured for Vite bundling.
-- **Source bytes:** the backend reads the PDF (`commands/pdf.rs`,
-  `read_pdf_bytes`) and returns bytes/`ArrayBuffer`; PDF.js renders pages to
-  `<canvas>` in `PdfPanel.tsx`. (Reading via a command keeps file access on the
-  privileged side rather than granting broad asset access.)
-- **Placement** follows the `pdfPreviewMode` setting: `tab` (an editor-area tab) or
-  `sidePanel`. `Cmd/Ctrl+Shift+V` opens the preview for the active document; for a
-  LaTeX/Markdown build the preview targets the produced PDF.
+- **Images:** `ImageViewer.tsx` is lazy-loaded and reads common browser image
+  formats (`png`, `jpg`/`jpeg`, `gif`, `webp`, `bmp`, `avif`, `ico`, `svg`) as
+  raw bytes, then
+  displays them through a Blob URL that is revoked on path changes/unmount.
+- **Source bytes:** the backend reads preview files via `read_file_bytes` and
+  returns bytes/`ArrayBuffer`. PDF.js renders pages to `<canvas>`; images render
+  through `<img>`. Reading via a command keeps file access on the privileged side
+  rather than granting broad asset access.
+- **Placement:** Markdown and HTML previews render inline over the active editor;
+  PDF and image previews render in the right-side preview panel.
+  `Cmd/Ctrl+Shift+V` opens the preview for supported active documents; clicking a
+  PDF/image in the explorer routes directly to the preview panel.
 
 ---
 
@@ -371,11 +377,10 @@ This satisfies `F12` (go to definition), `Shift+F12` (find references), and
 - All themeable colors are **CSS custom properties** declared on a root scope in
   `src/styles/theme.css`; components reference `var(--...)` only (no hard-coded
   colors). No heavy UI framework is used.
-- Four themes ship: **light**, **dark**, **high-contrast**, and the **VS Code-like
-  default dark** (`vscode-dark`). The active theme is applied by setting a
-  `data-theme` attribute (or a class) on the document root, swapping the variable
-  set.
-- The `theme` setting (default `vscode-dark`) is the single switch; it drives both
+- Three themes ship: **dark** (the VS Code-like default), **light**, and
+  **high contrast** (`hc`). The active theme is applied by setting a
+  `data-theme` attribute on the document root, swapping the variable set.
+- The `theme` setting (default `dark`) is the single switch; it drives both
   the app chrome (CSS variables) and the derived Monaco theme so the two never
   diverge.
 
@@ -384,27 +389,26 @@ This satisfies `F12` (go to definition), `Shift+F12` (find references), and
 ## 12. Settings & keybinding persistence
 
 The **Rust backend owns** reading and writing all config files; the frontend goes
-through commands (`settings.rs`). Locations resolve via the **Tauri path API**
-(`tauri::Manager::path().app_config_dir()` / the `@tauri-apps/api/path`
-`appConfigDir`), centralized in `paths.rs`.
+through `app_config_path`, `read_file`, and `write_file`. Locations resolve via
+the **Tauri path API** (`app.path().app_config_dir()`), centralized in
+`file_ops.rs`.
 
 | File | Location | Owner | Contents |
 |---|---|---|---|
-| `settings.json` | app-config dir | `settings.rs` | All persisted settings keys (below). |
-| `keybindings.json` | app-config dir | `settings.rs` | User keymap overlay over the defaults. |
-| `workspace.json` | app-config dir | `settings.rs` | Last folder + open tabs (for restore). |
+| `settings.json` | app-config dir | `settingsPersistence.ts` via `file_ops.rs` | All persisted settings keys (below). |
+| `keybindings.json` | app-config dir | `settingsPersistence.ts` via `file_ops.rs` | User keymap overlay over the defaults. |
+| `workspace.json` | app-config dir | `settingsPersistence.ts` via `file_ops.rs` | Last folder for startup restore. |
 
 - Resolved app-config dir (typical): macOS
   `~/Library/Application Support/<bundle-id>/`, Windows
   `%APPDATA%/<bundle-id>/`, Linux `~/.config/<bundle-id>/`.
-- Commands: `load_settings`, `save_settings`, `load_keymap`, `save_keymap`,
-  plus workspace load/save. Settings are loaded once on startup and pushed into
-  `settingsStore.ts`, which applies them to the UI, Monaco, and the terminal.
+- Commands: `app_config_path`, `read_file`, and `write_file`. Settings are loaded
+  once on startup and pushed into `settingsStore.ts`, which applies them to the
+  UI, Monaco, terminal launch options, Julia, and LaTeX build commands.
 - **Persisted settings keys** (full schema in `docs/SETTINGS_SCHEMA.md`):
   `theme`, `fontFamily`, `fontSize`, `lineHeight`, `ligatures`, `tabSize`,
   `wordWrap`, `shellPath`, `terminalCwdBehavior`, `juliaPath`,
-  `latexBuildCommand`, `pdfPreviewMode`, `autosave`, `restoreWorkspaceOnStartup`,
-  `minimap`, `lineNumbers`.
+  `latexBuildCommand`, `restoreWorkspaceOnStartup`, `minimap`, `lineNumbers`.
 - `restoreWorkspaceOnStartup` controls whether `workspace.json` is replayed at
   launch (M10).
 
@@ -415,13 +419,14 @@ through commands (`settings.rs`). Locations resolve via the **Tauri path API**
 ### 13.1 Open a file
 
 1. User triggers quick open (`Cmd/Ctrl+P`) or clicks a file in `Sidebar.tsx`.
-2. The `file.open` command runs and calls `ipc.readFile(path)` -> `read_file`
-   command in `commands/fs.rs`.
-3. Backend reads the file with `std::fs` and returns `{ content, ... }`.
-4. The command creates/updates a Monaco model, registers a tab in
-   `editorStore.ts`, and focuses `EditorArea.tsx`. The status bar updates language
-   + cursor position.
-5. If a language server for that language is configured, `lspClient.ts` sends
+2. `useOpenFileBridge.ts` classifies the path by extension.
+3. PDFs and images set the matching preview path in `previewStore.ts`, show the
+   preview panel, and are read later by `read_file_bytes` from the preview
+   component.
+4. Text files call `ipc.readFile(path)` -> `read_file`, then create/update a
+   Monaco model, register a tab in `editorStore.ts`, and focus `EditorArea.tsx`.
+   The status bar updates language + cursor position.
+5. If a language server for that text language is configured, `lspClient.ts` sends
    `textDocument/didOpen`.
 
 ### 13.2 Run Julia selection
@@ -429,9 +434,8 @@ through commands (`settings.rs`). Locations resolve via the **Tauri path API**
 1. User presses `Cmd/Ctrl+Enter` (run current file or selected code).
 2. The `julia.run` command reads the editor selection (or whole file) from the
    active Monaco model.
-3. It calls `run_selection` / `run_file` in `commands/julia.rs`, which spawns
-   `julia` (path from the `juliaPath` setting) as a child process, passing the
-   code/file.
+3. It calls `run_julia` in `src-tauri/src/julia.rs`, which spawns `julia` (path
+   from the `juliaPath` setting) as a child process, passing the code/file.
 4. Backend streams the process stdout/stderr to the frontend via events; the
    output renders in the Output view inside `BottomPanel.tsx`.
 5. On exit, the backend emits a completion event; the status bar shows the run
@@ -441,8 +445,9 @@ through commands (`settings.rs`). Locations resolve via the **Tauri path API**
 
 1. The language server emits a `textDocument/publishDiagnostics` notification on
    its stdout.
-2. `lsp_session.rs` deframes the message and emits it on `lsp://{sessionId}/message`.
-3. `events.ts` delivers it to `lspClient.ts`, which recognizes the notification.
+2. `src-tauri/src/lsp.rs` deframes the message and emits it on
+   `lsp:message:<sessionId>`.
+3. `lspClient.ts` listens for that event and recognizes the notification.
 4. The client converts LSP diagnostics into Monaco markers
    (`monaco.editor.setModelMarkers`) on the matching model, so squiggles appear
    inline; severity maps to Monaco marker severity.
@@ -492,10 +497,13 @@ Lyceum follows Tauri v2's capability/permission model — the WebView gets the
   commands listed in `lib.rs`. Process launching (shells, Julia, language servers)
   is constrained to configured paths (`shellPath`, `juliaPath`,
   `latexBuildCommand`).
-- **Path validation.** `paths.rs` and `commands/fs.rs` resolve and validate paths;
-  config files are confined to the Tauri app-config dir.
-- **CSP.** `tauri.conf.json` sets a restrictive Content-Security-Policy for the
-  WebView; remote content is not loaded in v1 (no remote SSH, no marketplace).
+- **Path validation.** `file_ops.rs`, `fs_ops.rs`, and `walk.rs` validate command
+  inputs enough for local desktop use; config-file paths are resolved through
+  the Tauri app-config dir.
+- **CSP.** `tauri.conf.json` currently sets `security.csp = null` for Monaco,
+  xterm, PDF.js workers, and Tauri asset loading. This is acceptable for the
+  bundled, trusted local frontend in v1, and is tracked as a hardening item in
+  `docs/RISKS.md`.
 - **Serializable errors only.** Commands return `Result<T, AppError>` with no raw
   OS handles crossing the IPC boundary; the frontend receives only opaque ids and
   data.

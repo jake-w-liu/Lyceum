@@ -2,7 +2,7 @@
 
 Primary progress tracker for the lightweight, VS Code-inspired research IDE built with Tauri (Julia-first workflow). This file is GitHub-flavored markdown. Update checkboxes as work completes.
 
-**HARD CONSTRAINT:** This is NOT a 1:1 VS Code clone. It is a focused editor with a VS Code-like layout, common keybindings, code editing, terminal integration, syntax highlighting, PDF preview, and a Julia-first workflow. Use ONLY original code and permissive open-source dependencies. Do not copy VS Code source.
+**HARD CONSTRAINT:** This is NOT a 1:1 VS Code clone. It is a focused editor with a VS Code-like layout, common keybindings, code editing, terminal integration, syntax highlighting, Markdown/HTML/PDF/image preview, and a Julia-first workflow. Use ONLY original code and permissive open-source dependencies. Do not copy VS Code source.
 
 ## Canonical Tech Decisions (single source of truth)
 
@@ -10,14 +10,14 @@ Primary progress tracker for the lightweight, VS Code-inspired research IDE buil
 - [x] Frontend: React 19 + TypeScript, built with Vite
 - [x] Editor: Monaco Editor (`monaco-editor`), lazy-loaded
 - [x] Terminal: xterm.js in the frontend; real PTY in the Rust backend via the `portable-pty` crate (output streamed over Tauri events, input sent via Tauri commands)
-- [x] PDF preview: PDF.js (`pdfjs-dist`), lazy-loaded
+- [x] Preview: Markdown/HTML inline previews, PDF.js (`pdfjs-dist`) and image previews, lazy-loaded where heavy
 - [x] Syntax highlighting: Monaco built-in grammars first; custom Monarch grammars where missing (Julia, LaTeX, TOML) — Tree-sitter not needed for v1
 - [x] State management: Zustand (small, simple stores) — no Redux
 - [x] Styling: plain CSS with CSS custom properties (CSS variables) for theming — no heavy UI framework
 - [x] LSP: a generic JSON-RPC LSP client; Rust backend spawns language servers over stdio and bridges messages to the frontend via Tauri commands/events (order: Julia LanguageServer.jl, then Python pyright, then C# csharp-ls/OmniSharp)
 - [x] Command system: a TS command registry (every action is a command) + a keybinding registry mapping shortcuts to command ids; keybindings persisted as JSON; settings persisted as JSON in the OS app-config dir via Tauri
 - [x] Testing: Vitest + React Testing Library for the frontend; `cargo test` for Rust
-- [x] Performance: lazy-load Monaco, PDF.js, terminal, and LSP servers; no extension marketplace, no Electron, no background indexing in v1
+- [x] Performance: lazy-load Monaco, PDF.js/image previews, terminal, and LSP servers; no extension marketplace, no Electron, no background indexing in v1
 
 ---
 
@@ -82,9 +82,9 @@ Primary progress tracker for the lightweight, VS Code-inspired research IDE buil
 
 ### M1 — Shell layout: activity bar, sidebar, editor area, bottom panel, status bar
 
-- [x] Implement `ActivityBar.tsx` (icon rail) with selectable views
+- [x] Implement `ActivityBar.tsx` (icon rail) with selectable implemented views: Explorer and Search; non-goal placeholders are not shown
 - [x] Implement `Sidebar.tsx` (collapsible panel bound to active activity item)
-- [x] Implement `EditorArea.tsx` (central region placeholder for tabs/editor)
+- [x] Implement `EditorArea.tsx` (central region for tabs, Monaco, and inline previews)
 - [x] Implement `BottomPanel.tsx` (collapsible panel for terminal/output)
 - [x] Implement `StatusBar.tsx` (bottom status strip; shows real backend platform info via `get_app_info` IPC)
 - [x] Create `state/layoutStore.ts` (Zustand) tracking sidebar/bottom-panel visibility and active view
@@ -127,7 +127,7 @@ Primary progress tracker for the lightweight, VS Code-inspired research IDE buil
 - [x] Keybinding registry in `src/keybindings/` mapping shortcuts to command ids (matcher + `when` evaluator)
 - [x] Default keymap with macOS Cmd vs Win/Linux Ctrl handling (`DEFAULT_KEYMAP`; on-disk JSON persistence in M10)
 - [x] Command palette UI (Cmd/Ctrl+Shift+P) and quick open (Cmd/Ctrl+P)
-- [ ] Persist keybindings as JSON via Tauri (load on startup, save on change) → moved to **M10** (settings/keybindings persistence)
+- [x] Persist keybindings as JSON via Tauri (load on startup, save on change) — completed in **M10** (settings/keybindings persistence)
 - [x] Implement required keybindings:
   - [x] Cmd/Ctrl+P quick open
   - [x] Cmd/Ctrl+Shift+P command palette
@@ -140,16 +140,16 @@ Primary progress tracker for the lightweight, VS Code-inspired research IDE buil
   - [x] Cmd/Ctrl+Tab next tab; Cmd/Ctrl+Shift+Tab previous tab
   - [x] Cmd/Ctrl+F find in file (Monaco built-in); ~~Cmd/Ctrl+Shift+F search workspace~~ → workspace search is a later milestone
   - [x] Cmd/Ctrl+G go to line (Monaco built-in)
-  - [ ] F12 go to definition; Shift+F12 find references; Cmd/Ctrl+Click go to definition → **M9** (LSP)
+  - [x] F12 go to definition; Shift+F12 find references; Cmd/Ctrl+Click go to definition — completed in **M9** (LSP)
   - [x] Cmd/Ctrl+/ toggle line comment (Monaco built-in)
   - [x] Alt/Option+Up/Down move line; Shift+Alt/Option+Up/Down duplicate line (Monaco built-in)
-  - [ ] Cmd/Ctrl+Enter run current file or selected code → **M8** (Julia run); command id registered as a placeholder
-  - [x] Cmd/Ctrl+Shift+V open Markdown/PDF preview (toggles the preview panel; real preview in M6/M11)
+  - [x] Cmd/Ctrl+Enter run current file or selected code — completed in **M8** (Julia run)
+  - [x] Cmd/Ctrl+Shift+V open Markdown/HTML/PDF/image preview
   - [x] Esc close command palette / quick open / find box / modal panel
 - [x] **Tests**
   - [x] Command registry: register/execute/duplicate-id handling
   - [x] Keybinding registry: shortcut resolves to correct command id per platform (14 tests inc. mod resolution + `when`)
-  - [ ] Keybinding JSON persistence round-trips → **M10**
+  - [x] Keybinding JSON persistence round-trips — completed in **M10**
   - [x] Command palette filters and runs a command (+ quick open, fuzzy, uiStore, Rust walk)
 
 ### M5 — Embedded terminal (xterm.js + real shell process via PTY)
@@ -168,7 +168,7 @@ Primary progress tracker for the lightweight, VS Code-inspired research IDE buil
 
 - [x] Lazy-load PDF.js (`pdfjs-dist`) viewer component (own chunk; worker chunked separately)
 - [x] Render PDF from a workspace file path (page navigation, zoom in/out, fit width)
-- [x] Side-panel preview (open a `.pdf` from the explorer → renders in the PDF panel); `pdfPreviewMode` tab-mode + setting wired in **M10**
+- [x] Side-panel preview (open a `.pdf` from the explorer → renders in the preview panel)
 - [x] **Tests**
   - [x] Frontend: preview store (open/close/remember view state) + zoom/page helpers (11 tests)
   - [~] Viewer canvas rendering + page-count verified via `tauri dev` smoke (pdf.js needs a real worker/canvas)
@@ -178,7 +178,7 @@ Primary progress tracker for the lightweight, VS Code-inspired research IDE buil
 - [x] Use Monaco built-in grammars for supported languages
 - [x] Custom Monarch grammars for the ones Monaco lacks (Julia, LaTeX, TOML) — `monacoLanguages.ts` (Tree-sitter deferred; Monarch is sufficient for v1)
 - [x] Cover languages: Julia, Python, C#, C/C++, Rust, JavaScript/TypeScript, Markdown, LaTeX, JSON/YAML/TOML, Bash (via `languageForPath` + builtin/Monarch)
-- [x] Themes via CSS variables + Monaco theme: light, dark, high-contrast, VS Code-like default dark (`themeStore`; "dark" = the VS Code default dark)
+- [x] Themes via CSS variables + Monaco theme: dark (VS Code-like default), light, and high contrast (`themeStore`; persisted ids: `dark`, `light`, `hc`)
 - [x] Live theme switching via command palette ("Cycle Color Theme" / "Color Theme: …"); `theme` setting persistence in **M10**
 - [x] **Tests**
   - [x] Frontend: language detected from file extension maps to correct grammar (incl. julia/latex/toml)
@@ -228,7 +228,7 @@ Primary progress tracker for the lightweight, VS Code-inspired research IDE buil
 - [x] Open resulting PDF in the preview on success (`deriveOutputPdf` derives the output name)
 - [x] Surface build output/errors in the bottom-panel Output tab (stdout/stderr + exit code)
 - [x] **Tests**
-  - [x] Frontend: `renderMarkdown` (heading/strong/HTML-escaping), `deriveOutputPdf` (5), `MarkdownView` render + placeholder
+  - [x] Frontend: `renderMarkdown` (heading/strong/HTML-escaping), `deriveOutputPdf` (5), `MarkdownView` render + empty state
   - [x] Rust: `run_build` shares the unit-tested process-streaming path (resolve/args covered)
   - [~] Live latexmk build + open-pdf verified via `tauri dev` smoke (needs a TeX toolchain installed)
 
@@ -250,8 +250,8 @@ Primary progress tracker for the lightweight, VS Code-inspired research IDE buil
 
 A feature or milestone is DONE only when ALL of the following hold:
 
-- [ ] **Compiles** — `cargo build` and the Vite/TypeScript build succeed with no errors
-- [ ] **Runs** — the Tauri app launches and the feature is reachable in the running app
-- [ ] **Tests pass** — Vitest + React Testing Library and `cargo test` are green (every feature ships with tests)
-- [ ] **No known bugs** — no open known defects for the delivered scope (no-bug policy)
-- [ ] **Docs updated** — ARCHITECTURE.md, ROADMAP.md, KEYBINDINGS.md, SETTINGS_SCHEMA.md, RISKS.md, and this TRACKER.md reflect the change
+- [x] **Compiles** — `cargo build` and the Vite/TypeScript build succeed with no errors
+- [x] **Runs** — the Tauri app launches and the feature is reachable in the running app
+- [x] **Tests pass** — Vitest + React Testing Library and `cargo test` are green (every feature ships with tests)
+- [x] **No known bugs** — no open known defects for the delivered scope (no-bug policy)
+- [x] **Docs updated** — ARCHITECTURE.md, ROADMAP.md, KEYBINDINGS.md, SETTINGS_SCHEMA.md, RISKS.md, and this TRACKER.md reflect the change

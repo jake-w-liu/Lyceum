@@ -15,6 +15,15 @@ describe("previewStore", () => {
     expect(usePreviewStore.getState().pdfPath).toBe("/proj/paper.pdf");
   });
 
+  it("openImage sets the imagePath and clears other preview kinds", () => {
+    usePreviewStore.getState().openPdf("/proj/paper.pdf");
+    usePreviewStore.getState().openImage("/proj/figure.png");
+
+    expect(usePreviewStore.getState().imagePath).toBe("/proj/figure.png");
+    expect(usePreviewStore.getState().pdfPath).toBeNull();
+    expect(usePreviewStore.getState().markdownPath).toBeNull();
+  });
+
   it("closePdf nulls pdfPath but keeps prior viewState", () => {
     usePreviewStore.getState().openPdf("/proj/paper.pdf");
     usePreviewStore
@@ -28,6 +37,15 @@ describe("previewStore", () => {
       page: 3,
       zoom: 1.5,
     });
+  });
+
+  it("closePreview clears all active preview paths", () => {
+    usePreviewStore.getState().openImage("/proj/figure.jpg");
+    usePreviewStore.getState().closePreview();
+
+    expect(usePreviewStore.getState().pdfPath).toBeNull();
+    expect(usePreviewStore.getState().markdownPath).toBeNull();
+    expect(usePreviewStore.getState().imagePath).toBeNull();
   });
 
   it("setViewState stores per path and entries for other paths coexist", () => {

@@ -4,16 +4,22 @@
 
 import { Suspense, lazy } from "react";
 import { isMac } from "../hooks/useLayoutKeybindings";
+import {
+  isHtmlPath,
+  isInlinePreviewPath,
+  isMarkdownPath,
+} from "../lib/fileTypes";
 import { useEditorStore } from "../state/editorStore";
 import { useLayoutStore } from "../state/layoutStore";
 import { TabBar } from "./TabBar";
-
-const MARKDOWN_RE = /\.(md|markdown)$/i;
 
 // Lazy so the Monaco bundle + workers load only once a document is opened.
 const MonacoEditor = lazy(() => import("./MonacoEditor"));
 const MarkdownView = lazy(() =>
   import("./MarkdownView").then((m) => ({ default: m.MarkdownView })),
+);
+const HtmlPreview = lazy(() =>
+  import("./HtmlPreview").then((m) => ({ default: m.HtmlPreview })),
 );
 
 function Welcome() {
@@ -46,9 +52,11 @@ export function EditorArea() {
   const hasDocs = useEditorStore((s) => s.docs.length > 0);
   const activePath = useEditorStore((s) => s.activePath);
   const editorPreview = useLayoutStore((s) => s.editorPreview);
-  // Preview replaces the editor view in place — only for the active Markdown doc.
+  // Preview replaces the editor view in place for supported text preview types.
   const showPreview =
-    editorPreview && !!activePath && MARKDOWN_RE.test(activePath);
+    editorPreview && !!activePath && isInlinePreviewPath(activePath);
+  const previewLabel =
+    activePath && isHtmlPath(activePath) ? "HTML preview" : "Markdown preview";
 
   return (
     <section className="editor-area" aria-label="Editor">
@@ -64,11 +72,15 @@ export function EditorArea() {
               <MonacoEditor />
             </Suspense>
             {showPreview && activePath && (
-              <div className="editor-preview-overlay" aria-label="Markdown preview">
+              <div className="editor-preview-overlay" aria-label={previewLabel}>
                 <Suspense
                   fallback={<div className="editor-loading">Loading preview…</div>}
                 >
-                  <MarkdownView key={activePath} path={activePath} />
+                  {isMarkdownPath(activePath) ? (
+                    <MarkdownView key={activePath} path={activePath} />
+                  ) : (
+                    <HtmlPreview key={activePath} path={activePath} />
+                  )}
                 </Suspense>
               </div>
             )}

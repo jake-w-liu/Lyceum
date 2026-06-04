@@ -1,7 +1,7 @@
 // Global workbench layout state (Zustand).
 //
 // This store owns the visibility and sizing of the shell regions: sidebar,
-// bottom panel, and the right-side PDF preview panel, plus which activity-bar
+// bottom panel, and the right-side preview panel, plus which activity-bar
 // view and which bottom-panel tab is active. It is intentionally UI-only;
 // editor/document state lives elsewhere in later milestones.
 //
@@ -12,10 +12,7 @@ import { create } from "zustand";
 
 export type ActivityView =
   | "explorer"
-  | "search"
-  | "source-control"
-  | "run"
-  | "extensions";
+  | "search";
 
 export type BottomTab = "terminal" | "problems" | "output";
 
@@ -40,9 +37,9 @@ export interface LayoutData {
   pdfPanelVisible: boolean;
   pdfPanelWidth: number;
   /**
-   * When true, the editor area renders the rendered Markdown preview in place of
-   * the source editor (for the active Markdown document). It replaces the editor
-   * view rather than opening the right-side panel; only applies to .md files.
+   * When true, the editor area renders an inline source preview in place of the
+   * source editor (currently Markdown and HTML). It replaces the editor view
+   * rather than opening the right-side panel.
    */
   editorPreview: boolean;
 }

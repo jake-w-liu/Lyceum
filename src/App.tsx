@@ -87,7 +87,7 @@ export default function App() {
           <>
             <Resizer
               orientation="vertical"
-              ariaLabel="Resize PDF preview"
+              ariaLabel="Resize preview"
               onDelta={(dx) => {
                 const { pdfPanelWidth, setPdfPanelWidth } =
                   useLayoutStore.getState();

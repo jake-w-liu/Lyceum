@@ -29,7 +29,7 @@ Every milestone below is constrained by these decisions. No milestone may introd
   shortcuts to command ids. Keybindings persisted as JSON. Settings persisted as JSON in the OS
   app-config dir via Tauri.
 - **Testing:** Vitest + React Testing Library for the frontend; `cargo test` for Rust.
-- **Performance:** lazy-load Monaco, PDF.js, terminal, and LSP servers. No extension marketplace,
+- **Performance:** lazy-load Monaco, PDF.js/image previews, terminal, and LSP servers. No extension marketplace,
   no Electron, no background indexing in v1.
 
 ## No-bug policy and the compile-and-run rule
@@ -196,24 +196,26 @@ planned but not yet started. This roadmap is the agreed plan of record.
 
 ---
 
-## M6 — PDF.js viewer
+## M6 — PDF.js and image viewer
 
-**Goal:** Preview PDF files inside the IDE.
+**Goal:** Preview PDF and common browser image files inside the IDE.
 
 **Scope:**
 - Lazy-load PDF.js (`pdfjs-dist`); render PDFs to a canvas with page navigation and zoom.
-- Open PDFs either as a tab or in a side panel per the `pdfPreviewMode` setting (`tab|sidePanel`).
-- Wire `Cmd/Ctrl+Shift+V` to open PDF preview for the active/selected PDF.
-- IPC to read PDF bytes from disk.
+- Open PDFs/images in the right-side preview panel.
+- Wire `Cmd/Ctrl+Shift+V` to open preview for the active/selected PDF or image.
+- IPC to read preview bytes from disk.
 
 **Done when:**
 - Opening a `.pdf` renders the document with working page navigation and zoom.
-- `pdfPreviewMode` selects tab vs. side-panel placement.
+- Opening a `.png`, `.jpg`/`.jpeg`, `.gif`, `.webp`, `.bmp`, `.avif`, `.ico`, or `.svg`
+  renders the image without reading it as text.
 - `Cmd/Ctrl+Shift+V` opens the preview.
 
 **Tests that must pass:**
 - Vitest: the PDF viewer lazy-loads PDF.js and renders a mocked document; navigation updates the page.
-- Rust: PDF-bytes read command returns file contents and handles missing files.
+- Vitest: image previews read bytes, create typed Blob URLs, and revoke them on cleanup.
+- Rust: bytes read command returns file contents and handles missing files.
 
 ---
 
@@ -224,7 +226,7 @@ planned but not yet started. This roadmap is the agreed plan of record.
 **Scope:**
 - Use Monaco built-in grammars first for: Python, C#, C/C++, Rust, JavaScript/TypeScript, Markdown,
   JSON/YAML/TOML, Bash. Add Tree-sitter only where Monaco is missing/weak — notably **Julia** and **LaTeX**.
-- Implement themes: light, dark, high-contrast, and a VS Code-like default dark, driven by CSS variables
+- Implement themes: dark (VS Code-like default), light, and high contrast, driven by CSS variables
   and Monaco theme definitions kept in sync.
 - Wire the `theme` setting and editor appearance settings (`fontFamily`, `fontSize`, `lineHeight`,
   `ligatures`, `tabSize`, `wordWrap`, `minimap`, `lineNumbers`).
@@ -295,38 +297,40 @@ planned but not yet started. This roadmap is the agreed plan of record.
 - Persist the keybinding map as JSON (built on M4's registry).
 - Implement all settings keys: `theme`, `fontFamily`, `fontSize`, `lineHeight`, `ligatures`, `tabSize`,
   `wordWrap`, `shellPath`, `terminalCwdBehavior` (`workspaceRoot|currentFileDir`), `juliaPath`,
-  `latexBuildCommand` (e.g. `latexmk -pdf main.tex`), `pdfPreviewMode` (`tab|sidePanel`), `autosave`,
-  `restoreWorkspaceOnStartup`, `minimap`, `lineNumbers`.
-- Restore workspace (open folder + open tabs + layout) on startup when `restoreWorkspaceOnStartup` is on.
+  `latexBuildCommand` (e.g. `latexmk -pdf main.tex`), `restoreWorkspaceOnStartup`, `minimap`,
+  `lineNumbers`.
+- Restore the last opened folder on startup when `restoreWorkspaceOnStartup` is on.
 
 **Done when:**
 - Settings and keybindings persist across restarts and reload correctly with defaults for missing keys.
-- With `restoreWorkspaceOnStartup` enabled, the previous folder, tabs, and layout are restored.
+- With `restoreWorkspaceOnStartup` enabled, the previous folder is restored.
 - Changing any setting takes effect and survives a restart.
 
 **Tests that must pass:**
 - Rust: settings/keybindings read/write to the app-config dir round-trip; defaults applied for missing keys.
 - Vitest: the settings store loads/saves all keys and applies defaults; workspace-restore reconstructs
-  open tabs and layout from persisted state.
+  the last folder from persisted state.
 
 ---
 
-## M11 — Markdown/LaTeX build-and-preview workflow
+## M11 — Markdown/HTML/LaTeX preview workflow
 
-**Goal:** Build and preview Markdown and LaTeX documents.
+**Goal:** Preview Markdown/HTML documents and build/preview LaTeX outputs.
 
 **Scope:**
 - Markdown: live rendered preview; `Cmd/Ctrl+Shift+V` opens the preview.
+- HTML: rendered preview in a sandboxed iframe; `Cmd/Ctrl+Shift+V` opens the preview.
 - LaTeX: run `latexBuildCommand` (e.g. `latexmk -pdf main.tex`) via the backend; on success open the
   resulting PDF in the M6 PDF.js viewer.
 - Surface build output/errors in the terminal/bottom panel.
 
 **Done when:**
-- `Cmd/Ctrl+Shift+V` shows a Markdown preview that updates as the document changes.
+- `Cmd/Ctrl+Shift+V` shows a Markdown or HTML preview that updates as the document changes.
 - Running the LaTeX build produces a PDF and opens it in the PDF viewer; build errors are visible.
 
 **Tests that must pass:**
 - Vitest: Markdown preview renders source to expected output and updates on change.
+- Vitest: HTML preview builds a sandboxed iframe document with local asset resolution.
 - Rust: the LaTeX build command runs `latexBuildCommand` with correct arguments and reports
   success/failure and the output PDF path.
 
@@ -337,7 +341,7 @@ planned but not yet started. This roadmap is the agreed plan of record.
 **Goal:** Meet performance constraints and produce distributable builds.
 
 **Scope:**
-- Verify and enforce lazy-loading of Monaco, PDF.js, the terminal, and LSP servers; confirm no
+- Verify and enforce lazy-loading of Monaco, PDF.js/image preview, the terminal, and LSP servers; confirm no
   background indexing and no extension marketplace.
 - Profile startup and editor responsiveness; trim bundle size and defer heavy work.
 - Configure Tauri packaging for target platforms (macOS / Windows / Linux); produce release artifacts.

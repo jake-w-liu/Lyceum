@@ -4,6 +4,8 @@ import { act, render, waitFor } from "@testing-library/react";
 vi.mock("../lib/ipc", () => ({ readFile: vi.fn(async () => "file contents") }));
 import { readFile } from "../lib/ipc";
 import { initialEditorData, useEditorStore } from "../state/editorStore";
+import { initialLayoutData, useLayoutStore } from "../state/layoutStore";
+import { initialPreviewData, usePreviewStore } from "../state/previewStore";
 import {
   initialWorkspaceData,
   useWorkspaceStore,
@@ -18,6 +20,8 @@ function Harness() {
 beforeEach(() => {
   useWorkspaceStore.setState(initialWorkspaceData, false);
   useEditorStore.setState(initialEditorData, false);
+  usePreviewStore.setState(initialPreviewData, false);
+  useLayoutStore.setState(initialLayoutData, false);
   vi.mocked(readFile).mockClear();
 });
 
@@ -38,5 +42,36 @@ describe("useOpenFileBridge", () => {
     expect(doc.language).toBe("python");
     expect(readFile).toHaveBeenCalledWith("/w/main.py");
     expect(useWorkspaceStore.getState().pendingOpenPath).toBeNull();
+  });
+
+  it("opens PDFs in the preview panel without reading as text", async () => {
+    render(<Harness />);
+    act(() => {
+      useWorkspaceStore.getState().requestOpenFile("/w/paper.pdf");
+    });
+
+    await waitFor(() => {
+      expect(useWorkspaceStore.getState().pendingOpenPath).toBeNull();
+    });
+
+    expect(usePreviewStore.getState().pdfPath).toBe("/w/paper.pdf");
+    expect(useLayoutStore.getState().pdfPanelVisible).toBe(true);
+    expect(readFile).not.toHaveBeenCalled();
+  });
+
+  it("opens images in the preview panel without reading as text", async () => {
+    render(<Harness />);
+    act(() => {
+      useWorkspaceStore.getState().requestOpenFile("/w/Figure.SVG");
+    });
+
+    await waitFor(() => {
+      expect(useWorkspaceStore.getState().pendingOpenPath).toBeNull();
+    });
+
+    expect(usePreviewStore.getState().imagePath).toBe("/w/Figure.SVG");
+    expect(useLayoutStore.getState().pdfPanelVisible).toBe(true);
+    expect(useEditorStore.getState().docs).toHaveLength(0);
+    expect(readFile).not.toHaveBeenCalled();
   });
 });

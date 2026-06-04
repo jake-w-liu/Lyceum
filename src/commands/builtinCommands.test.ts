@@ -5,12 +5,16 @@ import { DEFAULT_KEYMAP } from "../keybindings/keybindingRegistry";
 import { initialTerminalData, useTerminalStore } from "../state/terminalStore";
 import { initialLayoutData, useLayoutStore } from "../state/layoutStore";
 import { initialThemeData, useThemeStore } from "../state/themeStore";
+import { initialEditorData, useEditorStore } from "../state/editorStore";
+import { initialPreviewData, usePreviewStore } from "../state/previewStore";
 
 beforeEach(() => {
   registerBuiltinCommands(); // idempotent; ensures the registry is populated
   useTerminalStore.setState(initialTerminalData, false);
   useLayoutStore.setState(initialLayoutData, false);
   useThemeStore.setState(initialThemeData, false);
+  useEditorStore.setState(initialEditorData, false);
+  usePreviewStore.setState(initialPreviewData, false);
 });
 
 describe("builtinCommands", () => {
@@ -32,6 +36,21 @@ describe("builtinCommands", () => {
     expect(useThemeStore.getState().theme).toBe("dark");
     await commandRegistry.execute("workbench.cycleTheme");
     expect(useThemeStore.getState().theme).toBe("light");
+  });
+
+  it("preview.open toggles inline preview for HTML documents", async () => {
+    useEditorStore.getState().openDoc({
+      path: "/w/index.html",
+      content: "<h1>hi</h1>",
+      language: "html",
+    });
+
+    await commandRegistry.execute("preview.open");
+
+    expect(useLayoutStore.getState().editorPreview).toBe(true);
+    expect(useLayoutStore.getState().pdfPanelVisible).toBe(false);
+    expect(usePreviewStore.getState().pdfPath).toBeNull();
+    expect(usePreviewStore.getState().imagePath).toBeNull();
   });
 
   it("every default keybinding resolves to a registered command", () => {

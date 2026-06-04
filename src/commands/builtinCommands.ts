@@ -24,6 +24,7 @@ import { runEditorAction } from "../lib/editorBridge";
 import { useTreeStore } from "../state/treeStore";
 import { useSettingsStore } from "../state/settingsStore";
 import { writePty } from "../lib/terminal";
+import { isImagePath, isInlinePreviewPath, isPdfPath } from "../lib/fileTypes";
 
 let registered = false;
 
@@ -125,13 +126,14 @@ export function registerBuiltinCommands(): void {
     run: () => {
       const doc = getActiveDoc(useEditorStore.getState());
       const preview = usePreviewStore.getState();
-      const path = doc?.path.toLowerCase() ?? "";
-      if (doc && (path.endsWith(".md") || path.endsWith(".markdown"))) {
-        // Markdown previews in place (replaces the editor view), not in the
-        // side panel.
+      if (doc && isInlinePreviewPath(doc.path)) {
+        // Markdown/HTML previews render in place, replacing the editor view.
         layout().toggleEditorPreview();
-      } else if (doc && path.endsWith(".pdf")) {
+      } else if (doc && isPdfPath(doc.path)) {
         preview.openPdf(doc.path);
+        layout().setPdfPanelVisible(true);
+      } else if (doc && isImagePath(doc.path)) {
+        preview.openImage(doc.path);
         layout().setPdfPanelVisible(true);
       } else {
         layout().togglePdfPanel();

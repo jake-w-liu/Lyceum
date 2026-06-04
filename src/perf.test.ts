@@ -14,14 +14,16 @@ describe("lazy loading keeps heavy deps out of the initial bundle", () => {
     expect(editorArea).toMatch(
       /lazy\(\s*\(\)\s*=>\s*import\("\.\/MonacoEditor"\)/,
     );
+    expect(editorArea).toMatch(/lazy\([\s\S]*?import\("\.\/HtmlPreview"\)/);
   });
 
   it("the terminal (xterm) is lazy-loaded from the bottom panel", () => {
     expect(bottomPanel).toMatch(/lazy\([\s\S]*?import\("\.\/TerminalPanel"\)/);
   });
 
-  it("the PDF viewer and Markdown view are lazy-loaded from the preview panel", () => {
+  it("preview viewers are lazy-loaded from the preview panel", () => {
     expect(pdfPanel).toMatch(/lazy\([\s\S]*?import\("\.\/PdfViewer"\)/);
+    expect(pdfPanel).toMatch(/lazy\([\s\S]*?import\("\.\/ImageViewer"\)/);
     expect(pdfPanel).toMatch(/lazy\([\s\S]*?import\("\.\/MarkdownView"\)/);
   });
 });

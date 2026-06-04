@@ -1,6 +1,6 @@
 // Right-side preview panel (M6 + M11). Renders the lazily-loaded pdf.js viewer
-// for a PDF, or the live Markdown preview for a .md file, or a placeholder.
-// Both viewers are lazy so pdf.js / markdown-it stay out of the initial bundle.
+// for a PDF, an image preview, the live Markdown preview for a .md file, or a
+// placeholder. Viewers are lazy so heavy deps stay out of the initial bundle.
 
 import { Suspense, lazy } from "react";
 import { Icon } from "./Icon";
@@ -9,6 +9,9 @@ import { usePreviewStore } from "../state/previewStore";
 import { baseName } from "../state/workspaceStore";
 
 const PdfViewer = lazy(() => import("./PdfViewer"));
+const ImageViewer = lazy(() =>
+  import("./ImageViewer").then((m) => ({ default: m.ImageViewer })),
+);
 const MarkdownView = lazy(() =>
   import("./MarkdownView").then((m) => ({ default: m.MarkdownView })),
 );
@@ -18,8 +21,11 @@ export function PdfPanel() {
   const togglePdfPanel = useLayoutStore((s) => s.togglePdfPanel);
   const pdfPath = usePreviewStore((s) => s.pdfPath);
   const markdownPath = usePreviewStore((s) => s.markdownPath);
+  const imagePath = usePreviewStore((s) => s.imagePath);
   const title = pdfPath
     ? baseName(pdfPath)
+    : imagePath
+      ? baseName(imagePath)
     : markdownPath
       ? baseName(markdownPath)
       : "Preview";
@@ -45,6 +51,10 @@ export function PdfPanel() {
         <Suspense fallback={<div className="pdf-message">Loading PDF…</div>}>
           <PdfViewer key={pdfPath} path={pdfPath} />
         </Suspense>
+      ) : imagePath ? (
+        <Suspense fallback={<div className="pdf-message">Loading image…</div>}>
+          <ImageViewer key={imagePath} path={imagePath} />
+        </Suspense>
       ) : markdownPath ? (
         <Suspense fallback={<div className="pdf-message">Loading…</div>}>
           <MarkdownView key={markdownPath} path={markdownPath} />
@@ -52,7 +62,7 @@ export function PdfPanel() {
       ) : (
         <div className="panel-body">
           <div className="placeholder">
-            Open a Markdown or PDF file, then run “Open Preview”
+            Open a Markdown, PDF, or image file, then run “Open Preview”
             (⌘/Ctrl+Shift+V).
           </div>
         </div>

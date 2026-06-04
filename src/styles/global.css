@@ -360,6 +360,13 @@ kbd {
   border-bottom: 1px solid var(--border);
   color: var(--fg-muted);
   font-size: 12px;
+  overflow: hidden;
+}
+
+.tab-list {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
   overflow-x: auto;
 }
 
@@ -370,6 +377,7 @@ kbd {
 
 /* Editor tabs (M3) */
 .tab {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   height: 100%;
@@ -420,12 +428,12 @@ kbd {
 /* Right-aligned editor-title action (e.g. Markdown Preview), VS Code-style. */
 .tab-action {
   flex: 0 0 auto;
-  margin-left: auto;
   align-self: center;
   display: flex;
   align-items: center;
   gap: 5px;
   height: 22px;
+  margin-left: 8px;
   margin-right: 6px;
   padding: 0 8px;
   background: transparent;
@@ -464,7 +472,7 @@ kbd {
   color: var(--fg-muted);
 }
 
-/* In-place Markdown preview: covers the (still-mounted) editor host. */
+/* In-place source preview: covers the (still-mounted) editor host. */
 .editor-preview-overlay {
   position: absolute;
   inset: 0;
@@ -724,7 +732,7 @@ kbd {
   height: 100%;
 }
 
-/* Right-side PDF preview panel */
+/* Right-side preview panel */
 .pdf-panel {
   flex: 0 0 auto;
   display: flex;
@@ -783,6 +791,25 @@ kbd {
   padding-left: 12px;
   border-left: 3px solid var(--border);
   color: var(--fg-muted);
+}
+
+/* HTML preview */
+.html-preview,
+.html-preview-frame {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: #ffffff;
+}
+
+.html-preview-frame {
+  display: block;
+  border: 0;
+}
+
+.html-preview-missing {
+  padding: 16px 22px;
+  color: var(--fg);
 }
 
 /* Output panel (M8) */
@@ -905,6 +932,35 @@ kbd {
   font-size: 12px;
   background: rgba(244, 135, 113, 0.12);
   border-bottom: 1px solid rgba(244, 135, 113, 0.4);
+}
+
+/* Image preview */
+.image-viewer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.image-canvas-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  background: #2f3336;
+}
+
+.image-preview {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
 }
 
 /* Status bar */

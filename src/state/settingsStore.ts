@@ -4,7 +4,6 @@ import { create } from "zustand";
 export type ThemeId = "dark" | "light" | "hc";
 export type WordWrap = "off" | "on";
 export type TerminalCwdBehavior = "workspaceRoot" | "currentFileDir";
-export type PdfPreviewMode = "tab" | "sidePanel";
 
 export interface Settings {
   version: number;
@@ -19,8 +18,6 @@ export interface Settings {
   terminalCwdBehavior: TerminalCwdBehavior;
   juliaPath: string;
   latexBuildCommand: string;
-  pdfPreviewMode: PdfPreviewMode;
-  autosave: boolean;
   restoreWorkspaceOnStartup: boolean;
   minimap: boolean;
   lineNumbers: boolean;
@@ -39,8 +36,6 @@ export const DEFAULT_SETTINGS: Settings = {
   terminalCwdBehavior: "workspaceRoot",
   juliaPath: "",
   latexBuildCommand: "latexmk -pdf main.tex",
-  pdfPreviewMode: "sidePanel",
-  autosave: false,
   restoreWorkspaceOnStartup: true,
   minimap: false,
   lineNumbers: true,
@@ -52,7 +47,6 @@ const TERMINAL_CWD_BEHAVIORS: TerminalCwdBehavior[] = [
   "workspaceRoot",
   "currentFileDir",
 ];
-const PDF_PREVIEW_MODES: PdfPreviewMode[] = ["tab", "sidePanel"];
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -110,15 +104,6 @@ export function mergeSettings(partial: unknown): Settings {
   }
   if (typeof p.latexBuildCommand === "string") {
     out.latexBuildCommand = p.latexBuildCommand;
-  }
-  if (
-    typeof p.pdfPreviewMode === "string" &&
-    PDF_PREVIEW_MODES.includes(p.pdfPreviewMode as PdfPreviewMode)
-  ) {
-    out.pdfPreviewMode = p.pdfPreviewMode as PdfPreviewMode;
-  }
-  if (typeof p.autosave === "boolean") {
-    out.autosave = p.autosave;
   }
   if (typeof p.restoreWorkspaceOnStartup === "boolean") {
     out.restoreWorkspaceOnStartup = p.restoreWorkspaceOnStartup;

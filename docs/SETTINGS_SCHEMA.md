@@ -13,7 +13,7 @@ wrappers in `src/lib/`). Settings are loaded once on startup, validated, and
 applied to the relevant Zustand stores (editor, terminal, layout). Persistence
 itself lands with **M10 (Settings persistence + workspace restore)**, but
 several keys are consumed by earlier milestones (theming in M7, terminal in M5,
-Julia workflow in M8, LaTeX/preview in M6/M11).
+Julia workflow in M8, LaTeX in M11).
 
 ---
 
@@ -25,10 +25,9 @@ Julia workflow in M8, LaTeX/preview in M6/M11).
   [§5 Versioning & Migration](#5-versioning--migration).
 - Missing keys fall back to their documented default. A user only needs to
   specify the keys they wish to override.
-- Unknown keys are preserved on read and written back unchanged when possible
-  (forward-compatibility for files written by a newer build); they are otherwise
-  ignored.
-- Path-valued keys may use `~` for the home directory; the backend expands it.
+- Unknown keys are ignored on load and are not written back by this build.
+- Path-valued keys must be explicit paths; shell expansion such as `~` is not
+  performed by settings validation.
 - Empty string (`""`) on a path-valued key means "resolve automatically"
   (default shell / `julia` on `PATH`), never "the current directory".
 
@@ -41,32 +40,29 @@ The current schema version is **`1`**.
 | Key | Type | Default | Allowed values | Description |
 |-----|------|---------|----------------|-------------|
 | `version` | integer | `1` | positive integer | Reserved schema-version field used for migration. Not user-facing; managed by the app. |
-| `theme` | string | `"vscode-dark"` | `"light"`, `"dark"`, `"high-contrast"`, `"vscode-dark"` | Active color theme. `vscode-dark` is the VS Code-like default dark theme. Drives both the app chrome (CSS custom properties) and the Monaco editor theme (M7). |
-| `fontFamily` | string | `"SF Mono, Menlo, Consolas, 'Courier New', monospace"` | any valid CSS `font-family` string | Font stack used by the Monaco editor and the integrated terminal (xterm.js). |
-| `fontSize` | number | `13` | integer 6–72 (px) | Editor and terminal font size in pixels. |
+| `theme` | string | `"dark"` | `"dark"`, `"light"`, `"hc"` | Active color theme. `dark` is the VS Code-like default dark theme. Drives both the app chrome (CSS custom properties) and the Monaco editor theme (M7). |
+| `fontFamily` | string | `""` | any valid CSS `font-family` string, or `""` | Monaco editor font family. `""` keeps Monaco's default font stack. |
+| `fontSize` | number | `13` | number 8–40 (px) | Monaco editor font size in pixels. |
 | `lineHeight` | number | `0` | `0`, or a number ≥ `8` | Editor line height. `0` means "derive automatically from `fontSize`" (Monaco default). A value ≥ 8 is an absolute pixel line height; a value > 0 and < 8 is treated as a multiplier of `fontSize`. |
 | `ligatures` | boolean | `false` | `true`, `false` | Enable font ligatures (Monaco `fontLigatures`). Only visible with a ligature-capable `fontFamily`. |
-| `tabSize` | number | `4` | integer 1–16 | Number of spaces a tab is rendered/inserted as in the editor (Monaco `tabSize`). |
-| `wordWrap` | string | `"off"` | `"off"`, `"on"`, `"wordWrapColumn"`, `"bounded"` | Editor soft-wrap mode, mapped directly to Monaco's `wordWrap` option. |
+| `tabSize` | number | `2` | number 1–8 | Number of spaces a tab is rendered/inserted as in the editor (Monaco `tabSize`). |
+| `wordWrap` | string | `"off"` | `"off"`, `"on"` | Editor soft-wrap mode, mapped directly to Monaco's `wordWrap` option. |
 | `shellPath` | string | `""` | absolute path to a shell executable, or `""` | Shell launched by the integrated terminal (real PTY via the `portable-pty` crate, M5). `""` means "use the OS default shell" (`$SHELL` on macOS/Linux; the configured default on Windows). |
 | `terminalCwdBehavior` | string | `"workspaceRoot"` | `"workspaceRoot"`, `"currentFileDir"` | Working directory used when opening a new terminal: the opened workspace root, or the directory of the active file. |
 | `juliaPath` | string | `""` | absolute path to the `julia` executable, or `""` | Julia binary used for run-file / run-selection (M8) and for launching LanguageServer.jl (M9). `""` means "resolve `julia` from `PATH`". |
 | `latexBuildCommand` | string | `"latexmk -pdf main.tex"` | any shell command string | Command run for the Markdown/LaTeX build-and-preview workflow (M11). Executed in the workspace root via the process/PTY layer. |
-| `pdfPreviewMode` | string | `"tab"` | `"tab"`, `"sidePanel"` | Where PDF.js renders a previewed PDF (M6): in a dedicated editor tab, or in a side panel next to the editor. |
-| `autosave` | string | `"off"` | `"off"`, `"afterDelay"`, `"onFocusChange"` | Automatic save behavior. `afterDelay` saves dirty files after a short idle delay; `onFocusChange` saves when the editor/tab loses focus. |
-| `restoreWorkspaceOnStartup` | boolean | `true` | `true`, `false` | When `true`, the last opened folder, open tabs, and panel layout are restored on launch (M10). |
+| `restoreWorkspaceOnStartup` | boolean | `true` | `true`, `false` | When `true`, the last opened folder is restored on launch (M10). Open editor tabs and layout restore are deferred. |
 | `minimap` | boolean | `false` | `true`, `false` | Show the Monaco minimap (`minimap.enabled`). |
-| `lineNumbers` | string | `"on"` | `"on"`, `"off"`, `"relative"` | Editor line-number gutter mode, mapped to Monaco's `lineNumbers` option. |
+| `lineNumbers` | boolean | `true` | `true`, `false` | Show or hide Monaco line numbers. |
 
 ### Notes on types and validation
 
 - `boolean` keys accept only the JSON literals `true` / `false`.
-- `number` keys must be JSON numbers; non-integer values for integer-only keys
-  (`fontSize`, `tabSize`) are rounded by the backend on load.
+- `number` keys must be JSON numbers and are clamped to the documented range.
 - String enum keys are matched case-sensitively against their allowed values.
 - A value outside the allowed range or set is clamped/coerced to the nearest
-  valid value (or the default for enums) and a warning is logged. The file is
-  not silently rewritten unless a migration runs (see §5).
+  valid value (or the default for enums). The file is not silently rewritten
+  unless settings are later saved by the app.
 
 ---
 
@@ -78,22 +74,20 @@ installation writes exactly this file.
 ```json
 {
   "version": 1,
-  "theme": "vscode-dark",
-  "fontFamily": "SF Mono, Menlo, Consolas, 'Courier New', monospace",
+  "theme": "dark",
+  "fontFamily": "",
   "fontSize": 13,
   "lineHeight": 0,
   "ligatures": false,
-  "tabSize": 4,
+  "tabSize": 2,
   "wordWrap": "off",
   "shellPath": "",
   "terminalCwdBehavior": "workspaceRoot",
   "juliaPath": "",
   "latexBuildCommand": "latexmk -pdf main.tex",
-  "pdfPreviewMode": "tab",
-  "autosave": "off",
   "restoreWorkspaceOnStartup": true,
   "minimap": false,
-  "lineNumbers": "on"
+  "lineNumbers": true
 }
 ```
 
@@ -102,11 +96,10 @@ A user override file only needs the keys being changed, for example:
 ```json
 {
   "version": 1,
-  "theme": "high-contrast",
+  "theme": "hc",
   "fontSize": 15,
   "ligatures": true,
-  "juliaPath": "/usr/local/bin/julia",
-  "autosave": "afterDelay"
+  "juliaPath": "/usr/local/bin/julia"
 }
 ```
 
@@ -117,19 +110,22 @@ A user override file only needs the keys being changed, for example:
 Both `settings.json` and `keybindings.json` live in the Tauri **app config
 directory**, resolved at runtime via `app_config_dir()` on Tauri v2's path
 resolver. Tauri derives that directory from the bundle **identifier** in
-`src-tauri/tauri.conf.json`, which for this project is **`dev.lyceum.app`**. The
+`src-tauri/tauri.conf.json`, which for this project is **`dev.lyceum`**. The
 app config directory is therefore the OS config base joined with
-`dev.lyceum.app`:
+`dev.lyceum`:
 
 | OS | App config directory | Settings file | Keybindings file |
 |----|----------------------|---------------|------------------|
-| macOS | `~/Library/Application Support/dev.lyceum.app/` | `~/Library/Application Support/dev.lyceum.app/settings.json` | `~/Library/Application Support/dev.lyceum.app/keybindings.json` |
-| Windows | `%APPDATA%\dev.lyceum.app\` (i.e. `C:\Users\<user>\AppData\Roaming\dev.lyceum.app\`) | `%APPDATA%\dev.lyceum.app\settings.json` | `%APPDATA%\dev.lyceum.app\keybindings.json` |
-| Linux | `$XDG_CONFIG_HOME/dev.lyceum.app/` (defaults to `~/.config/dev.lyceum.app/`) | `$XDG_CONFIG_HOME/dev.lyceum.app/settings.json` | `$XDG_CONFIG_HOME/dev.lyceum.app/keybindings.json` |
+| macOS | `~/Library/Application Support/dev.lyceum/` | `~/Library/Application Support/dev.lyceum/settings.json` | `~/Library/Application Support/dev.lyceum/keybindings.json` |
+| Windows | `%APPDATA%\dev.lyceum\` (i.e. `C:\Users\<user>\AppData\Roaming\dev.lyceum\`) | `%APPDATA%\dev.lyceum\settings.json` | `%APPDATA%\dev.lyceum\keybindings.json` |
+| Linux | `$XDG_CONFIG_HOME/dev.lyceum/` (defaults to `~/.config/dev.lyceum/`) | `$XDG_CONFIG_HOME/dev.lyceum/settings.json` | `$XDG_CONFIG_HOME/dev.lyceum/keybindings.json` |
 
 > The directory name tracks the `identifier` field in `tauri.conf.json`. If that
 > identifier ever changes, these paths change with it; this document is the
 > source of truth for the mapping.
+
+Builds that used the earlier `dev.lyceum.app` identifier are read as a
+compatibility fallback on startup. New writes go to `dev.lyceum`.
 
 ### Read/write behavior
 

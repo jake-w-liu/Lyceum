@@ -1,6 +1,6 @@
 # Lyceum
 
-A lightweight, VS Code-inspired **research IDE** built with Tauri, with a Julia-first workflow. It pairs a focused, familiar editor layout (activity bar, sidebar, editor area, bottom panel, status bar) with a Monaco-based code editor, integrated terminal, syntax highlighting, PDF preview, and a generic LSP client. It is deliberately **not** a 1:1 VS Code clone — just a fast, focused editor for research work. All code is original and all dependencies are permissive open source; no VS Code source is copied.
+A lightweight, VS Code-inspired **research IDE** built with Tauri, with a Julia-first workflow. It pairs a focused, familiar editor layout (activity bar, sidebar, editor area, bottom panel, status bar) with a Monaco-based code editor, integrated terminal, syntax highlighting, Markdown/HTML/PDF/image preview, and a generic LSP client. It is deliberately **not** a 1:1 VS Code clone — just a fast, focused editor for research work. All code is original and all dependencies are permissive open source; no VS Code source is copied.
 
 ## Tech stack
 
@@ -9,7 +9,7 @@ A lightweight, VS Code-inspired **research IDE** built with Tauri, with a Julia-
 - **Frontend:** React 19 + TypeScript, built with Vite.
 - **Editor:** Monaco Editor (lazy-loaded).
 - **Terminal:** xterm.js in the frontend; a real PTY in the Rust backend via the `portable-pty` crate. Output is streamed over Tauri events; input is sent via Tauri commands.
-- **PDF preview:** PDF.js (`pdfjs-dist`, lazy-loaded).
+- **Preview:** Markdown and sandboxed HTML inline previews, PDF.js (`pdfjs-dist`, lazy-loaded), plus raw-byte image previews for common browser image formats.
 - **Syntax highlighting:** Monaco built-in grammars first; Tree-sitter only where a language is missing or weak (e.g. Julia, LaTeX).
 - **State management:** Zustand (small, simple stores). No Redux.
 - **Styling:** plain CSS with CSS custom properties for theming. No heavy UI framework.
@@ -54,8 +54,8 @@ notarization are configured per-platform and are treated as a post-v1 step.
 
 Startup stays fast because the heavy editors are code-split into lazy chunks and
 loaded only when first used — the **initial JS bundle is ~70 kB gzipped**, while
-Monaco, PDF.js, xterm.js, and markdown-it live in separate chunks fetched on
-demand. There is no Electron (the app uses the OS-native WebView via Tauri), no
+Monaco, PDF.js, image preview, xterm.js, and markdown-it live in separate chunks
+fetched on demand. There is no Electron (the app uses the OS-native WebView via Tauri), no
 extension marketplace, and no background indexing in v1. `src/perf.test.ts`
 guards the lazy-loading so it can't silently regress.
 
@@ -141,13 +141,13 @@ say **Ctrl**.
 | Alt/Option+Up/Down | Move line |
 | Shift+Alt/Option+Up/Down | Duplicate line |
 | Cmd/Ctrl+Enter | Run current file or selected code |
-| Cmd/Ctrl+Shift+V | Open Markdown/PDF preview |
+| Cmd/Ctrl+Shift+V | Open Markdown/HTML/PDF/image preview |
 | Esc | Close command palette / quick open / find box / modal panel |
 
 See [docs/KEYBINDINGS.md](docs/KEYBINDINGS.md) for the full reference.
 
 ## Settings keys
 
-Persisted as JSON in the OS app-config dir: `theme`, `fontFamily`, `fontSize`, `lineHeight`, `ligatures`, `tabSize`, `wordWrap`, `shellPath`, `terminalCwdBehavior` (`workspaceRoot` | `currentFileDir`), `juliaPath`, `latexBuildCommand` (e.g. `latexmk -pdf main.tex`), `pdfPreviewMode` (`tab` | `sidePanel`), `autosave`, `restoreWorkspaceOnStartup`, `minimap`, `lineNumbers`.
+Persisted as JSON in the OS app-config dir: `theme`, `fontFamily`, `fontSize`, `lineHeight`, `ligatures`, `tabSize`, `wordWrap`, `shellPath`, `terminalCwdBehavior` (`workspaceRoot` | `currentFileDir`), `juliaPath`, `latexBuildCommand` (e.g. `latexmk -pdf main.tex`), `restoreWorkspaceOnStartup`, `minimap`, `lineNumbers`.
 
-Themes: light, dark, high-contrast, and a VS Code-like default dark. See [docs/SETTINGS_SCHEMA.md](docs/SETTINGS_SCHEMA.md) for the full schema.
+Themes: `dark`, `light`, and `hc`. See [docs/SETTINGS_SCHEMA.md](docs/SETTINGS_SCHEMA.md) for the full schema.

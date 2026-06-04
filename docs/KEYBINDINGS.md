@@ -48,7 +48,7 @@ to `Cmd` on macOS and `Ctrl` on Windows/Linux.
 | Duplicate line up | `Shift+Option+Up` | `Shift+Alt+Up` | `editor.duplicateLineUp` | M3 |
 | Duplicate line down | `Shift+Option+Down` | `Shift+Alt+Down` | `editor.duplicateLineDown` | M3 |
 | Run current file or selection | `Cmd+Enter` | `Ctrl+Enter` | `editor.run` | M8 |
-| Open Markdown/PDF preview | `Cmd+Shift+V` | `Ctrl+Shift+V` | `preview.open` | M6 / M11 |
+| Open Markdown/HTML/PDF/image preview | `Cmd+Shift+V` | `Ctrl+Shift+V` | `preview.open` | M6 / M11 |
 | Close palette / quick open / find / modal | `Esc` | `Esc` | `workbench.dismiss` | M4 |
 
 ### Notes on specific bindings
@@ -59,9 +59,9 @@ to `Cmd` on macOS and `Ctrl` on Windows/Linux.
 - **`editor.run`** is context-aware: with an active selection it runs the selected code; with no
   selection it runs the current file. In the Julia-first workflow this routes to the Julia
   run-file / run-selection integration (M8). The `juliaPath` setting determines the interpreter.
-- **`preview.open`** opens the appropriate preview for the active file: Markdown/LaTeX preview
-  (M11) or PDF preview (M6, via PDF.js, lazy-loaded). The `pdfPreviewMode` setting
-  (`tab` | `sidePanel`) controls where the PDF preview is shown.
+- **`preview.open`** opens the appropriate preview for the active file: Markdown/LaTeX
+  preview (M11), sandboxed HTML preview, PDF preview (M6, via PDF.js, lazy-loaded),
+  or a raw-byte image preview for common browser image formats.
 - **`editor.goToDefinition` / `editor.findReferences`** are served by the generic JSON-RPC LSP
   client (M9). They require an active language server — Julia LanguageServer.jl first, then Python
   (pyright), then C# (csharp-ls / OmniSharp).

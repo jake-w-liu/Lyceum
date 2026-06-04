@@ -17,6 +17,30 @@ function configPath(name: string): Promise<string> {
   return invoke<string>("app_config_path", { name });
 }
 
+export function legacyConfigPath(path: string): string | null {
+  const match = path.match(/^(.*[/\\])dev\.lyceum([/\\][^/\\]+)$/);
+  if (!match) return null;
+  return `${match[1]}dev.lyceum.app${match[2]}`;
+}
+
+async function readConfigFile(name: string): Promise<string> {
+  const path = await configPath(name);
+  try {
+    return await readFile(path);
+  } catch (primaryError) {
+    const legacyPath = legacyConfigPath(path);
+    if (legacyPath) {
+      try {
+        return await readFile(legacyPath);
+      } catch {
+        // Keep the original error; callers already treat missing config as
+        // defaults, and the legacy path is only a migration convenience.
+      }
+    }
+    throw primaryError;
+  }
+}
+
 /** The on-disk settings.json path (used by the "Open Settings" command). */
 export function settingsFilePath(): Promise<string> {
   return configPath(SETTINGS_FILE);
@@ -24,7 +48,7 @@ export function settingsFilePath(): Promise<string> {
 
 export async function loadSettings(): Promise<void> {
   try {
-    const raw = await readFile(await configPath(SETTINGS_FILE));
+    const raw = await readConfigFile(SETTINGS_FILE);
     useSettingsStore.getState().replaceAll(mergeSettings(JSON.parse(raw)));
   } catch {
     // No settings file yet (or not in Tauri) — keep defaults.
@@ -35,7 +59,7 @@ export async function loadSettings(): Promise<void> {
 /** Load user keybindings.json (if present) and merge over the defaults. */
 export async function loadKeybindings(): Promise<void> {
   try {
-    const raw = JSON.parse(await readFile(await configPath("keybindings.json")));
+    const raw = JSON.parse(await readConfigFile("keybindings.json"));
     useKeymapStore.getState().setUserKeybindings(parseUserKeybindings(raw));
   } catch {
     // No user keybindings → defaults only.
@@ -67,7 +91,7 @@ async function saveLastWorkspace(path: string | null): Promise<void> {
 export async function restoreWorkspace(): Promise<void> {
   if (!useSettingsStore.getState().settings.restoreWorkspaceOnStartup) return;
   try {
-    const data = JSON.parse(await readFile(await configPath(WORKSPACE_FILE)));
+    const data = JSON.parse(await readConfigFile(WORKSPACE_FILE));
     if (data && typeof data.rootPath === "string") {
       useWorkspaceStore.getState().openWorkspace(data.rootPath);
     }

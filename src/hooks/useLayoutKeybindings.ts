@@ -71,7 +71,6 @@ export function useLayoutKeybindings(): void {
           s.showBottomTab("terminal");
           break;
         case "togglePreview":
-          // Real Markdown/PDF preview arrives in M6/M11; toggle the panel for now.
           s.togglePdfPanel();
           break;
       }

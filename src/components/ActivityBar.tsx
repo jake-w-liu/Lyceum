@@ -1,11 +1,12 @@
 // Vertical activity bar: the left-most strip of the workbench.
 //
-// Each top item selects an activity-bar view (Explorer, Search, etc.). Clicking
+// Each top item selects an activity-bar view (Explorer, Search). Clicking
 // the already-active view collapses the sidebar (VS Code behavior), handled by
-// the store's `selectView`. The bottom Settings button is a placeholder until
-// M10. Icons are decorative; the buttons carry the accessible labels.
+// the store's `selectView`. Icons are decorative; the buttons carry the
+// accessible labels.
 
 import { Icon, type IconName } from "./Icon";
+import { commandRegistry } from "../commands/commandRegistry";
 import { useLayoutStore, type ActivityView } from "../state/layoutStore";
 
 interface ViewItem {
@@ -17,9 +18,6 @@ interface ViewItem {
 const VIEWS: ViewItem[] = [
   { id: "explorer", label: "Explorer", icon: "explorer" },
   { id: "search", label: "Search", icon: "search" },
-  { id: "source-control", label: "Source Control", icon: "source-control" },
-  { id: "run", label: "Run and Debug", icon: "run" },
-  { id: "extensions", label: "Extensions", icon: "extensions" },
 ];
 
 export function ActivityBar() {
@@ -54,7 +52,8 @@ export function ActivityBar() {
             className="activity-bar-item"
             type="button"
             aria-label="Settings"
-            title="Settings (M10)"
+            title="Open Settings (JSON)"
+            onClick={() => void commandRegistry.execute("file.openSettings")}
           >
             <Icon name="settings" />
           </button>

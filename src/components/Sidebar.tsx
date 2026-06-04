@@ -1,7 +1,6 @@
 // Sidebar container for the workbench shell. Renders a header titled after the
 // active activity-bar view. For the Explorer view it shows the file tree once a
-// folder is opened (M2), or an "Open Folder" affordance otherwise; other views
-// remain placeholders until their milestones.
+// folder is opened (M2), or an "Open Folder" affordance otherwise.
 
 import type { ActivityView } from "../state/layoutStore";
 import { useLayoutStore } from "../state/layoutStore";
@@ -13,9 +12,6 @@ import { SearchView } from "./SearchView";
 const VIEW_TITLES: Record<ActivityView, string> = {
   explorer: "Explorer",
   search: "Search",
-  "source-control": "Source Control",
-  run: "Run and Debug",
-  extensions: "Extensions",
 };
 
 function ExplorerView() {
@@ -53,12 +49,8 @@ export function Sidebar() {
       <div className="sidebar-body">
         {activeView === "explorer" ? (
           <ExplorerView />
-        ) : activeView === "search" ? (
-          <SearchView />
         ) : (
-          <div className="sidebar-section placeholder">
-            <p>{title} — coming soon.</p>
-          </div>
+          <SearchView />
         )}
       </div>
     </aside>

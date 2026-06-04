@@ -1,13 +1,10 @@
 // Presentational SVG icon component. Renders a single, original line glyph
-// (or a filled glyph for "run") sized by `size`, colored via currentColor.
+// sized by `size`, colored via currentColor.
 import type { ReactNode } from "react";
 
 export type IconName =
   | "explorer"
   | "search"
-  | "source-control"
-  | "run"
-  | "extensions"
   | "settings"
   | "terminal"
   | "problems"
@@ -24,27 +21,6 @@ function glyph(name: IconName): ReactNode {
         <>
           <circle cx="10.5" cy="10.5" r="6" />
           <line x1="15" y1="15" x2="20" y2="20" />
-        </>
-      );
-    case "source-control":
-      return (
-        <>
-          <circle cx="6" cy="6" r="2.5" />
-          <circle cx="6" cy="18" r="2.5" />
-          <circle cx="18" cy="9" r="2.5" />
-          <path d="M6 8.5v7" />
-          <path d="M18 11.5v1.5a3 3 0 0 1-3 3H8.5" />
-        </>
-      );
-    case "run":
-      return <path d="M7 5l12 7-12 7z" fill="currentColor" stroke="none" />;
-    case "extensions":
-      return (
-        <>
-          <rect x="4" y="4" width="6.5" height="6.5" rx="1" />
-          <rect x="13.5" y="4" width="6.5" height="6.5" rx="1" />
-          <rect x="4" y="13.5" width="6.5" height="6.5" rx="1" />
-          <rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1" />
         </>
       );
     case "settings":

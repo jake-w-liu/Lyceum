@@ -73,28 +73,53 @@ describe("TabBar", () => {
     expect(within(cleanTab).queryByText("●")).not.toBeInTheDocument();
   });
 
-  it("toggles in-place preview when the Markdown Preview action is clicked", async () => {
+  it("toggles in-place preview when the Preview action is clicked", async () => {
     get().openDoc({ path: "/w/notes.md", content: "# hi", language: "markdown" });
     render(<TabBar />);
 
     expect(useLayoutStore.getState().editorPreview).toBe(false);
-    await userEvent.click(
-      screen.getByRole("button", { name: "Open Markdown Preview" }),
-    );
+    await userEvent.click(screen.getByRole("button", { name: "Open Preview" }));
     expect(useLayoutStore.getState().editorPreview).toBe(true);
 
-    // The action flips to "Show Markdown Source" and toggles preview back off.
-    await userEvent.click(
-      screen.getByRole("button", { name: "Show Markdown Source" }),
-    );
+    // The action flips to "Show Source" and toggles preview back off.
+    await userEvent.click(screen.getByRole("button", { name: "Show Source" }));
     expect(useLayoutStore.getState().editorPreview).toBe(false);
   });
 
-  it("hides the Preview action for non-Markdown files", () => {
+  it("shows the Preview action for HTML files", () => {
+    get().openDoc({
+      path: "/w/index.html",
+      content: "<h1>hi</h1>",
+      language: "html",
+    });
+    render(<TabBar />);
+
+    expect(screen.getByRole("button", { name: "Open Preview" })).toBeInTheDocument();
+  });
+
+  it("keeps the Preview action outside the scrollable tab list", () => {
+    for (let i = 0; i < 20; i++) {
+      get().openDoc({
+        path: `/w/file-${i}.ts`,
+        content: "",
+        language: "typescript",
+      });
+    }
+    get().openDoc({
+      path: "/w/index.html",
+      content: "<h1>hi</h1>",
+      language: "html",
+    });
+    const { container } = render(<TabBar />);
+
+    const action = screen.getByRole("button", { name: "Open Preview" });
+    const tabList = container.querySelector(".tab-list");
+    expect(tabList).not.toContainElement(action);
+  });
+
+  it("hides the Preview action for non-previewable files", () => {
     seed(); // .ts files
     render(<TabBar />);
-    expect(
-      screen.queryByRole("button", { name: "Open Markdown Preview" }),
-    ).toBeNull();
+    expect(screen.queryByRole("button", { name: "Open Preview" })).toBeNull();
   });
 });
