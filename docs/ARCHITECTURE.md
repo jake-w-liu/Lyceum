@@ -377,8 +377,13 @@ This satisfies `F12` (go to definition), `Shift+F12` (find references), and
 - **LaTeX compile/preview:** active `.tex` editor tabs expose Compile and
   Preview actions. Both save the buffer, retarget `latexBuildCommand` to that
   file's basename, run the command in the file's directory, and stream build
-  output to the Output panel. Compile leaves the source tab active after writing
-  the PDF; Preview opens the generated PDF as a viewer tab.
+  output to the Output panel. With the stock command unchanged, the Rust builder
+  discovers installed TeX tools using the same augmented PATH used for child
+  processes, deletes stale PDFs, and spawns the selected compiler directly
+  without a shell. Custom `latexBuildCommand` values still run through the OS
+  shell because they are user-authored shell commands. Compile leaves the source
+  tab active after writing the PDF; Preview opens the generated PDF as a viewer
+  tab.
 
 ---
 

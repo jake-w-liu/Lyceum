@@ -9,6 +9,7 @@ mod app_info;
 mod file_ops;
 mod fs_ops;
 mod julia;
+mod latex;
 mod lsp;
 mod menu;
 mod search;
@@ -67,6 +68,8 @@ pub fn run() {
             julia::run_build,
             julia::program_available,
             julia::run_cancel,
+            latex::resolve_latex_tools,
+            latex::run_latex_build,
             lsp::lsp_start,
             lsp::lsp_send,
             lsp::lsp_stop

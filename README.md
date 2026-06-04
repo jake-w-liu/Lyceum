@@ -22,7 +22,7 @@ A lightweight, VS Code-inspired **research IDE** built with Tauri, with a Julia-
 - **Node.js** (LTS) and npm — frontend toolchain and the Vite/Tauri CLI.
 - **Rust** (stable, edition 2021) with Cargo — Tauri backend. See the [Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/) for platform-specific system dependencies.
 - **Julia** (optional) — required only for the Julia run-file / run-selection workflow and Julia LanguageServer.jl support, not for building the app itself. Lyceum searches common macOS GUI-app tool paths such as `~/.juliaup/bin`, but `juliaPath` can also be set explicitly.
-- **TeX engine** (optional) — required only for LaTeX preview/build. Lyceum auto-selects an installed `latexmk`, `tectonic`, `pdflatex`, `xelatex`, or `lualatex` when the default build command is unchanged. Install a lightweight engine such as Tectonic (`brew install tectonic`) or a full TeX distribution such as MacTeX/BasicTeX, or set `latexBuildCommand` to a full compiler path.
+- **TeX engine** (optional) — required only for LaTeX preview/build. Lyceum's lightweight Rust builder auto-selects an installed `latexmk`, `tectonic`, `pdflatex`, `xelatex`, or `lualatex` when the default build command is unchanged. Custom commands still require the configured tool to exist.
 
 ## Install dependencies
 
@@ -163,8 +163,9 @@ See [docs/KEYBINDINGS.md](docs/KEYBINDINGS.md) for the full reference.
   (or run **Open Preview** from the command palette). Lyceum saves the current
   buffer, retargets `latexBuildCommand` to that file, runs it in the file's
   directory, and opens the produced PDF as a normal editor tab. With the stock
-  command (`latexmk -pdf main.tex`), Lyceum first checks for installed TeX tools
-  and can use `latexmk`, `tectonic`, `pdflatex`, `xelatex`, or `lualatex`.
+  command (`latexmk -pdf main.tex`), Lyceum's Rust builder checks for installed
+  TeX tools and can use `latexmk`, `tectonic`, `pdflatex`, `xelatex`, or
+  `lualatex`.
 - **Compile LaTeX:** open a `.tex` file and click the tab-bar **Compile** button
   (or run **Compile LaTeX** from the command palette). This runs the same real
   PDF build, removes the previous same-name `.pdf` first, writes the fresh

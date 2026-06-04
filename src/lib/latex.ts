@@ -2,50 +2,6 @@
 
 export const STOCK_LATEX_BUILD_COMMAND = "latexmk -pdf main.tex";
 
-type LatexTool = "latexmk" | "tectonic" | "pdflatex" | "xelatex" | "lualatex";
-
-export const LATEX_TOOL_ORDER: LatexTool[] = [
-  "latexmk",
-  "tectonic",
-  "pdflatex",
-  "xelatex",
-  "lualatex",
-];
-
-export function shouldAutoSelectLatexTool(buildCommand: string): boolean {
-  return canonicalShellCommand(buildCommand) === STOCK_LATEX_BUILD_COMMAND;
-}
-
-export function buildCommandForTexTool(tool: LatexTool, texPath: string): string {
-  const texArg = quoteShellArg(baseName(texPath));
-  switch (tool) {
-    case "latexmk":
-      return `latexmk -pdf ${texArg}`;
-    case "tectonic":
-      return `tectonic ${texArg}`;
-    case "pdflatex":
-    case "xelatex":
-    case "lualatex":
-      return `${tool} -interaction=nonstopmode -halt-on-error ${texArg}`;
-  }
-}
-
-export function selectLatexBuildCommand(
-  configuredCommand: string,
-  texPath: string,
-  availableTools: readonly string[],
-): string {
-  if (!shouldAutoSelectLatexTool(configuredCommand)) {
-    return buildCommandForTexPath(configuredCommand, texPath);
-  }
-  const selected = LATEX_TOOL_ORDER.find((tool) =>
-    availableTools.includes(tool),
-  );
-  return selected
-    ? buildCommandForTexTool(selected, texPath)
-    : buildCommandForTexPath(configuredCommand, texPath);
-}
-
 export function deriveOutputPdf(
   buildCommand: string,
   activeTexPath: string | null,
@@ -67,34 +23,10 @@ export function deriveOutputPdf(
   return null;
 }
 
-export function buildCommandForTexPath(
-  buildCommand: string,
-  texPath: string,
-): string {
-  const texArg = quoteShellArg(baseName(texPath));
-  const tokens = buildCommand.split(/\s+/).filter(Boolean);
-  let lastTexIndex = -1;
-  for (let i = tokens.length - 1; i >= 0; i--) {
-    if (stripShellQuotes(tokens[i]).toLowerCase().endsWith(".tex")) {
-      lastTexIndex = i;
-      break;
-    }
-  }
-  if (lastTexIndex >= 0) {
-    tokens[lastTexIndex] = texArg;
-    return tokens.join(" ");
-  }
-  return [...tokens, texArg].join(" ");
-}
-
 export function pdfPathForTexPath(texPath: string): string {
   const dir = parentDir(texPath);
   const pdfName = toPdfBasename(texPath);
   return dir ? joinPath(dir, pdfName, texPath) : pdfName;
-}
-
-export function texBuildDirectory(texPath: string): string | null {
-  return parentDir(texPath) || null;
 }
 
 // Take the basename and swap the trailing .tex (any case) for .pdf.
@@ -120,21 +52,6 @@ function pathSeparator(path: string): string {
 function joinPath(dir: string, name: string, originalPath: string): string {
   const sep = pathSeparator(originalPath);
   return dir.endsWith(sep) ? `${dir}${name}` : `${dir}${sep}${name}`;
-}
-
-function quoteShellArg(value: string): string {
-  return `"${value.replace(/(["\\$`])/g, "\\$1")}"`;
-}
-
-function normalizeShellWhitespace(command: string): string {
-  return command.trim().split(/\s+/).join(" ");
-}
-
-function canonicalShellCommand(command: string): string {
-  return normalizeShellWhitespace(command)
-    .split(/\s+/)
-    .map(stripShellQuotes)
-    .join(" ");
 }
 
 function stripShellQuotes(value: string): string {

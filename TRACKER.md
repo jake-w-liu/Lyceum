@@ -230,6 +230,7 @@ Primary progress tracker for the lightweight, VS Code-inspired research IDE buil
 - [x] LaTeX Preview tab action / Build LaTeX command saves and compiles the active `.tex` file using `latexBuildCommand` retargeted to that file
 - [x] Open resulting PDF as an editor tab on success (`deriveOutputPdf` derives the output name)
 - [x] Surface build output/errors in the bottom-panel Output tab (stdout/stderr + exit code)
+- [x] Lightweight Rust LaTeX builder: installed-tool discovery, stale-PDF removal, direct process spawn for stock auto mode, shell fallback only for custom commands
 - [x] **Tests**
   - [x] Frontend: `renderMarkdown` (heading/strong/HTML-escaping), `deriveOutputPdf` (5), `MarkdownView` render + empty state
   - [x] Rust: `run_build` shares the unit-tested process-streaming path (resolve/args covered)

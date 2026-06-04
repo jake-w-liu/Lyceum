@@ -3,7 +3,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const invokeMock = vi.fn();
 const listenMock = vi.fn();
 const writeFileMock = vi.fn();
-const deleteFileIfExistsMock = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
 }));
@@ -11,7 +10,6 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: (...args: unknown[]) => listenMock(...args),
 }));
 vi.mock("./ipc", () => ({
-  deleteFileIfExists: (...args: unknown[]) => deleteFileIfExistsMock(...args),
   writeFile: (...args: unknown[]) => writeFileMock(...args),
 }));
 
@@ -34,12 +32,20 @@ type EventHandler = (event: { payload: unknown }) => void;
 
 describe("runLatexBuild", () => {
   const handlers = new Map<string, EventHandler>();
+  const plan = (overrides: Partial<Record<string, unknown>> = {}) => ({
+    command: 'latexmk -pdf "main.tex"',
+    cwd: "/w",
+    pdfPath: "/w/main.pdf",
+    removedStalePdf: false,
+    tool: "latexmk",
+    source: "path",
+    ...overrides,
+  });
 
   beforeEach(() => {
     handlers.clear();
-    invokeMock.mockReset().mockResolvedValue(undefined);
+    invokeMock.mockReset().mockResolvedValue(plan());
     writeFileMock.mockReset().mockResolvedValue(undefined);
-    deleteFileIfExistsMock.mockReset().mockResolvedValue(false);
     listenMock.mockReset().mockImplementation(
       async (eventName: string, handler: EventHandler) => {
         handlers.set(eventName, handler);
@@ -65,17 +71,16 @@ describe("runLatexBuild", () => {
     await runLatexBuild({ openOnSuccess: true });
 
     expect(invokeMock).toHaveBeenCalledWith(
-      "run_build",
+      "run_latex_build",
       expect.objectContaining({
-        command: 'latexmk -pdf "main.tex"',
-        cwd: "/w",
+        texPath: "/w/main.tex",
+        configuredCommand: "latexmk -pdf main.tex",
       }),
     );
     expect(writeFileMock).toHaveBeenCalledWith(
       "/w/main.tex",
       "\\documentclass{article}",
     );
-    expect(deleteFileIfExistsMock).toHaveBeenCalledWith("/w/main.pdf");
     const exitKey = Array.from(handlers.keys()).find((key) =>
       key.startsWith("build:exit:"),
     );
@@ -88,7 +93,7 @@ describe("runLatexBuild", () => {
   });
 
   it("removes stale output, compiles, refreshes explorer, and does not open the PDF by default", async () => {
-    deleteFileIfExistsMock.mockResolvedValue(true);
+    invokeMock.mockResolvedValue(plan({ removedStalePdf: true }));
     useWorkspaceStore.getState().openWorkspace("/w");
     useEditorStore.getState().openDoc({
       path: "/w/main.tex",
@@ -98,7 +103,13 @@ describe("runLatexBuild", () => {
 
     await runLatexBuild();
 
-    expect(deleteFileIfExistsMock).toHaveBeenCalledWith("/w/main.pdf");
+    const outputKey = Array.from(handlers.keys()).find((key) =>
+      key.startsWith("build:output:"),
+    );
+    expect(outputKey).toBeDefined();
+    handlers.get(outputKey!)!({
+      payload: { stream: "stdout", line: "[latex] removed stale /w/main.pdf" },
+    });
     expect(useOutputStore.getState().lines).toContain(
       "[latex] removed stale /w/main.pdf",
     );
@@ -120,6 +131,13 @@ describe("runLatexBuild", () => {
   });
 
   it("uses the current tex file directory instead of assuming main.tex", async () => {
+    invokeMock.mockResolvedValue(
+      plan({
+        command: 'latexmk -pdf "paper.tex"',
+        cwd: "/w/chapters",
+        pdfPath: "/w/chapters/paper.pdf",
+      }),
+    );
     useWorkspaceStore.getState().openWorkspace("/w");
     useEditorStore.getState().openDoc({
       path: "/w/chapters/paper.tex",
@@ -130,10 +148,10 @@ describe("runLatexBuild", () => {
     await runLatexBuild({ openOnSuccess: true });
 
     expect(invokeMock).toHaveBeenCalledWith(
-      "run_build",
+      "run_latex_build",
       expect.objectContaining({
-        command: 'latexmk -pdf "paper.tex"',
-        cwd: "/w/chapters",
+        texPath: "/w/chapters/paper.tex",
+        configuredCommand: "latexmk -pdf main.tex",
       }),
     );
     const exitKey = Array.from(handlers.keys()).find((key) =>
@@ -143,14 +161,13 @@ describe("runLatexBuild", () => {
 
     handlers.get(exitKey!)!({ payload: 0 });
 
-    expect(deleteFileIfExistsMock).toHaveBeenCalledWith("/w/chapters/paper.pdf");
     expect(useWorkspaceStore.getState().pendingOpenPath).toBe(
       "/w/chapters/paper.pdf",
     );
   });
 
-  it("aborts before running when stale output cannot be removed", async () => {
-    deleteFileIfExistsMock.mockRejectedValue(new Error("permission denied"));
+  it("surfaces Rust builder preflight errors", async () => {
+    invokeMock.mockRejectedValue(new Error("No LaTeX compiler was found"));
     useWorkspaceStore.getState().openWorkspace("/w");
     useEditorStore.getState().openDoc({
       path: "/w/main.tex",
@@ -160,44 +177,14 @@ describe("runLatexBuild", () => {
 
     await runLatexBuild();
 
-    expect(invokeMock).not.toHaveBeenCalledWith(
-      "run_build",
-      expect.anything(),
+    expect(invokeMock).toHaveBeenCalledWith(
+      "run_latex_build",
+      expect.objectContaining({ texPath: "/w/main.tex" }),
     );
     expect(useOutputStore.getState().lines).toContain(
-      "failed to remove stale PDF /w/main.pdf: Error: permission denied",
+      "No LaTeX compiler was found",
     );
-  });
-
-  it("uses tectonic when the stock latexmk command is configured and latexmk is unavailable", async () => {
-    invokeMock.mockImplementation(async (command: string, args: unknown) => {
-      if (command === "program_available") {
-        return (args as { program: string }).program === "tectonic";
-      }
-      return undefined;
-    });
-    useWorkspaceStore.getState().openWorkspace("/w");
-    useEditorStore.getState().openDoc({
-      path: "/w/main.tex",
-      content: "\\documentclass{article}",
-      language: "latex",
-    });
-
-    await runLatexBuild();
-
-    expect(invokeMock).toHaveBeenCalledWith("program_available", {
-      program: "latexmk",
-    });
-    expect(invokeMock).toHaveBeenCalledWith("program_available", {
-      program: "tectonic",
-    });
-    expect(invokeMock).toHaveBeenCalledWith(
-      "run_build",
-      expect.objectContaining({
-        command: 'tectonic "main.tex"',
-        cwd: "/w",
-      }),
-    );
+    expect(useOutputStore.getState().running).toBe(false);
   });
 
   it("adds an actionable message when latexmk is missing", async () => {

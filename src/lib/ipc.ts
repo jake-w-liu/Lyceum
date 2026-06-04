@@ -32,6 +32,12 @@ export interface TrashBatch {
   items: TrashItem[];
 }
 
+export interface LatexToolInfo {
+  tool: string;
+  path: string;
+  source: "path" | string;
+}
+
 const FALLBACK_APP_INFO: AppInfo = {
   name: "lyceum",
   version: "0.1.0",
@@ -109,6 +115,11 @@ export async function deletePath(path: string): Promise<void> {
 /** Delete a file if it exists. Returns true when a file was removed. */
 export async function deleteFileIfExists(path: string): Promise<boolean> {
   return invoke<boolean>("delete_file_if_exists", { path });
+}
+
+/** Return LaTeX compilers available to build/preview workflows. */
+export async function resolveLatexTools(): Promise<LatexToolInfo[]> {
+  return invoke<LatexToolInfo[]>("resolve_latex_tools");
 }
 
 /** Move files/directories into Lyceum's workspace-local trash for undoable delete. */

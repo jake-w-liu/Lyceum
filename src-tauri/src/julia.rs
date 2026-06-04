@@ -19,12 +19,12 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
 /// id -> OS pid of the running child, so runs can be cancelled and cleaned up.
-type RunMap = Arc<Mutex<HashMap<String, u32>>>;
+pub(crate) type RunMap = Arc<Mutex<HashMap<String, u32>>>;
 
 /// Tauri-managed registry of in-flight Julia/build runs.
 #[derive(Default)]
 pub struct RunManager {
-    runs: RunMap,
+    pub(crate) runs: RunMap,
 }
 
 /// Resolve the Julia executable: an explicit setting, else common GUI-app PATH
@@ -52,7 +52,7 @@ fn resolve_julia_with_env(
         .unwrap_or_else(|| "julia".to_string())
 }
 
-fn augmented_path(path: Option<&OsStr>, home: Option<&OsStr>) -> OsString {
+pub(crate) fn augmented_path(path: Option<&OsStr>, home: Option<&OsStr>) -> OsString {
     let mut dirs: Vec<PathBuf> = path.map(env::split_paths).into_iter().flatten().collect();
     if let Some(home) = home {
         let home = PathBuf::from(home);
@@ -85,7 +85,7 @@ fn dedup_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     out
 }
 
-fn find_program_in_path(program: &str, path: &OsStr) -> Option<PathBuf> {
+pub(crate) fn find_program_in_path(program: &str, path: &OsStr) -> Option<PathBuf> {
     let program_path = Path::new(program);
     if program_path.components().count() > 1 {
         return is_executable_file(program_path).then(|| program_path.to_path_buf());
@@ -107,7 +107,7 @@ fn find_program_in_path(program: &str, path: &OsStr) -> Option<PathBuf> {
 }
 
 #[cfg(unix)]
-fn is_executable_file(path: &Path) -> bool {
+pub(crate) fn is_executable_file(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
 
     path.metadata()
@@ -116,7 +116,7 @@ fn is_executable_file(path: &Path) -> bool {
 }
 
 #[cfg(not(unix))]
-fn is_executable_file(path: &Path) -> bool {
+pub(crate) fn is_executable_file(path: &Path) -> bool {
     path.is_file()
 }
 
@@ -282,7 +282,7 @@ pub fn run_julia(
 /// and its exit code as `<exit_event>`. Registers the child in `runs` (keyed by
 /// `id`) so it can be cancelled, and removes it on exit. Shared by run_julia and
 /// run_build.
-fn stream_child(
+pub(crate) fn stream_child(
     app: AppHandle,
     mut child: Child,
     id: String,

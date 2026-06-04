@@ -1,7 +1,6 @@
-// LaTeX build orchestration (M11): run the configured `latexBuildCommand` in the
-// workspace root, stream output to the Output panel, and on success open the
-// produced PDF as an editor tab. Tauri-bound (smoke-tested); the output-path
-// derivation it relies on (lib/latex.ts) is unit-tested.
+// LaTeX build orchestration (M11): save the active `.tex` buffer, ask the Rust
+// builder to compile it, stream output to the Output panel, and on success open
+// the produced PDF as an editor tab.
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -11,16 +10,11 @@ import { useOutputStore } from "../state/outputStore";
 import { useLayoutStore } from "../state/layoutStore";
 import { getActiveDoc, isTextDoc, useEditorStore } from "../state/editorStore";
 import { useTreeStore } from "../state/treeStore";
-import { deleteFileIfExists, writeFile } from "./ipc";
+import { writeFile } from "./ipc";
 import { isTexSourcePath } from "./fileTypes";
 import {
-  buildCommandForTexPath,
   deriveOutputPdf,
-  LATEX_TOOL_ORDER,
   pdfPathForTexPath,
-  selectLatexBuildCommand,
-  shouldAutoSelectLatexTool,
-  texBuildDirectory,
 } from "./latex";
 
 let buildSeq = 0;
@@ -30,6 +24,15 @@ export interface LatexBuildOptions {
   openOnSuccess?: boolean;
 }
 
+interface LatexBuildPlan {
+  command: string;
+  cwd: string;
+  pdfPath: string;
+  removedStalePdf: boolean;
+  tool: string;
+  source: string;
+}
+
 export async function runLatexBuild(
   options: LatexBuildOptions = {},
 ): Promise<void> {
@@ -37,7 +40,6 @@ export async function runLatexBuild(
   if (useOutputStore.getState().running) return;
   const configuredCommand =
     useSettingsStore.getState().settings.latexBuildCommand;
-  const rootPath = useWorkspaceStore.getState().rootPath;
   const editor = useEditorStore.getState();
   const activeDoc = getActiveDoc(editor);
   const targetPath =
@@ -49,17 +51,12 @@ export async function runLatexBuild(
     ? editor.docs.find((doc) => doc.path === targetPath && isTextDoc(doc))
     : null;
   const openOnSuccess = options.openOnSuccess === true;
-  const cwd = targetPath ? texBuildDirectory(targetPath) : rootPath;
   const out = useOutputStore.getState();
   useLayoutStore.getState().showBottomTab("output");
   out.clear();
 
-  if (targetPath && !isTexSourcePath(targetPath)) {
+  if (!targetPath || !isTexSourcePath(targetPath)) {
     out.append("Open a .tex file before building LaTeX.");
-    return;
-  }
-  if (!targetPath && !rootPath) {
-    out.append("Open a folder before building LaTeX.");
     return;
   }
   if (!configuredCommand.trim()) {
@@ -76,27 +73,11 @@ export async function runLatexBuild(
     }
   }
 
-  const command = targetPath
-    ? await resolveLatexBuildCommand(configuredCommand, targetPath)
-    : configuredCommand;
-  const expectedPdfPath = expectedLatexPdfPath(command, targetPath, activeDoc?.path ?? null, rootPath);
-  if (expectedPdfPath) {
-    try {
-      const removed = await deleteFileIfExists(expectedPdfPath);
-      if (removed) {
-        out.append(`[latex] removed stale ${expectedPdfPath}`);
-        useTreeStore.getState().refresh();
-      }
-    } catch (e) {
-      out.append(`failed to remove stale PDF ${expectedPdfPath}: ${String(e)}`);
-      return;
-    }
-  }
   const id = `build-${(buildSeq += 1)}`;
-  const activeTex = activeDoc?.path ?? null;
+  const expectedPdfPath = pdfPathForTexPath(targetPath);
+  let commandForMessages = configuredCommand;
   out.setRunning(true);
   out.setRunId(id);
-  out.append(`$ ${command}   (cwd: ${cwd ?? ""})`);
 
   const offData = await listen<{ stream: string; line: string }>(
     `build:output:${id}`,
@@ -112,31 +93,39 @@ export async function runLatexBuild(
   const offExit = await listen<number>(`build:exit:${id}`, (event) => {
     const store = useOutputStore.getState();
     store.append(`[build exited with code ${event.payload}]`);
-    const missingToolMessage = missingBuildToolMessage(command, event.payload);
+    const missingToolMessage = missingBuildToolMessage(
+      commandForMessages,
+      event.payload,
+    );
     if (missingToolMessage) store.append(missingToolMessage);
     store.setRunning(false);
     store.setRunId(null);
     offData();
     offExit();
     if (event.payload === 0) {
-      const pdfPath = expectedPdfPath ?? expectedLatexPdfPath(command, targetPath, activeTex, rootPath);
-      if (pdfPath) {
-        useTreeStore.getState().refresh();
-        store.append(`[latex] wrote ${pdfPath}`);
-        if (openOnSuccess) {
-          useEditorStore.getState().closeDoc(pdfPath);
-          useWorkspaceStore.getState().requestOpenFile(pdfPath);
-          useLayoutStore.getState().setPdfPanelVisible(false);
-        }
+      useTreeStore.getState().refresh();
+      store.append(`[latex] wrote ${expectedPdfPath}`);
+      if (openOnSuccess) {
+        useEditorStore.getState().closeDoc(expectedPdfPath);
+        useWorkspaceStore.getState().requestOpenFile(expectedPdfPath);
+        useLayoutStore.getState().setPdfPanelVisible(false);
       }
     }
   });
 
   try {
-    await invoke("run_build", { id, command, cwd });
+    const plan = await invoke<LatexBuildPlan>("run_latex_build", {
+      id,
+      texPath: targetPath,
+      configuredCommand,
+    });
+    commandForMessages = plan.command;
+    if (plan.removedStalePdf) {
+      useTreeStore.getState().refresh();
+    }
   } catch (e) {
     const store = useOutputStore.getState();
-    store.append(`failed to run build: ${String(e)}`);
+    store.append(cleanInvokeError(e));
     store.setRunning(false);
     store.setRunId(null);
     offData();
@@ -153,20 +142,6 @@ export function expectedLatexPdfPath(
   if (targetPath) return pdfPathForTexPath(targetPath);
   const pdf = deriveOutputPdf(command, activeTexPath);
   return pdf && rootPath ? `${rootPath}/${pdf}` : null;
-}
-
-export async function resolveLatexBuildCommand(
-  configuredCommand: string,
-  texPath: string,
-): Promise<string> {
-  if (!shouldAutoSelectLatexTool(configuredCommand)) {
-    return buildCommandForTexPath(configuredCommand, texPath);
-  }
-  const availableTools: string[] = [];
-  for (const tool of LATEX_TOOL_ORDER) {
-    if (await programAvailable(tool)) availableTools.push(tool);
-  }
-  return selectLatexBuildCommand(configuredCommand, texPath, availableTools);
 }
 
 export function missingBuildToolMessage(
@@ -194,10 +169,6 @@ function firstCommandToken(command: string): string | null {
   return raw.split(/[\\/]/).pop() ?? raw;
 }
 
-async function programAvailable(program: string): Promise<boolean> {
-  try {
-    return await invoke<boolean>("program_available", { program });
-  } catch {
-    return false;
-  }
+function cleanInvokeError(error: unknown): string {
+  return String(error).replace(/^Error:\s*/, "");
 }

@@ -14,6 +14,7 @@ import {
   getAppInfo,
   pickFolder,
   readFileBytes,
+  resolveLatexTools,
 } from "./ipc";
 
 beforeEach(() => {
@@ -71,5 +72,18 @@ describe("deleteFileIfExists", () => {
     expect(invokeMock).toHaveBeenCalledWith("delete_file_if_exists", {
       path: "/w/main.pdf",
     });
+  });
+});
+
+describe("resolveLatexTools", () => {
+  it("invokes the LaTeX tool inventory command", async () => {
+    const tools = [
+      { tool: "tectonic", path: "/usr/local/bin/tectonic", source: "path" },
+    ];
+    invokeMock.mockResolvedValue(tools);
+
+    await expect(resolveLatexTools()).resolves.toEqual(tools);
+
+    expect(invokeMock).toHaveBeenCalledWith("resolve_latex_tools");
   });
 });
