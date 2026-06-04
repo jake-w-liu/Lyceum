@@ -76,6 +76,9 @@ export async function runLatexBuild(
   const id = `build-${(buildSeq += 1)}`;
   let pdfPathForSuccess = pdfPathForTexPath(targetPath);
   let commandForMessages = configuredCommand;
+  let planResolved = false;
+  let pendingExitCode: number | null = null;
+  let handledExit = false;
   out.setRunning(true);
   out.setRunId(id);
 
@@ -90,19 +93,21 @@ export async function runLatexBuild(
             : event.payload.line,
         ),
   );
-  const offExit = await listen<number>(`build:exit:${id}`, (event) => {
+  const handleExit = (exitCode: number) => {
+    if (handledExit) return;
+    handledExit = true;
     const store = useOutputStore.getState();
-    store.append(`[build exited with code ${event.payload}]`);
+    store.append(`[build exited with code ${exitCode}]`);
     const missingToolMessage = missingBuildToolMessage(
       commandForMessages,
-      event.payload,
+      exitCode,
     );
     if (missingToolMessage) store.append(missingToolMessage);
     store.setRunning(false);
     store.setRunId(null);
     offData();
     offExit();
-    if (event.payload === 0) {
+    if (exitCode === 0) {
       useTreeStore.getState().refresh();
       store.append(`[latex] wrote ${pdfPathForSuccess}`);
       if (openOnSuccess) {
@@ -111,6 +116,10 @@ export async function runLatexBuild(
         useLayoutStore.getState().setPdfPanelVisible(false);
       }
     }
+  };
+  const offExit = await listen<number>(`build:exit:${id}`, (event) => {
+    pendingExitCode = event.payload;
+    if (planResolved) handleExit(event.payload);
   });
 
   try {
@@ -126,6 +135,8 @@ export async function runLatexBuild(
     if (plan.removedStalePdf) {
       useTreeStore.getState().refresh();
     }
+    planResolved = true;
+    if (pendingExitCode !== null) handleExit(pendingExitCode);
   } catch (e) {
     const store = useOutputStore.getState();
     store.append(cleanInvokeError(e));

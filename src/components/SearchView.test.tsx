@@ -103,4 +103,31 @@ describe("SearchView", () => {
       "abc match",
     ]);
   });
+
+  it("clears the searching state when the query invalidates an in-flight search", async () => {
+    useWorkspaceStore.setState({ rootPath: ROOT });
+    const deferreds: Array<(v: SearchMatch[]) => void> = [];
+    vi.mocked(searchWorkspace).mockImplementation(
+      () => new Promise<SearchMatch[]>((resolve) => deferreds.push(resolve)),
+    );
+    const wait = (ms: number) =>
+      act(() => new Promise((r) => setTimeout(r, ms)));
+    render(<SearchView />);
+    const input = screen.getByLabelText("Search workspace");
+
+    fireEvent.change(input, { target: { value: "ab" } });
+    await wait(300);
+    expect(deferreds).toHaveLength(1);
+    expect(useSearchStore.getState().searching).toBe(true);
+
+    fireEvent.change(input, { target: { value: "" } });
+
+    await waitFor(() => expect(useSearchStore.getState().searching).toBe(false));
+    await act(async () => {
+      deferreds[0]([match("/ws/ab.jl", 1, "stale result")]);
+      await Promise.resolve();
+    });
+    expect(useSearchStore.getState().results).toEqual([]);
+    expect(useSearchStore.getState().searching).toBe(false);
+  });
 });

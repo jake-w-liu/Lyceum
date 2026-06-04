@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { waitFor } from "@testing-library/react";
 
 const invokeMock = vi.fn();
 const listenMock = vi.fn();
@@ -41,6 +42,14 @@ describe("runLatexBuild", () => {
     source: "path",
     ...overrides,
   });
+
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((res) => {
+      resolve = res;
+    });
+    return { promise, resolve };
+  }
 
   beforeEach(() => {
     handlers.clear();
@@ -193,6 +202,48 @@ describe("runLatexBuild", () => {
     );
     expect(useWorkspaceStore.getState().pendingOpenPath).toBe(
       "/w/build-output/main.pdf",
+    );
+  });
+
+  it("waits for the backend build plan before handling a fast exit event", async () => {
+    const backendPlan = plan({
+      command: 'latexmk -pdf "paper.tex"',
+      pdfPath: "/w/backend-paper.pdf",
+    });
+    const pendingPlan = deferred<typeof backendPlan>();
+    invokeMock.mockReturnValue(pendingPlan.promise);
+    useWorkspaceStore.getState().openWorkspace("/w");
+    useEditorStore.getState().openDoc({
+      path: "/w/paper.tex",
+      content: "\\documentclass{article}",
+      language: "latex",
+    });
+
+    const buildPromise = runLatexBuild({ openOnSuccess: true });
+    await waitFor(() =>
+      expect(
+        Array.from(handlers.keys()).some((key) =>
+          key.startsWith("build:exit:"),
+        ),
+      ).toBe(true),
+    );
+    const exitKey = Array.from(handlers.keys()).find((key) =>
+      key.startsWith("build:exit:"),
+    );
+
+    handlers.get(exitKey!)!({ payload: 0 });
+
+    expect(useOutputStore.getState().running).toBe(true);
+    expect(useWorkspaceStore.getState().pendingOpenPath).toBeNull();
+
+    pendingPlan.resolve(backendPlan);
+    await buildPromise;
+
+    expect(useOutputStore.getState().lines).toContain(
+      "[latex] wrote /w/backend-paper.pdf",
+    );
+    expect(useWorkspaceStore.getState().pendingOpenPath).toBe(
+      "/w/backend-paper.pdf",
     );
   });
 

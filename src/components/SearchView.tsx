@@ -26,6 +26,7 @@ export function SearchView() {
       // Invalidate any in-flight search so it can't later overwrite the cleared list.
       seqRef.current++;
       useSearchStore.getState().setResults([]);
+      useSearchStore.getState().setSearching(false);
       return;
     }
     timer.current = setTimeout(() => {

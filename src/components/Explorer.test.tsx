@@ -49,6 +49,14 @@ const file = (name: string, parent = ROOT): DirEntry => ({
   isDir: false,
 });
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 beforeEach(() => {
   useTreeStore.setState(initialTreeData, false);
   useEditorStore.setState(initialEditorData, false);
@@ -90,6 +98,29 @@ describe("Explorer", () => {
     await userEvent.click(await screen.findByText("src"));
     expect(await screen.findByText("main.tsx")).toBeInTheDocument();
     expect(readDirectory).toHaveBeenCalledWith("/ws/src");
+  });
+
+  it("ignores stale directory reads that resolve after a refresh", async () => {
+    const firstRootRead = deferred<DirEntry[]>();
+    const secondRootRead = deferred<DirEntry[]>();
+    vi.mocked(readDirectory).mockReset();
+    vi.mocked(readDirectory)
+      .mockImplementationOnce(async () => firstRootRead.promise)
+      .mockImplementationOnce(async () => secondRootRead.promise);
+
+    render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await waitFor(() => expect(readDirectory).toHaveBeenCalledTimes(1));
+    await userEvent.click(screen.getByRole("button", { name: "Refresh Explorer" }));
+    await waitFor(() => expect(readDirectory).toHaveBeenCalledTimes(2));
+
+    secondRootRead.resolve([file("fresh.txt")]);
+    expect(await screen.findByText("fresh.txt")).toBeInTheDocument();
+    firstRootRead.resolve([file("stale.txt")]);
+
+    await waitFor(() => {
+      expect(screen.queryByText("stale.txt")).not.toBeInTheDocument();
+      expect(screen.getByText("fresh.txt")).toBeInTheDocument();
+    });
   });
 
   it("calls onOpenFile when a file is clicked", async () => {
@@ -271,6 +302,26 @@ describe("Explorer", () => {
     fireEvent.dragStart(srcRow, { dataTransfer });
     fireEvent.dragOver(componentsRow, { dataTransfer });
     fireEvent.drop(componentsRow, { dataTransfer });
+
+    expect(movePaths).not.toHaveBeenCalled();
+  });
+
+  it("does not treat dropping onto a file row as a root drop", async () => {
+    render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await userEvent.click(await screen.findByText("src"));
+    await screen.findByText("main.tsx");
+    const nestedFileRow = screen.getByText("main.tsx").closest(".tree-row")!;
+    const rootFileRow = screen.getByText("README.md").closest(".tree-row")!;
+    const dataTransfer = {
+      effectAllowed: "",
+      dropEffect: "",
+      setData: vi.fn(),
+      getData: vi.fn(),
+    };
+
+    fireEvent.dragStart(nestedFileRow, { dataTransfer });
+    fireEvent.dragOver(rootFileRow, { dataTransfer });
+    fireEvent.drop(rootFileRow, { dataTransfer });
 
     expect(movePaths).not.toHaveBeenCalled();
   });

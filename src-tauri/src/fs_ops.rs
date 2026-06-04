@@ -100,7 +100,7 @@ pub fn read_directory(path: String) -> Result<Vec<DirEntryDto>, String> {
 #[tauri::command]
 pub fn create_file(path: String) -> Result<(), String> {
     let target = Path::new(&path);
-    if target.exists() {
+    if path_entry_exists(target) {
         return Err(format!("already exists: {path}"));
     }
     if let Some(parent) = target.parent() {
@@ -129,7 +129,7 @@ pub fn create_directory(path: String) -> Result<(), String> {
 /// Rename/move `from` to `to`. Errors if the destination already exists.
 #[tauri::command]
 pub fn rename_path(from: String, to: String) -> Result<(), String> {
-    if Path::new(&to).exists() {
+    if path_entry_exists(Path::new(&to)) {
         return Err(format!("already exists: {to}"));
     }
     std::fs::rename(&from, &to).map_err(|e| format!("{from} -> {to}: {e}"))
@@ -268,7 +268,7 @@ fn move_paths_impl(
                 to.display()
             ));
         }
-        if to.exists() {
+        if path_entry_exists(&to) {
             return Err(format!("already exists: {}", to.display()));
         }
         planned.push((target.path.clone(), to, target.is_dir));
@@ -293,7 +293,7 @@ fn restore_trash_batch_impl(root: &Path, items: Vec<TrashItemDto>) -> Result<(),
         let original = PathBuf::from(&item.original_path);
         let trashed = PathBuf::from(&item.trashed_path);
         validate_restore_pair(&root, &original, &trashed)?;
-        if original.exists() {
+        if path_entry_exists(&original) {
             return Err(format!(
                 "restore destination already exists: {}",
                 original.display()
@@ -319,13 +319,13 @@ fn redo_trash_batch_impl(root: &Path, items: Vec<TrashItemDto>) -> Result<(), St
         let original = PathBuf::from(&item.original_path);
         let trashed = PathBuf::from(&item.trashed_path);
         validate_restore_pair(&root, &original, &trashed)?;
-        if !original.exists() {
+        if !path_entry_exists(&original) {
             return Err(format!(
                 "redo source does not exist: {}",
                 original.display()
             ));
         }
-        if trashed.exists() {
+        if path_entry_exists(&trashed) {
             return Err(format!(
                 "redo destination already exists: {}",
                 trashed.display()
@@ -352,6 +352,10 @@ fn canonical_dir(path: &Path) -> Result<PathBuf, String> {
         return Err(format!("not a directory: {}", path.display()));
     }
     Ok(path)
+}
+
+fn path_entry_exists(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
 }
 
 fn normalize_delete_targets(
@@ -506,7 +510,7 @@ fn validate_restore_pair(root: &Path, original: &Path, trashed: &Path) -> Result
 fn validate_existing_ancestor_inside(root: &Path, path: &Path, label: &str) -> Result<(), String> {
     let mut current = Some(path);
     while let Some(candidate) = current {
-        if candidate.exists() {
+        if path_entry_exists(candidate) {
             let canonical = candidate
                 .canonicalize()
                 .map_err(|e| format!("{}: {e}", candidate.display()))?;
@@ -697,6 +701,31 @@ mod tests {
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("already exists"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rename_path_rejects_broken_symlink_destination() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let from = tmp.path().join("from.txt");
+        let to = tmp.path().join("broken-link.txt");
+        fs::write(&from, b"hello").unwrap();
+        symlink(tmp.path().join("missing.txt"), &to).unwrap();
+        assert!(!to.exists());
+
+        let result = rename_path(
+            from.to_string_lossy().to_string(),
+            to.to_string_lossy().to_string(),
+        );
+
+        assert!(result.unwrap_err().contains("already exists"));
+        assert_eq!(fs::read(&from).unwrap(), b"hello");
+        assert!(std::fs::symlink_metadata(&to)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[test]
@@ -1021,6 +1050,33 @@ mod tests {
         assert!(exists_err.contains("already exists"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn move_paths_rejects_broken_symlink_destination() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let dst = root.join("dst");
+        let src = root.join("src").join("note.txt");
+        fs::create_dir(&dst).unwrap();
+        fs::create_dir_all(src.parent().unwrap()).unwrap();
+        fs::write(&src, b"note").unwrap();
+        let broken_destination = dst.join("note.txt");
+        symlink(root.join("missing.txt"), &broken_destination).unwrap();
+        assert!(!broken_destination.exists());
+
+        let err = move_paths_impl(root, vec![src.to_string_lossy().to_string()], &dst)
+            .expect_err("broken symlink destination must block overwrite");
+
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(fs::read(&src).unwrap(), b"note");
+        assert!(std::fs::symlink_metadata(&broken_destination)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
     #[test]
     fn move_paths_rejects_root_trash_outside_and_self_descendant_moves() {
         let tmp = tempfile::tempdir().expect("create temp dir");
@@ -1094,6 +1150,64 @@ mod tests {
         let err = restore_trash_batch_impl(root, vec![item]).unwrap_err();
 
         assert!(err.contains("path traversal") || err.contains("outside workspace"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_rejects_broken_symlink_destination() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root_buf = tmp.path().canonicalize().unwrap();
+        let root = root_buf.as_path();
+        let original = root.join("note.txt");
+        let trashed = root.join(LYCEUM_TRASH_DIR).join("batch").join("note.txt");
+        fs::create_dir_all(trashed.parent().unwrap()).unwrap();
+        fs::write(&trashed, b"note").unwrap();
+        symlink(root.join("missing.txt"), &original).unwrap();
+        assert!(!original.exists());
+        let item = TrashItemDto {
+            original_path: original.to_string_lossy().to_string(),
+            trashed_path: trashed.to_string_lossy().to_string(),
+            is_dir: false,
+        };
+
+        let err = restore_trash_batch_impl(root, vec![item]).unwrap_err();
+
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(fs::read(&trashed).unwrap(), b"note");
+        assert!(std::fs::symlink_metadata(&original)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn redo_moves_restored_broken_symlink_back_to_trash() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let link = root.join("broken-shortcut.txt");
+        symlink(root.join("missing.txt"), &link).unwrap();
+        let batch = move_paths_to_trash_impl(root, vec![link.to_string_lossy().to_string()])
+            .expect("trash broken symlink");
+
+        restore_trash_batch_impl(root, batch.items.clone()).expect("restore broken symlink");
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!link.exists());
+
+        redo_trash_batch_impl(root, batch.items.clone()).expect("redo broken symlink delete");
+
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        assert!(std::fs::symlink_metadata(&batch.items[0].trashed_path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[cfg(unix)]

@@ -17,39 +17,190 @@ A lightweight, VS Code-inspired **research IDE** built with Tauri, with a Julia-
 - **Commands & keybindings:** a TypeScript command registry (every action is a command) plus a keybinding registry that maps shortcuts to command ids. Keybindings and settings are persisted as JSON in the OS app-config dir via Tauri.
 - **Testing:** Vitest + React Testing Library (frontend); `cargo test` (Rust). Per the no-bug policy, every feature ships with tests.
 
-## Prerequisites
+## Local Install And Build
 
-- **Node.js** (LTS) and npm — frontend toolchain and the Vite/Tauri CLI.
-- **Rust** (stable, edition 2021) with Cargo — Tauri backend. See the [Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/) for platform-specific system dependencies.
-- **Julia** (optional) — required only for the Julia run-file / run-selection workflow and Julia LanguageServer.jl support, not for building the app itself. Lyceum searches common macOS GUI-app tool paths such as `~/.juliaup/bin`, but `juliaPath` can also be set explicitly.
-- **TeX engine** (optional) — required only for LaTeX preview/build. Lyceum's lightweight Rust builder auto-selects an installed `latexmk`, `tectonic`, `pdflatex`, `xelatex`, or `lualatex` when the default build command is unchanged. Custom commands still require the configured tool to exist.
+Lyceum is a Tauri desktop app. The source is intended to build on macOS,
+Windows, and Linux, but each operating system produces its own native installer.
+For reliable release artifacts, build on the target OS instead of trying to
+cross-compile installers from another platform.
 
-## Install dependencies
+### 1. Install System Prerequisites
+
+Install these on every platform:
+
+- **Node.js LTS** and npm — frontend toolchain and the local Tauri CLI.
+- **Rust stable** with Cargo — Rust backend and native packaging.
+
+Then install the OS-specific Tauri dependencies.
+
+#### macOS
+
+Install Xcode Command Line Tools:
 
 ```bash
+xcode-select --install
+```
+
+Install Rust if needed:
+
+```bash
+curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | sh
+```
+
+#### Windows
+
+Install:
+
+- Node.js LTS
+- Rust via `rustup`, using the **MSVC** toolchain
+- Microsoft C++ Build Tools with **Desktop development with C++**
+- Microsoft Edge WebView2 Runtime if it is not already installed
+- VBSCRIPT optional feature if you build MSI installers and hit `light.exe`
+  errors
+
+In PowerShell, Rust can be installed with:
+
+```powershell
+winget install --id Rustlang.Rustup
+rustup default stable-msvc
+```
+
+#### Linux
+
+Install Node.js LTS and Rust, then install the Linux WebKit/build dependencies.
+For Debian/Ubuntu:
+
+```bash
+sudo apt update
+sudo apt install libwebkit2gtk-4.1-dev \
+  build-essential \
+  curl \
+  wget \
+  file \
+  libxdo-dev \
+  libssl-dev \
+  libayatana-appindicator3-dev \
+  librsvg2-dev
+```
+
+For Fedora:
+
+```bash
+sudo dnf check-update
+sudo dnf install webkit2gtk4.1-devel \
+  openssl-devel \
+  curl \
+  wget \
+  file \
+  libappindicator-gtk3-devel \
+  librsvg2-devel \
+  libxdo-devel
+sudo dnf group install "c-development"
+```
+
+For Arch:
+
+```bash
+sudo pacman -Syu
+sudo pacman -S --needed webkit2gtk-4.1 \
+  base-devel \
+  curl \
+  wget \
+  file \
+  openssl \
+  appmenu-gtk-module \
+  libappindicator-gtk3 \
+  librsvg \
+  xdotool
+```
+
+See the official [Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/)
+if your distribution is not listed here.
+
+### 2. Clone And Install Dependencies
+
+```bash
+git clone <repo-url> lyceum
+cd lyceum
 npm install
 ```
 
-This installs the frontend dependencies; Cargo fetches the Rust crates automatically on first build.
+`npm install` installs the frontend dependencies. Cargo downloads Rust crates
+automatically on the first Rust/Tauri build.
 
-## Run in development
+### 3. Run In Development
 
 ```bash
-npm install
 npm run tauri dev
 ```
 
-This launches the Tauri app with the Vite dev server and hot reload.
+This launches the desktop app with the Vite dev server and hot reload.
 
-## Build
+### 4. Build A Local Installer
 
 ```bash
 npm run tauri build
 ```
 
-Produces a packaged, platform-native application bundle (on macOS, an unsigned
-`.app` and `.dmg` under `src-tauri/target/release/bundle/`). Code-signing and
-notarization are configured per-platform and are treated as a post-v1 step.
+Build outputs are written under:
+
+```text
+src-tauri/target/release/bundle/
+```
+
+Expected local artifacts:
+
+| Platform | Typical outputs |
+| --- | --- |
+| macOS | `bundle/macos/Lyceum.app`, `bundle/dmg/Lyceum_<version>_<arch>.dmg` |
+| Windows | `bundle/msi/*.msi` and/or `bundle/nsis/*.exe` |
+| Linux | `bundle/deb/*.deb`, `bundle/rpm/*.rpm`, and/or `bundle/appimage/*.AppImage` |
+
+The exact formats depend on the host OS and installed packaging tools. The
+current `src-tauri/tauri.conf.json` uses `"targets": "all"`, so Tauri attempts
+all supported bundle formats for the current platform.
+
+### 5. macOS Intel And Apple Silicon Builds
+
+On Apple Silicon Macs, the default local DMG is usually `aarch64`. To also build
+for Intel Macs, add the Rust target and pass it to Tauri:
+
+```bash
+rustup target add x86_64-apple-darwin
+npm run tauri build -- --target x86_64-apple-darwin
+```
+
+To explicitly build Apple Silicon:
+
+```bash
+rustup target add aarch64-apple-darwin
+npm run tauri build -- --target aarch64-apple-darwin
+```
+
+### 6. Public Distribution Notes
+
+Local builds are useful for testing, but public installers should be signed.
+
+- **macOS:** direct-download DMGs should be signed with a Developer ID
+  certificate and notarized by Apple, otherwise Gatekeeper may block or warn.
+- **Windows:** signing the installer reduces SmartScreen warnings, especially
+  after the app has release history.
+- **Linux:** signing depends on the package/channel you publish through.
+
+For GitHub Releases, attach the platform installers as release assets. A user
+can then download the installer for their OS from the release page.
+
+### Optional Runtime Tools
+
+These are not required to build Lyceum itself:
+
+- **Julia** — required for the Julia run-file / run-selection workflow and Julia
+  LanguageServer.jl support. Lyceum searches common GUI-app paths such as
+  `~/.juliaup/bin`, and `juliaPath` can be set explicitly.
+- **TeX engine** — required for LaTeX preview/build. Lyceum's Rust builder
+  auto-selects an installed `latexmk`, `tectonic`, `pdflatex`, `xelatex`, or
+  `lualatex` when the default build command is unchanged. Custom commands still
+  require the configured tool to exist.
 
 ## Performance
 

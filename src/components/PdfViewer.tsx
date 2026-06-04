@@ -99,9 +99,11 @@ export default function PdfViewer({ path }: { path: string }) {
           void pdf.destroy();
           return;
         }
+        const totalPages = pdf.numPages;
         docRef.current = pdf;
+        setNumPages(totalPages);
+        setPage((current) => clampPage(current, totalPages));
         setDoc(pdf);
-        setNumPages(pdf.numPages);
       } catch (e) {
         if (!cancelled) {
           setLoadError(e instanceof Error ? e.message : String(e));

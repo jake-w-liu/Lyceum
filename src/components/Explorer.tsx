@@ -59,10 +59,24 @@ function unsafeEntryNameMessage(name: string): string {
   return `Invalid name "${name}". Enter a single file or folder name, not a path.`;
 }
 
-function loadInto(path: string) {
+function loadInto(path: string, refreshNonce = useTreeStore.getState().refreshNonce) {
   readDirectory(path)
-    .then((entries) => useTreeStore.getState().setChildren(path, entries))
-    .catch(() => useTreeStore.getState().setChildren(path, []));
+    .then((entries) => {
+      if (useTreeStore.getState().refreshNonce !== refreshNonce) return;
+      useTreeStore.getState().setChildren(path, entries);
+    })
+    .catch(() => {
+      if (useTreeStore.getState().refreshNonce !== refreshNonce) return;
+      useTreeStore.getState().setChildren(path, []);
+    });
+}
+
+function isRootDropSurface(
+  target: EventTarget | null,
+  currentTarget: HTMLElement,
+): boolean {
+  if (target === currentTarget) return true;
+  return target instanceof HTMLElement && Boolean(target.closest(".tree-empty"));
 }
 
 interface VisibleEntry {
@@ -137,7 +151,9 @@ function TreeNode({
 
   // (Re)load children when an expanded directory has no cached entries.
   useEffect(() => {
-    if (entry.isDir && expanded && children === undefined) loadInto(entry.path);
+    if (entry.isDir && expanded && children === undefined) {
+      loadInto(entry.path, refreshNonce);
+    }
   }, [entry.isDir, entry.path, expanded, children, refreshNonce]);
 
   function onActivate(e: React.MouseEvent) {
@@ -437,7 +453,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
   );
 
   useEffect(() => {
-    if (rootChildren === undefined) loadInto(rootPath);
+    if (rootChildren === undefined) loadInto(rootPath, refreshNonce);
   }, [rootPath, rootChildren, refreshNonce]);
 
   function createParentPath(): string {
@@ -673,6 +689,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
         role="tree"
         aria-label="Files"
         onDragOver={(e) => {
+          if (!isRootDropSurface(e.target, e.currentTarget)) return;
           if (!canMoveEntriesTo(draggingEntries, rootPath)) return;
           e.preventDefault();
           e.dataTransfer.dropEffect = "move";
@@ -683,6 +700,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
           if (dropTargetPath === rootPath) setDropTargetPath(null);
         }}
         onDrop={(e) => {
+          if (!isRootDropSurface(e.target, e.currentTarget)) return;
           if (!canMoveEntriesTo(draggingEntries, rootPath)) return;
           e.preventDefault();
           setDropTargetPath(null);

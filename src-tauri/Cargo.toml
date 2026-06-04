@@ -1,6 +1,6 @@
 [package]
 name = "lyceum"
-version = "0.1.1"
+version = "0.1.2"
 description = "A lightweight, VS Code-inspired research IDE (Julia-first)"
 authors = ["lyceum"]
 edition = "2021"
