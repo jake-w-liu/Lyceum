@@ -3,9 +3,16 @@
 // drives editor state via useEditorStore.
 
 import { Icon } from "./Icon";
-import { isInlinePreviewPath } from "../lib/fileTypes";
+import {
+  isInlinePreviewPath,
+  isJuliaSourcePath,
+  isTexSourcePath,
+} from "../lib/fileTypes";
+import { runActiveJulia } from "../lib/julia";
+import { runLatexBuild } from "../lib/latexBuild";
 import { isDirty, useEditorStore } from "../state/editorStore";
 import { useLayoutStore } from "../state/layoutStore";
+import { useOutputStore } from "../state/outputStore";
 
 export function TabBar() {
   const docs = useEditorStore((s) => s.docs);
@@ -14,9 +21,14 @@ export function TabBar() {
   const closeDoc = useEditorStore((s) => s.closeDoc);
   const editorPreview = useLayoutStore((s) => s.editorPreview);
   const toggleEditorPreview = useLayoutStore((s) => s.toggleEditorPreview);
+  const outputRunning = useOutputStore((s) => s.running);
 
   const activeDoc = docs.find((d) => d.path === activePath);
   const canPreview = !!activeDoc && isInlinePreviewPath(activeDoc.path);
+  const canLatexPreview =
+    activeDoc?.kind === "text" && isTexSourcePath(activeDoc.path);
+  const canJuliaRun =
+    activeDoc?.kind === "text" && isJuliaSourcePath(activeDoc.path);
   const previewing = canPreview && editorPreview;
 
   return (
@@ -64,6 +76,55 @@ export function TabBar() {
         >
           <Icon name={previewing ? "settings" : "preview"} size={14} />
           <span>{previewing ? "Edit" : "Preview"}</span>
+        </button>
+      )}
+      {!canPreview && canLatexPreview && activeDoc && (
+        <>
+          <button
+            type="button"
+            className="tab-action"
+            aria-label="Compile LaTeX"
+            title="Compile LaTeX"
+            disabled={outputRunning}
+            onClick={() =>
+              void runLatexBuild({
+                targetPath: activeDoc.path,
+                openOnSuccess: false,
+              })
+            }
+          >
+            <Icon name="build" size={14} />
+            <span>Compile</span>
+          </button>
+          <button
+            type="button"
+            className="tab-action"
+            aria-label="Preview LaTeX PDF"
+            title="Compile and Preview LaTeX PDF"
+            disabled={outputRunning}
+            onClick={() =>
+              void runLatexBuild({
+                targetPath: activeDoc.path,
+                openOnSuccess: true,
+              })
+            }
+          >
+            <Icon name="preview" size={14} />
+            <span>Preview</span>
+          </button>
+        </>
+      )}
+      {!canPreview && !canLatexPreview && canJuliaRun && (
+        <button
+          type="button"
+          className="tab-action"
+          aria-label="Run Julia File or Selection"
+          title="Run Julia File or Selection"
+          disabled={outputRunning}
+          onClick={() => void runActiveJulia()}
+        >
+          <Icon name="run" size={14} />
+          <span>Run</span>
         </button>
       )}
     </div>

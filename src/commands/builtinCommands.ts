@@ -24,7 +24,7 @@ import { runEditorAction } from "../lib/editorBridge";
 import { useTreeStore } from "../state/treeStore";
 import { useSettingsStore } from "../state/settingsStore";
 import { writePty } from "../lib/terminal";
-import { isImagePath, isInlinePreviewPath, isPdfPath } from "../lib/fileTypes";
+import { isInlinePreviewPath, isTexSourcePath } from "../lib/fileTypes";
 
 let registered = false;
 
@@ -129,22 +129,20 @@ export function registerBuiltinCommands(): void {
       if (doc && isInlinePreviewPath(doc.path)) {
         // Markdown/HTML previews render in place, replacing the editor view.
         layout().toggleEditorPreview();
-      } else if (doc && isPdfPath(doc.path)) {
-        preview.openPdf(doc.path);
-        layout().setPdfPanelVisible(true);
-      } else if (doc && isImagePath(doc.path)) {
-        preview.openImage(doc.path);
-        layout().setPdfPanelVisible(true);
-      } else {
-        layout().togglePdfPanel();
+      } else if (doc && doc.kind === "text" && isTexSourcePath(doc.path)) {
+        void runLatexBuild({ targetPath: doc.path, openOnSuccess: true });
+      } else if (doc && (doc.kind === "pdf" || doc.kind === "image")) {
+        // PDF/image files are already rendered directly in their editor tab.
+        preview.closePreview();
+        layout().setPdfPanelVisible(false);
       }
     },
   });
   commandRegistry.register({
     id: "latex.build",
-    title: "Build LaTeX",
+    title: "Compile LaTeX",
     category: "Run",
-    run: () => runLatexBuild(),
+    run: () => runLatexBuild({ openOnSuccess: false }),
   });
   commandRegistry.register({
     id: "editor.run",

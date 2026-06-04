@@ -1,9 +1,19 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { TabBar } from "./TabBar";
 import { initialEditorData, useEditorStore } from "../state/editorStore";
 import { initialLayoutData, useLayoutStore } from "../state/layoutStore";
+import { initialOutputData, useOutputStore } from "../state/outputStore";
+
+const runLatexBuildMock = vi.hoisted(() => vi.fn());
+const runActiveJuliaMock = vi.hoisted(() => vi.fn());
+vi.mock("../lib/latexBuild", () => ({
+  runLatexBuild: (...args: unknown[]) => runLatexBuildMock(...args),
+}));
+vi.mock("../lib/julia", () => ({
+  runActiveJulia: (...args: unknown[]) => runActiveJuliaMock(...args),
+}));
 
 const get = () => useEditorStore.getState();
 
@@ -15,6 +25,9 @@ const seed = () => {
 beforeEach(() => {
   useEditorStore.setState(initialEditorData, false);
   useLayoutStore.setState(initialLayoutData, false);
+  useOutputStore.setState(initialOutputData, false);
+  runLatexBuildMock.mockClear();
+  runActiveJuliaMock.mockClear();
 });
 
 describe("TabBar", () => {
@@ -95,6 +108,57 @@ describe("TabBar", () => {
     render(<TabBar />);
 
     expect(screen.getByRole("button", { name: "Open Preview" })).toBeInTheDocument();
+  });
+
+  it("compiles the active LaTeX file without opening preview", async () => {
+    get().openDoc({
+      path: "/w/paper.tex",
+      content: "\\documentclass{article}",
+      language: "latex",
+    });
+    render(<TabBar />);
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Compile LaTeX" }),
+    );
+
+    expect(runLatexBuildMock).toHaveBeenCalledWith({
+      targetPath: "/w/paper.tex",
+      openOnSuccess: false,
+    });
+  });
+
+  it("builds and opens the active LaTeX file from the Preview action", async () => {
+    get().openDoc({
+      path: "/w/paper.tex",
+      content: "\\documentclass{article}",
+      language: "latex",
+    });
+    render(<TabBar />);
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Preview LaTeX PDF" }),
+    );
+
+    expect(runLatexBuildMock).toHaveBeenCalledWith({
+      targetPath: "/w/paper.tex",
+      openOnSuccess: true,
+    });
+  });
+
+  it("runs the active Julia file from the Run action", async () => {
+    get().openDoc({
+      path: "/w/analysis.jl",
+      content: "println(1)",
+      language: "julia",
+    });
+    render(<TabBar />);
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Run Julia File or Selection" }),
+    );
+
+    expect(runActiveJuliaMock).toHaveBeenCalledOnce();
   });
 
   it("keeps the Preview action outside the scrollable tab list", () => {

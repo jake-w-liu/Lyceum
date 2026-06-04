@@ -2,7 +2,8 @@
 // for paging, zoom, and fit-to-width. Per-file page/zoom is persisted in the
 // preview store so reopening a PDF restores its last view.
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { WheelEvent } from "react";
 import type {
   PDFDocumentProxy,
   PDFPageProxy,
@@ -13,14 +14,32 @@ import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
 import { readFileBytes } from "../lib/ipc";
 import { usePreviewStore } from "../state/previewStore";
-import { clampPage, clampZoom, zoomIn, zoomOut } from "../lib/pdf";
+import {
+  clampPage,
+  clampZoom,
+  zoomFromWheel,
+  zoomIn,
+  zoomOut,
+} from "../lib/pdf";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
+
+type TextLayerRender = {
+  cancel: () => void;
+  render: () => Promise<unknown>;
+};
+
+type WebKitGestureEvent = Event & {
+  scale?: number;
+};
 
 export default function PdfViewer({ path }: { path: string }) {
   const docRef = useRef<PDFDocumentProxy | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const pageLayerRef = useRef<HTMLDivElement | null>(null);
+  const textLayerRef = useRef<HTMLDivElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
+  const gestureScaleRef = useRef(1);
   // The currently rendered page proxy, released when navigating to another page
   // so pdf.js does not accumulate per-page operator lists for the doc's lifetime.
   const lastPageRef = useRef<PDFPageProxy | null>(null);
@@ -34,6 +53,40 @@ export default function PdfViewer({ path }: { path: string }) {
   // shown inline so the toolbar stays usable (the user can page/zoom to recover).
   const [loadError, setLoadError] = useState<string | null>(null);
   const [renderError, setRenderError] = useState<string | null>(null);
+
+  const applyGestureScale = useCallback((scale: number) => {
+    if (!Number.isFinite(scale) || scale <= 0) return;
+    setZoom((current) => clampZoom(current * scale));
+  }, []);
+
+  useEffect(() => {
+    const wrap = wrapRef.current;
+    if (!wrap) return;
+
+    const onGestureStart = (event: Event) => {
+      event.preventDefault();
+      gestureScaleRef.current = 1;
+    };
+    const onGestureChange = (event: Event) => {
+      event.preventDefault();
+      const scale = (event as WebKitGestureEvent).scale ?? 1;
+      applyGestureScale(scale / gestureScaleRef.current);
+      gestureScaleRef.current = scale;
+    };
+    const onGestureEnd = (event: Event) => {
+      event.preventDefault();
+      gestureScaleRef.current = 1;
+    };
+
+    wrap.addEventListener("gesturestart", onGestureStart);
+    wrap.addEventListener("gesturechange", onGestureChange);
+    wrap.addEventListener("gestureend", onGestureEnd);
+    return () => {
+      wrap.removeEventListener("gesturestart", onGestureStart);
+      wrap.removeEventListener("gesturechange", onGestureChange);
+      wrap.removeEventListener("gestureend", onGestureEnd);
+    };
+  }, [applyGestureScale]);
 
   useEffect(() => {
     let cancelled = false;
@@ -68,6 +121,7 @@ export default function PdfViewer({ path }: { path: string }) {
     if (!doc) return;
     let cancelled = false;
     let task: RenderTask | null = null;
+    let textLayer: TextLayerRender | null = null;
     setRenderError(null);
     (async () => {
       try {
@@ -81,13 +135,28 @@ export default function PdfViewer({ path }: { path: string }) {
         lastPageRef.current = pdfPage;
         const viewport = pdfPage.getViewport({ scale: zoom });
         const canvas = canvasRef.current;
-        if (!canvas) return;
+        const pageLayer = pageLayerRef.current;
+        const textLayerElement = textLayerRef.current;
+        if (!canvas || !pageLayer || !textLayerElement) return;
+        pageLayer.style.width = `${viewport.width}px`;
+        pageLayer.style.height = `${viewport.height}px`;
+        textLayerElement.replaceChildren();
+        textLayerElement.style.setProperty("--scale-factor", String(zoom));
         const canvasContext = canvas.getContext("2d");
         if (!canvasContext) return;
         canvas.width = viewport.width;
         canvas.height = viewport.height;
+        canvas.style.width = `${viewport.width}px`;
+        canvas.style.height = `${viewport.height}px`;
         task = pdfPage.render({ canvasContext, viewport });
-        await task.promise;
+        const textContent = await pdfPage.getTextContent();
+        if (cancelled) return;
+        textLayer = new pdfjsLib.TextLayer({
+          container: textLayerElement,
+          textContentSource: textContent,
+          viewport,
+        });
+        await Promise.all([task.promise, textLayer.render()]);
       } catch (e) {
         if (!cancelled) {
           setRenderError(e instanceof Error ? e.message : String(e));
@@ -98,6 +167,7 @@ export default function PdfViewer({ path }: { path: string }) {
     return () => {
       cancelled = true;
       task?.cancel();
+      textLayer?.cancel();
     };
   }, [doc, page, zoom, path]);
 
@@ -113,6 +183,13 @@ export default function PdfViewer({ path }: { path: string }) {
     } catch (e) {
       setRenderError(e instanceof Error ? e.message : String(e));
     }
+  };
+
+  const onWheel = (event: WheelEvent<HTMLDivElement>) => {
+    if (!event.ctrlKey && !event.metaKey) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setZoom((current) => zoomFromWheel(current, event.deltaY));
   };
 
   if (loadError) {
@@ -169,8 +246,15 @@ export default function PdfViewer({ path }: { path: string }) {
           Failed to render page: {renderError}
         </div>
       )}
-      <div ref={wrapRef} className="pdf-canvas-wrap">
-        <canvas ref={canvasRef} className="pdf-canvas" />
+      <div ref={wrapRef} className="pdf-canvas-wrap" onWheel={onWheel}>
+        <div ref={pageLayerRef} className="pdf-page-layer">
+          <canvas ref={canvasRef} className="pdf-canvas" />
+          <div
+            ref={textLayerRef}
+            className="pdf-text-layer textLayer"
+            aria-label="Selectable PDF text"
+          />
+        </div>
       </div>
     </div>
   );

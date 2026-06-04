@@ -1,12 +1,15 @@
-// Editor state (Zustand): the set of open documents and the active tab.
+// Editor state (Zustand): the set of open documents/viewers and the active tab.
 //
-// Each open file is an EditorDoc tracking its on-disk text (savedContent) and
-// in-memory text (content); a doc is "dirty" when these differ. The Monaco
-// wrapper drives updateContent/markSaved; the tab bar drives setActive/closeDoc.
+// Text files track their on-disk text (savedContent) and in-memory text
+// (content); a text doc is "dirty" when these differ. Binary/previewable files
+// (PDF/images) still participate in the same tab model but are not writable
+// Monaco documents. The tab bar drives setActive/closeDoc.
 
 import { create } from "zustand";
 
 import { baseName } from "./workspaceStore";
+
+export type EditorDocKind = "text" | "pdf" | "image";
 
 export interface EditorDoc {
   path: string;
@@ -14,6 +17,7 @@ export interface EditorDoc {
   content: string;
   savedContent: string;
   language: string;
+  kind: EditorDocKind;
 }
 
 export interface EditorData {
@@ -25,7 +29,12 @@ export interface EditorData {
 
 /** True when the in-memory content has unsaved changes. */
 export function isDirty(doc: EditorDoc): boolean {
-  return doc.content !== doc.savedContent;
+  return doc.kind === "text" && doc.content !== doc.savedContent;
+}
+
+/** True when the tab is backed by an editable Monaco text model. */
+export function isTextDoc(doc: EditorDoc): boolean {
+  return doc.kind === "text";
 }
 
 /** The doc whose path matches activePath, or null when none is active. */
@@ -37,7 +46,12 @@ export function getActiveDoc(state: {
 }
 
 export interface EditorActions {
-  openDoc: (input: { path: string; content: string; language: string }) => void;
+  openDoc: (input: {
+    path: string;
+    content: string;
+    language: string;
+    kind?: EditorDocKind;
+  }) => void;
   closeDoc: (path: string) => void;
   setActive: (path: string) => void;
   updateContent: (path: string, content: string) => void;
@@ -67,6 +81,7 @@ export const useEditorStore = create<EditorState>()((set) => ({
         content: input.content,
         savedContent: input.content,
         language: input.language,
+        kind: input.kind ?? "text",
       };
       return { docs: [...s.docs, doc], activePath: input.path };
     }),
@@ -91,14 +106,16 @@ export const useEditorStore = create<EditorState>()((set) => ({
   updateContent: (path, content) =>
     set((s) => ({
       docs: s.docs.map((doc) =>
-        doc.path === path ? { ...doc, content } : doc,
+        doc.path === path && doc.kind === "text" ? { ...doc, content } : doc,
       ),
     })),
 
   markSaved: (path) =>
     set((s) => ({
       docs: s.docs.map((doc) =>
-        doc.path === path ? { ...doc, savedContent: doc.content } : doc,
+        doc.path === path && doc.kind === "text"
+          ? { ...doc, savedContent: doc.content }
+          : doc,
       ),
     })),
 

@@ -5,13 +5,13 @@
 
 import { useEffect } from "react";
 import { isMac } from "./useLayoutKeybindings";
-import { getActiveDoc, useEditorStore } from "../state/editorStore";
+import { getActiveDoc, isTextDoc, useEditorStore } from "../state/editorStore";
 import { writeFile } from "../lib/ipc";
 
 /** Persist the active document to disk and mark it saved. No-op if none open. */
 export async function saveActiveDoc(): Promise<void> {
   const doc = getActiveDoc(useEditorStore.getState());
-  if (!doc) return;
+  if (!doc || !isTextDoc(doc)) return;
   try {
     await writeFile(doc.path, doc.content);
     useEditorStore.getState().markSaved(doc.path);

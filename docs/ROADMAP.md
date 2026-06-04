@@ -104,12 +104,13 @@ planned but not yet started. This roadmap is the agreed plan of record.
 **Scope:**
 - Rust backend commands to pick/open a folder and read directory contents (lazy, per-expanded node).
 - TS IPC wrappers in `lib/` for directory listing and the open-folder dialog.
-- A file-explorer tree component in the sidebar with expand/collapse, file/folder icons, and selection.
+- A file-explorer tree component in the sidebar with expand/collapse, file/folder icons, selection, modifier multi-select, and undoable delete.
 - Zustand store for the workspace root and expanded-node state.
 
 **Done when:**
 - Choosing a folder shows its tree in the sidebar.
 - Expanding a directory lazily lists its children; selecting a file emits an open intent.
+- Cmd/Ctrl-click toggles selected rows; Shift-click selects visible ranges; Explorer deletes move files to a workspace-local trash that supports undo/redo.
 - No background indexing occurs (directories read on demand only).
 
 **Tests that must pass:**
@@ -249,12 +250,13 @@ planned but not yet started. This roadmap is the agreed plan of record.
 **Scope:**
 - Run the active file or the current selection in an integrated terminal/PTY session using the configured
   `juliaPath`.
-- Wire `Cmd/Ctrl+Enter` to "run current file or selected code".
+- Wire `Cmd/Ctrl+Enter` and a tab-bar Run button to "run current file or selected code".
 - Surface run output in the terminal panel; sensible behavior when nothing is selected (run whole file).
 - Register run commands in the command registry.
 
 **Done when:**
-- `Cmd/Ctrl+Enter` with no selection runs the whole file; with a selection runs the selection.
+- `Cmd/Ctrl+Enter` or the Run button with no selection runs the whole file; with
+  a selection runs the selection.
 - Output appears in the terminal; `juliaPath` is respected.
 
 **Tests that must pass:**
@@ -320,19 +322,21 @@ planned but not yet started. This roadmap is the agreed plan of record.
 **Scope:**
 - Markdown: live rendered preview; `Cmd/Ctrl+Shift+V` opens the preview.
 - HTML: rendered preview in a sandboxed iframe; `Cmd/Ctrl+Shift+V` opens the preview.
-- LaTeX: run `latexBuildCommand` (e.g. `latexmk -pdf main.tex`) via the backend; on success open the
-  resulting PDF in the M6 PDF.js viewer.
+- LaTeX: save and compile the active `.tex` file by retargeting `latexBuildCommand`
+  (e.g. `latexmk -pdf main.tex`) to that file; Compile writes the resulting PDF
+  beside the source, and Preview opens that PDF in the M6 PDF.js viewer.
 - Surface build output/errors in the terminal/bottom panel.
 
 **Done when:**
 - `Cmd/Ctrl+Shift+V` shows a Markdown or HTML preview that updates as the document changes.
-- Running the LaTeX build produces a PDF and opens it in the PDF viewer; build errors are visible.
+- Running the LaTeX compile/preview flow for the active `.tex` file produces a
+  PDF; Preview opens it in the PDF viewer, and build errors are visible.
 
 **Tests that must pass:**
 - Vitest: Markdown preview renders source to expected output and updates on change.
 - Vitest: HTML preview builds a sandboxed iframe document with local asset resolution.
-- Rust: the LaTeX build command runs `latexBuildCommand` with correct arguments and reports
-  success/failure and the output PDF path.
+- Vitest: the LaTeX build command retargets `latexBuildCommand` to the active
+  `.tex` file and reports the output PDF path.
 
 ---
 

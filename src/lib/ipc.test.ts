@@ -9,7 +9,12 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: (...args: unknown[]) => openMock(...args),
 }));
 
-import { getAppInfo, pickFolder, readFileBytes } from "./ipc";
+import {
+  deleteFileIfExists,
+  getAppInfo,
+  pickFolder,
+  readFileBytes,
+} from "./ipc";
 
 beforeEach(() => {
   invokeMock.mockReset();
@@ -54,5 +59,17 @@ describe("readFileBytes", () => {
     const bytes = await readFileBytes("/f");
     expect(bytes).toBeInstanceOf(Uint8Array);
     expect(Array.from(bytes)).toEqual([1, 2, 255]);
+  });
+});
+
+describe("deleteFileIfExists", () => {
+  it("invokes the file-only delete command and returns whether a file was removed", async () => {
+    invokeMock.mockResolvedValue(true);
+
+    await expect(deleteFileIfExists("/w/main.pdf")).resolves.toBe(true);
+
+    expect(invokeMock).toHaveBeenCalledWith("delete_file_if_exists", {
+      path: "/w/main.pdf",
+    });
   });
 });

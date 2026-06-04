@@ -39,6 +39,14 @@ export function isPdfPath(path: string): boolean {
   return extensionForPath(path) === "pdf";
 }
 
+export function isTexSourcePath(path: string): boolean {
+  return extensionForPath(path) === "tex";
+}
+
+export function isJuliaSourcePath(path: string): boolean {
+  return extensionForPath(path) === "jl";
+}
+
 export function imageMimeForPath(path: string): string | null {
   return IMAGE_MIME_BY_EXTENSION[extensionForPath(path)] ?? null;
 }

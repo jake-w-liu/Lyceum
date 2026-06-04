@@ -6,6 +6,7 @@ import {
   ZOOM_MIN,
   clampPage,
   clampZoom,
+  zoomFromWheel,
   zoomIn,
   zoomOut,
 } from "./pdf";
@@ -41,6 +42,21 @@ describe("zoomOut", () => {
 
   it("zooms out by 1.25x", () => {
     expect(zoomOut(1.25)).toBe(1);
+  });
+});
+
+describe("zoomFromWheel", () => {
+  it("zooms in for negative wheel delta", () => {
+    expect(zoomFromWheel(1, -100)).toBeGreaterThan(1);
+  });
+
+  it("zooms out for positive wheel delta", () => {
+    expect(zoomFromWheel(1, 100)).toBeLessThan(1);
+  });
+
+  it("respects zoom bounds", () => {
+    expect(zoomFromWheel(ZOOM_MAX, -1000)).toBe(ZOOM_MAX);
+    expect(zoomFromWheel(ZOOM_MIN, 1000)).toBe(ZOOM_MIN);
   });
 });
 

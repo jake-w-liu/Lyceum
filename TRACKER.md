@@ -144,7 +144,7 @@ Primary progress tracker for the lightweight, VS Code-inspired research IDE buil
   - [x] Cmd/Ctrl+/ toggle line comment (Monaco built-in)
   - [x] Alt/Option+Up/Down move line; Shift+Alt/Option+Up/Down duplicate line (Monaco built-in)
   - [x] Cmd/Ctrl+Enter run current file or selected code — completed in **M8** (Julia run)
-  - [x] Cmd/Ctrl+Shift+V open Markdown/HTML/PDF/image preview
+  - [x] Cmd/Ctrl+Shift+V toggles Markdown/HTML rendered preview
   - [x] Esc close command palette / quick open / find box / modal panel
 - [x] **Tests**
   - [x] Command registry: register/execute/duplicate-id handling
@@ -168,9 +168,11 @@ Primary progress tracker for the lightweight, VS Code-inspired research IDE buil
 
 - [x] Lazy-load PDF.js (`pdfjs-dist`) viewer component (own chunk; worker chunked separately)
 - [x] Render PDF from a workspace file path (page navigation, zoom in/out, fit width)
-- [x] Side-panel preview (open a `.pdf` from the explorer → renders in the preview panel)
+- [x] Support Cmd/Ctrl-wheel and trackpad pinch zoom in the PDF viewer
+- [x] Render PDF.js text layer for text selection/copy when the PDF contains embedded text
+- [x] Editor-tab preview (open a `.pdf` from the explorer → renders as a normal tab)
 - [x] **Tests**
-  - [x] Frontend: preview store (open/close/remember view state) + zoom/page helpers (11 tests)
+  - [x] Frontend: preview store (open/close/remember view state) + zoom/page helpers (14 tests)
   - [~] Viewer canvas rendering + page-count verified via `tauri dev` smoke (pdf.js needs a real worker/canvas)
 
 ### M7 — Syntax highlighting + themes
@@ -189,6 +191,7 @@ Primary progress tracker for the lightweight, VS Code-inspired research IDE buil
 
 - [x] Run current file via Julia (Cmd/Ctrl+Enter → `editor.run`) — `juliaPath` defaults to `julia`; setting wiring in M10
 - [x] Run selected code in the active editor (selection → `julia -e <code>`)
+- [x] Tab-bar Run button for active `.jl` files dispatches the same run-file/run-selection path
 - [x] Stream Julia process stdout/stderr to the bottom panel Output tab (`julia:output:<id>` events)
 - [x] Handle run errors and non-zero exit codes in the UI (exit code + spawn errors shown)
 - [x] **Tests**
@@ -224,8 +227,8 @@ Primary progress tracker for the lightweight, VS Code-inspired research IDE buil
 ### M11 — Markdown/LaTeX build-and-preview workflow
 
 - [x] Markdown preview (Cmd/Ctrl+Shift+V → "Open Preview") rendered live from editor content (`MarkdownView`, lazy markdown-it, HTML escaped)
-- [x] LaTeX build using `latexBuildCommand` setting via `run_build` (sh -c, streamed to Output) and a "Build LaTeX" command
-- [x] Open resulting PDF in the preview on success (`deriveOutputPdf` derives the output name)
+- [x] LaTeX Preview tab action / Build LaTeX command saves and compiles the active `.tex` file using `latexBuildCommand` retargeted to that file
+- [x] Open resulting PDF as an editor tab on success (`deriveOutputPdf` derives the output name)
 - [x] Surface build output/errors in the bottom-panel Output tab (stdout/stderr + exit code)
 - [x] **Tests**
   - [x] Frontend: `renderMarkdown` (heading/strong/HTML-escaping), `deriveOutputPdf` (5), `MarkdownView` render + empty state

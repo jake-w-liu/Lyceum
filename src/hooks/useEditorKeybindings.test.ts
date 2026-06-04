@@ -37,6 +37,19 @@ describe("saveActiveDoc", () => {
     await saveActiveDoc();
     expect(writeFile).not.toHaveBeenCalled();
   });
+
+  it("does not save viewer tabs", async () => {
+    get().openDoc({
+      path: "/w/paper.pdf",
+      content: "",
+      language: "pdf",
+      kind: "pdf",
+    });
+
+    await saveActiveDoc();
+
+    expect(writeFile).not.toHaveBeenCalled();
+  });
 });
 
 describe("focusAdjacentTab", () => {

@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "./App";
 import { initialLayoutData, useLayoutStore } from "./state/layoutStore";
 import { initialPreviewData, usePreviewStore } from "./state/previewStore";
+import { initialEditorData, useEditorStore } from "./state/editorStore";
 import { initialTreeData, useTreeStore } from "./state/treeStore";
 import {
   initialWorkspaceData,
@@ -36,6 +37,7 @@ const ROOT = "/ws";
 const reset = () => {
   useLayoutStore.setState(initialLayoutData, false);
   usePreviewStore.setState(initialPreviewData, false);
+  useEditorStore.setState(initialEditorData, false);
   useTreeStore.setState(initialTreeData, false);
   useWorkspaceStore.setState(initialWorkspaceData, false);
   vi.mocked(readDirectory).mockReset();
@@ -88,25 +90,29 @@ describe("App shell", () => {
     expect(screen.getByLabelText("Panel")).toBeInTheDocument();
   });
 
-  it("opens the preview panel with modifier + Shift + V", async () => {
+  it("does not open a side preview panel with modifier + Shift + V and no previewable tab", async () => {
     render(<App />);
     await screen.findByTestId("status-platform");
     expect(screen.queryByLabelText("Preview")).not.toBeInTheDocument();
     fireEvent.keyDown(document, { key: "V", ctrlKey: true, shiftKey: true });
-    expect(screen.getByLabelText("Preview")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Preview")).not.toBeInTheDocument();
   });
 
-  it("opens an image preview when a PNG is clicked in Explorer", async () => {
+  it("opens an image viewer tab when a PNG is clicked in Explorer", async () => {
     useWorkspaceStore.getState().openWorkspace(ROOT);
     render(<App />);
     await screen.findByTestId("status-platform");
 
     await userEvent.click(await screen.findByText("icon.png"));
 
-    const preview = await screen.findByLabelText("Preview");
-    expect(usePreviewStore.getState().imagePath).toBe(`${ROOT}/icon.png`);
-    expect(within(preview).getByText("icon.png")).toBeInTheDocument();
-    expect(await within(preview).findByRole("img", { name: "icon.png" }))
+    expect(await screen.findByRole("tab", { name: "icon.png" }))
+      .toHaveAttribute("aria-selected", "true");
+    expect(useEditorStore.getState().docs).toMatchObject([
+      { path: `${ROOT}/icon.png`, kind: "image" },
+    ]);
+    expect(usePreviewStore.getState().imagePath).toBeNull();
+    expect(screen.queryByLabelText("Preview")).not.toBeInTheDocument();
+    expect(await screen.findByRole("img", { name: "icon.png" }))
       .toHaveAttribute("src", "blob:icon");
   });
 });

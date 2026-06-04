@@ -21,7 +21,8 @@ A lightweight, VS Code-inspired **research IDE** built with Tauri, with a Julia-
 
 - **Node.js** (LTS) and npm — frontend toolchain and the Vite/Tauri CLI.
 - **Rust** (stable, edition 2021) with Cargo — Tauri backend. See the [Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/) for platform-specific system dependencies.
-- **Julia** (optional) — required only for the Julia run-file / run-selection workflow and Julia LanguageServer.jl support, not for building the app itself.
+- **Julia** (optional) — required only for the Julia run-file / run-selection workflow and Julia LanguageServer.jl support, not for building the app itself. Lyceum searches common macOS GUI-app tool paths such as `~/.juliaup/bin`, but `juliaPath` can also be set explicitly.
+- **TeX engine** (optional) — required only for LaTeX preview/build. Lyceum auto-selects an installed `latexmk`, `tectonic`, `pdflatex`, `xelatex`, or `lualatex` when the default build command is unchanged. Install a lightweight engine such as Tectonic (`brew install tectonic`) or a full TeX distribution such as MacTeX/BasicTeX, or set `latexBuildCommand` to a full compiler path.
 
 ## Install dependencies
 
@@ -141,10 +142,34 @@ say **Ctrl**.
 | Alt/Option+Up/Down | Move line |
 | Shift+Alt/Option+Up/Down | Duplicate line |
 | Cmd/Ctrl+Enter | Run current file or selected code |
-| Cmd/Ctrl+Shift+V | Open Markdown/HTML/PDF/image preview |
+| Cmd/Ctrl+Shift+V | Preview Markdown/HTML/LaTeX |
 | Esc | Close command palette / quick open / find box / modal panel |
 
 See [docs/KEYBINDINGS.md](docs/KEYBINDINGS.md) for the full reference.
+
+## Julia and LaTeX
+
+- **Explorer selection and delete undo:** click a file or folder normally to
+  select and open/toggle it. Cmd/Ctrl-click toggles individual rows, and
+  Shift-click selects a contiguous visible range. **Delete Selected** moves
+  items into a workspace-local `.lyceum-trash/` folder hidden from the Explorer;
+  with the Explorer focused, Cmd/Ctrl+Z restores the last delete and
+  Cmd/Ctrl+Shift+Z or Ctrl+Y redoes it.
+- **Run Julia:** open a `.jl` file and click the tab-bar **Run** button, or
+  press Cmd/Ctrl+Enter. If text is selected, only the selection runs; otherwise
+  the whole file runs. Output appears in the bottom Output panel. The
+  `juliaPath` setting defaults to `julia` on `PATH`.
+- **Preview LaTeX:** open a `.tex` file and click the tab-bar **Preview** button
+  (or run **Open Preview** from the command palette). Lyceum saves the current
+  buffer, retargets `latexBuildCommand` to that file, runs it in the file's
+  directory, and opens the produced PDF as a normal editor tab. With the stock
+  command (`latexmk -pdf main.tex`), Lyceum first checks for installed TeX tools
+  and can use `latexmk`, `tectonic`, `pdflatex`, `xelatex`, or `lualatex`.
+- **Compile LaTeX:** open a `.tex` file and click the tab-bar **Compile** button
+  (or run **Compile LaTeX** from the command palette). This runs the same real
+  PDF build, removes the previous same-name `.pdf` first, writes the fresh
+  `.pdf` beside the `.tex` file, refreshes the Explorer, and leaves the active
+  editor tab in source mode.
 
 ## Settings keys
 

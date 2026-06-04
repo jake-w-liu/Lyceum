@@ -21,7 +21,9 @@ describe("lazy loading keeps heavy deps out of the initial bundle", () => {
     expect(bottomPanel).toMatch(/lazy\([\s\S]*?import\("\.\/TerminalPanel"\)/);
   });
 
-  it("preview viewers are lazy-loaded from the preview panel", () => {
+  it("preview viewers are lazy-loaded from the editor area and preview panel", () => {
+    expect(editorArea).toMatch(/lazy\([\s\S]*?import\("\.\/PdfViewer"\)/);
+    expect(editorArea).toMatch(/lazy\([\s\S]*?import\("\.\/ImageViewer"\)/);
     expect(pdfPanel).toMatch(/lazy\([\s\S]*?import\("\.\/PdfViewer"\)/);
     expect(pdfPanel).toMatch(/lazy\([\s\S]*?import\("\.\/ImageViewer"\)/);
     expect(pdfPanel).toMatch(/lazy\([\s\S]*?import\("\.\/MarkdownView"\)/);

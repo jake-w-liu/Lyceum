@@ -13,7 +13,7 @@ vi.mock("./ipc", () => ({
   writeFile: (...args: unknown[]) => writeFileMock(...args),
 }));
 
-import { runActiveJulia, runInvocation } from "./julia";
+import { missingJuliaMessage, runActiveJulia, runInvocation } from "./julia";
 import type { EditorDoc } from "../state/editorStore";
 import { initialEditorData, useEditorStore } from "../state/editorStore";
 import { initialOutputData, useOutputStore } from "../state/outputStore";
@@ -29,6 +29,7 @@ const doc = (path: string): EditorDoc => ({
   content: "println(1)",
   savedContent: "println(1)",
   language: "julia",
+  kind: "text",
 });
 
 describe("runInvocation", () => {
@@ -40,6 +41,15 @@ describe("runInvocation", () => {
   });
   it("runs the whole file when the selection is empty/whitespace", () => {
     expect(runInvocation(doc("/w/a.jl"), "   ")).toEqual({ file: "/w/a.jl" });
+  });
+
+  it("does not run viewer tabs", () => {
+    expect(
+      runInvocation(
+        { ...doc("/w/paper.pdf"), language: "pdf", kind: "pdf" },
+        "1 + 1",
+      ),
+    ).toBeNull();
   });
 });
 
@@ -104,5 +114,31 @@ describe("runActiveJulia", () => {
     await runActiveJulia();
     expect(invokeMock).not.toHaveBeenCalled();
     expect(listenMock).not.toHaveBeenCalled();
+  });
+
+  it("reports an actionable message when Julia cannot be started", async () => {
+    invokeMock.mockRejectedValueOnce(
+      "failed to start julia: No such file or directory (os error 2)",
+    );
+    useEditorStore
+      .getState()
+      .openDoc({ path: "/w/a.jl", content: "x", language: "julia" });
+
+    await runActiveJulia();
+
+    expect(
+      useOutputStore
+        .getState()
+        .lines.some((line) => line.includes("set juliaPath")),
+    ).toBe(true);
+  });
+});
+
+describe("missingJuliaMessage", () => {
+  it("recognizes missing executable errors", () => {
+    expect(missingJuliaMessage("No such file or directory")).toContain(
+      "Julia was not found",
+    );
+    expect(missingJuliaMessage("permission denied")).toBeNull();
   });
 });

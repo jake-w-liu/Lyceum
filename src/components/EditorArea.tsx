@@ -9,7 +9,7 @@ import {
   isInlinePreviewPath,
   isMarkdownPath,
 } from "../lib/fileTypes";
-import { useEditorStore } from "../state/editorStore";
+import { isTextDoc, useEditorStore } from "../state/editorStore";
 import { useLayoutStore } from "../state/layoutStore";
 import { TabBar } from "./TabBar";
 
@@ -20,6 +20,10 @@ const MarkdownView = lazy(() =>
 );
 const HtmlPreview = lazy(() =>
   import("./HtmlPreview").then((m) => ({ default: m.HtmlPreview })),
+);
+const PdfViewer = lazy(() => import("./PdfViewer"));
+const ImageViewer = lazy(() =>
+  import("./ImageViewer").then((m) => ({ default: m.ImageViewer })),
 );
 
 function Welcome() {
@@ -51,10 +55,19 @@ function Welcome() {
 export function EditorArea() {
   const hasDocs = useEditorStore((s) => s.docs.length > 0);
   const activePath = useEditorStore((s) => s.activePath);
+  const activeKind = useEditorStore(
+    (s) => s.docs.find((doc) => doc.path === s.activePath)?.kind ?? null,
+  );
+  const hasTextDocs = useEditorStore((s) => s.docs.some(isTextDoc));
   const editorPreview = useLayoutStore((s) => s.editorPreview);
   // Preview replaces the editor view in place for supported text preview types.
   const showPreview =
-    editorPreview && !!activePath && isInlinePreviewPath(activePath);
+    editorPreview &&
+    activeKind === "text" &&
+    !!activePath &&
+    isInlinePreviewPath(activePath);
+  const showPdf = activeKind === "pdf";
+  const showImage = activeKind === "image";
   const previewLabel =
     activePath && isHtmlPath(activePath) ? "HTML preview" : "Markdown preview";
 
@@ -66,11 +79,13 @@ export function EditorArea() {
           <div className="editor-host-wrap">
             {/* Monaco stays mounted under the preview overlay so toggling back to
                 the source keeps cursor/scroll/undo and avoids restarting LSP. */}
-            <Suspense
-              fallback={<div className="editor-loading">Loading editor…</div>}
-            >
-              <MonacoEditor />
-            </Suspense>
+            {hasTextDocs && (
+              <Suspense
+                fallback={<div className="editor-loading">Loading editor…</div>}
+              >
+                <MonacoEditor />
+              </Suspense>
+            )}
             {showPreview && activePath && (
               <div className="editor-preview-overlay" aria-label={previewLabel}>
                 <Suspense
@@ -81,6 +96,24 @@ export function EditorArea() {
                   ) : (
                     <HtmlPreview key={activePath} path={activePath} />
                   )}
+                </Suspense>
+              </div>
+            )}
+            {showPdf && activePath && (
+              <div className="editor-preview-overlay" aria-label="PDF preview">
+                <Suspense
+                  fallback={<div className="editor-loading">Loading PDF…</div>}
+                >
+                  <PdfViewer key={activePath} path={activePath} />
+                </Suspense>
+              </div>
+            )}
+            {showImage && activePath && (
+              <div className="editor-preview-overlay" aria-label="Image preview">
+                <Suspense
+                  fallback={<div className="editor-loading">Loading image…</div>}
+                >
+                  <ImageViewer key={activePath} path={activePath} />
                 </Suspense>
               </div>
             )}

@@ -21,6 +21,17 @@ export interface DirEntry {
   isDir: boolean;
 }
 
+export interface TrashItem {
+  originalPath: string;
+  trashedPath: string;
+  isDir: boolean;
+}
+
+export interface TrashBatch {
+  id: string;
+  items: TrashItem[];
+}
+
 const FALLBACK_APP_INFO: AppInfo = {
   name: "lyceum",
   version: "0.1.0",
@@ -93,6 +104,35 @@ export async function renamePath(from: string, to: string): Promise<void> {
 /** Delete a file or directory tree. */
 export async function deletePath(path: string): Promise<void> {
   await invoke("delete_path", { path });
+}
+
+/** Delete a file if it exists. Returns true when a file was removed. */
+export async function deleteFileIfExists(path: string): Promise<boolean> {
+  return invoke<boolean>("delete_file_if_exists", { path });
+}
+
+/** Move files/directories into Lyceum's workspace-local trash for undoable delete. */
+export async function movePathsToTrash(
+  root: string,
+  paths: string[],
+): Promise<TrashBatch> {
+  return invoke<TrashBatch>("move_paths_to_trash", { root, paths });
+}
+
+/** Restore a previously deleted trash batch. */
+export async function restoreTrashBatch(
+  root: string,
+  items: TrashItem[],
+): Promise<void> {
+  await invoke("restore_trash_batch", { root, items });
+}
+
+/** Re-apply a previously undone delete batch. */
+export async function redoTrashBatch(
+  root: string,
+  items: TrashItem[],
+): Promise<void> {
+  await invoke("redo_trash_batch", { root, items });
 }
 
 /** A single workspace content-search match, mirroring the Rust `SearchMatch`. */

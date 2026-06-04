@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { registerBuiltinCommands } from "./builtinCommands";
 import { commandRegistry } from "./commandRegistry";
 import { DEFAULT_KEYMAP } from "../keybindings/keybindingRegistry";
@@ -8,6 +8,11 @@ import { initialThemeData, useThemeStore } from "../state/themeStore";
 import { initialEditorData, useEditorStore } from "../state/editorStore";
 import { initialPreviewData, usePreviewStore } from "../state/previewStore";
 
+const runLatexBuildMock = vi.hoisted(() => vi.fn());
+vi.mock("../lib/latexBuild", () => ({
+  runLatexBuild: (...args: unknown[]) => runLatexBuildMock(...args),
+}));
+
 beforeEach(() => {
   registerBuiltinCommands(); // idempotent; ensures the registry is populated
   useTerminalStore.setState(initialTerminalData, false);
@@ -15,6 +20,7 @@ beforeEach(() => {
   useThemeStore.setState(initialThemeData, false);
   useEditorStore.setState(initialEditorData, false);
   usePreviewStore.setState(initialPreviewData, false);
+  runLatexBuildMock.mockClear();
 });
 
 describe("builtinCommands", () => {
@@ -48,6 +54,66 @@ describe("builtinCommands", () => {
     await commandRegistry.execute("preview.open");
 
     expect(useLayoutStore.getState().editorPreview).toBe(true);
+    expect(useLayoutStore.getState().pdfPanelVisible).toBe(false);
+    expect(usePreviewStore.getState().pdfPath).toBeNull();
+    expect(usePreviewStore.getState().imagePath).toBeNull();
+  });
+
+  it("preview.open keeps PDF/image viewer tabs in the editor area", async () => {
+    useLayoutStore.getState().setPdfPanelVisible(true);
+    usePreviewStore.getState().openPdf("/old/side-panel.pdf");
+    useEditorStore.getState().openDoc({
+      path: "/w/paper.pdf",
+      content: "",
+      language: "pdf",
+      kind: "pdf",
+    });
+
+    await commandRegistry.execute("preview.open");
+
+    expect(useEditorStore.getState().activePath).toBe("/w/paper.pdf");
+    expect(useLayoutStore.getState().pdfPanelVisible).toBe(false);
+    expect(usePreviewStore.getState().pdfPath).toBeNull();
+  });
+
+  it("preview.open builds the active LaTeX file", async () => {
+    useEditorStore.getState().openDoc({
+      path: "/w/paper.tex",
+      content: "\\documentclass{article}",
+      language: "latex",
+    });
+
+    await commandRegistry.execute("preview.open");
+
+    expect(runLatexBuildMock).toHaveBeenCalledWith({
+      targetPath: "/w/paper.tex",
+      openOnSuccess: true,
+    });
+    expect(useLayoutStore.getState().pdfPanelVisible).toBe(false);
+  });
+
+  it("latex.build compiles the active LaTeX file without opening preview", async () => {
+    useEditorStore.getState().openDoc({
+      path: "/w/paper.tex",
+      content: "\\documentclass{article}",
+      language: "latex",
+    });
+
+    await commandRegistry.execute("latex.build");
+
+    expect(runLatexBuildMock).toHaveBeenCalledWith({ openOnSuccess: false });
+  });
+
+  it("preview.open is a no-op for unsupported active files", async () => {
+    useEditorStore.getState().openDoc({
+      path: "/w/main.ts",
+      content: "console.log(1)",
+      language: "typescript",
+    });
+
+    await commandRegistry.execute("preview.open");
+
+    expect(useLayoutStore.getState().editorPreview).toBe(false);
     expect(useLayoutStore.getState().pdfPanelVisible).toBe(false);
     expect(usePreviewStore.getState().pdfPath).toBeNull();
     expect(usePreviewStore.getState().imagePath).toBeNull();

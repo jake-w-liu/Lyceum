@@ -2,13 +2,15 @@
 // children cache) so it supports refresh / collapse-all / reveal, plus a toolbar
 // and per-row actions for create / rename / delete. Directories load lazily.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   createDirectory,
   createFile,
-  deletePath,
+  movePathsToTrash,
   readDirectory,
+  redoTrashBatch,
   renamePath,
+  restoreTrashBatch,
   type DirEntry,
 } from "../lib/ipc";
 import { useTreeStore } from "../state/treeStore";
@@ -27,44 +29,105 @@ function joinPath(parent: string, name: string): string {
   return parent.endsWith(sep) ? `${parent}${name}` : `${parent}${sep}${name}`;
 }
 
+function pathSeparator(path: string): string {
+  return path.includes("\\") ? "\\" : "/";
+}
+
+function isSameOrDescendant(path: string, parent: string): boolean {
+  const sep = pathSeparator(parent);
+  return path === parent || path.startsWith(parent.endsWith(sep) ? parent : `${parent}${sep}`);
+}
+
+function isEditableEventTarget(target: EventTarget | null): boolean {
+  return (
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    (target instanceof HTMLElement && target.isContentEditable)
+  );
+}
+
 function loadInto(path: string) {
   readDirectory(path)
     .then((entries) => useTreeStore.getState().setChildren(path, entries))
     .catch(() => useTreeStore.getState().setChildren(path, []));
 }
 
+interface VisibleEntry {
+  entry: DirEntry;
+  depth: number;
+}
+
+function flattenVisibleEntries(
+  entries: DirEntry[] | undefined,
+  children: Record<string, DirEntry[]>,
+  expanded: Record<string, boolean>,
+  depth = 0,
+): VisibleEntry[] {
+  if (!entries) return [];
+  const out: VisibleEntry[] = [];
+  for (const entry of entries) {
+    out.push({ entry, depth });
+    if (entry.isDir && expanded[entry.path]) {
+      out.push(
+        ...flattenVisibleEntries(children[entry.path], children, expanded, depth + 1),
+      );
+    }
+  }
+  return out;
+}
+
 interface NodeProps {
   entry: DirEntry;
   depth: number;
   onOpenFile: (path: string) => void;
+  onDeleteEntries: (entries: DirEntry[]) => void;
+  selectedPaths: string[];
+  visiblePaths: string[];
+  selectedEntries: DirEntry[];
 }
 
-function TreeNode({ entry, depth, onOpenFile }: NodeProps) {
+function TreeNode({
+  entry,
+  depth,
+  onOpenFile,
+  onDeleteEntries,
+  selectedPaths,
+  visiblePaths,
+  selectedEntries,
+}: NodeProps) {
   const expanded = useTreeStore((s) => Boolean(s.expanded[entry.path]));
   const children = useTreeStore((s) => s.children[entry.path]);
   const refreshNonce = useTreeStore((s) => s.refreshNonce);
   const [renaming, setRenaming] = useState(false);
+  const selected = selectedPaths.includes(entry.path);
 
   // (Re)load children when an expanded directory has no cached entries.
   useEffect(() => {
     if (entry.isDir && expanded && children === undefined) loadInto(entry.path);
   }, [entry.isDir, entry.path, expanded, children, refreshNonce]);
 
-  function onActivate() {
+  function onActivate(e: React.MouseEvent) {
+    const tree = useTreeStore.getState();
+    if (e.shiftKey) {
+      tree.selectRange(visiblePaths, entry.path);
+      return;
+    }
+    if (e.metaKey || e.ctrlKey) {
+      tree.toggleSelected(entry.path);
+      return;
+    }
+    tree.selectSingle(entry.path);
     if (entry.isDir) useTreeStore.getState().toggleExpanded(entry.path);
     else onOpenFile(entry.path);
   }
 
-  async function onDelete(e: React.MouseEvent) {
+  function entriesForDelete(): DirEntry[] {
+    return selected && selectedEntries.length > 1 ? selectedEntries : [entry];
+  }
+
+  function onDelete(e: React.MouseEvent) {
     e.stopPropagation();
-    if (!confirm(`Delete "${entry.name}"? This cannot be undone.`)) return;
-    try {
-      await deletePath(entry.path);
-      useEditorStore.getState().closeDoc(entry.path);
-      useTreeStore.getState().refresh();
-    } catch (err) {
-      console.error("delete failed", err);
-    }
+    onDeleteEntries(entriesForDelete());
   }
 
   async function commitRename(name: string) {
@@ -81,9 +144,14 @@ function TreeNode({ entry, depth, onOpenFile }: NodeProps) {
 
   return (
     <li className="tree-node" role="none">
-      <div className="tree-row" style={{ paddingLeft: 8 + depth * 12 }}>
+      <div
+        className={"tree-row" + (selected ? " selected" : "")}
+        style={{ paddingLeft: 8 + depth * 12 }}
+      >
         <button
           type="button"
+          role="treeitem"
+          aria-selected={selected}
           className="tree-row-main"
           aria-expanded={entry.isDir ? expanded : undefined}
           title={entry.name}
@@ -133,6 +201,10 @@ function TreeNode({ entry, depth, onOpenFile }: NodeProps) {
               entry={child}
               depth={depth + 1}
               onOpenFile={onOpenFile}
+              onDeleteEntries={onDeleteEntries}
+              selectedPaths={selectedPaths}
+              visiblePaths={visiblePaths}
+              selectedEntries={selectedEntries}
             />
           ))}
         </ul>
@@ -173,9 +245,29 @@ export interface ExplorerProps {
 
 export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
   const rootChildren = useTreeStore((s) => s.children[rootPath]);
+  const allChildren = useTreeStore((s) => s.children);
+  const expanded = useTreeStore((s) => s.expanded);
   const refreshNonce = useTreeStore((s) => s.refreshNonce);
+  const selectedPaths = useTreeStore((s) => s.selectedPaths);
+  const deleteUndoStack = useTreeStore((s) => s.deleteUndoStack);
+  const deleteRedoStack = useTreeStore((s) => s.deleteRedoStack);
   const [creating, setCreating] = useState<null | "file" | "folder">(null);
   const createInputRef = useRef<HTMLInputElement>(null);
+  const visibleEntries = useMemo(
+    () => flattenVisibleEntries(rootChildren, allChildren, expanded),
+    [rootChildren, allChildren, expanded],
+  );
+  const visiblePaths = useMemo(
+    () => visibleEntries.map(({ entry }) => entry.path),
+    [visibleEntries],
+  );
+  const selectedEntries = useMemo(
+    () =>
+      visibleEntries
+        .map(({ entry }) => entry)
+        .filter((entry) => selectedPaths.includes(entry.path)),
+    [selectedPaths, visibleEntries],
+  );
 
   useEffect(() => {
     if (rootChildren === undefined) loadInto(rootPath);
@@ -196,8 +288,97 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     }
   }
 
+  function closeDeletedDocs(paths: string[]) {
+    const editor = useEditorStore.getState();
+    for (const doc of editor.docs) {
+      if (paths.some((path) => isSameOrDescendant(doc.path, path))) {
+        useEditorStore.getState().closeDoc(doc.path);
+      }
+    }
+  }
+
+  async function deleteEntries(entries: DirEntry[]) {
+    if (entries.length === 0) return;
+    const names =
+      entries.length === 1
+        ? `"${entries[0].name}"`
+        : `${entries.length} selected items`;
+    if (!confirm(`Move ${names} to Lyceum Trash? You can undo this with Cmd/Ctrl+Z.`)) {
+      return;
+    }
+    try {
+      const batch = await movePathsToTrash(
+        rootPath,
+        entries.map((entry) => entry.path),
+      );
+      if (batch.items.length > 0) {
+        useTreeStore.getState().recordDeleteBatch(batch);
+        closeDeletedDocs(batch.items.map((item) => item.originalPath));
+      }
+      useTreeStore.getState().clearSelection();
+      useTreeStore.getState().refresh();
+    } catch (err) {
+      console.error("delete failed", err);
+      alert(`Delete failed: ${String(err)}`);
+    }
+  }
+
+  async function undoDelete() {
+    const tree = useTreeStore.getState();
+    const batch = tree.popDeleteUndo();
+    if (!batch) return;
+    try {
+      await restoreTrashBatch(rootPath, batch.items);
+      tree.pushDeleteRedo(batch);
+      tree.setSelection(batch.items.map((item) => item.originalPath));
+      tree.refresh();
+    } catch (err) {
+      tree.pushDeleteUndo(batch);
+      console.error("undo delete failed", err);
+      alert(`Undo delete failed: ${String(err)}`);
+    }
+  }
+
+  async function redoDelete() {
+    const tree = useTreeStore.getState();
+    const batch = tree.popDeleteRedo();
+    if (!batch) return;
+    try {
+      await redoTrashBatch(rootPath, batch.items);
+      tree.pushDeleteUndo(batch);
+      closeDeletedDocs(batch.items.map((item) => item.originalPath));
+      tree.clearSelection();
+      tree.refresh();
+    } catch (err) {
+      tree.pushDeleteRedo(batch);
+      console.error("redo delete failed", err);
+      alert(`Redo delete failed: ${String(err)}`);
+    }
+  }
+
+  function onExplorerKeyDown(e: React.KeyboardEvent) {
+    if (isEditableEventTarget(e.target)) return;
+    const key = e.key.toLowerCase();
+    const mod = e.metaKey || e.ctrlKey;
+    if (mod && !e.altKey && key === "z") {
+      e.preventDefault();
+      if (e.shiftKey) void redoDelete();
+      else void undoDelete();
+      return;
+    }
+    if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && key === "y") {
+      e.preventDefault();
+      void redoDelete();
+      return;
+    }
+    if (!mod && !e.altKey && (e.key === "Delete" || e.key === "Backspace")) {
+      e.preventDefault();
+      void deleteEntries(selectedEntries);
+    }
+  }
+
   return (
-    <div className="explorer">
+    <div className="explorer" tabIndex={0} onKeyDown={onExplorerKeyDown}>
       <div className="explorer-toolbar">
         <button
           type="button"
@@ -241,6 +422,36 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
         >
           ⌄
         </button>
+        <button
+          type="button"
+          className="icon-button"
+          aria-label="Delete Selected"
+          title="Delete Selected"
+          disabled={selectedEntries.length === 0}
+          onClick={() => void deleteEntries(selectedEntries)}
+        >
+          <Icon name="close" size={12} />
+        </button>
+        <button
+          type="button"
+          className="icon-button"
+          aria-label="Undo Delete"
+          title="Undo Delete"
+          disabled={deleteUndoStack.length === 0}
+          onClick={() => void undoDelete()}
+        >
+          <Icon name="undo" size={12} />
+        </button>
+        <button
+          type="button"
+          className="icon-button"
+          aria-label="Redo Delete"
+          title="Redo Delete"
+          disabled={deleteRedoStack.length === 0}
+          onClick={() => void redoDelete()}
+        >
+          <Icon name="redo" size={12} />
+        </button>
       </div>
       <ul className="tree" role="tree" aria-label="Files">
         {creating && (
@@ -270,6 +481,10 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
             entry={entry}
             depth={0}
             onOpenFile={onOpenFile}
+            onDeleteEntries={deleteEntries}
+            selectedPaths={selectedPaths}
+            visiblePaths={visiblePaths}
+            selectedEntries={selectedEntries}
           />
         ))}
       </ul>

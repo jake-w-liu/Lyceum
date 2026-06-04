@@ -52,7 +52,7 @@ directly by the WebView.
 |  |                                                                           |  |
 |  |  App.tsx                                                                   |  |
 |  |   +- ActivityBar  Sidebar  EditorArea(Monaco)  BottomPanel(xterm)  Status |  |
-|  |   +- Preview surfaces (PdfPanel + inline source preview)                  |  |
+|  |   +- Preview surfaces (inline source previews + PDF/image viewer tabs)    |  |
 |  |                                                                           |  |
 |  |  Zustand stores  |  Command registry  |  Keybinding registry              |  |
 |  |  src/lib: ipc.ts (invoke wrappers), events.ts (listen), lspClient.ts      |  |
@@ -152,7 +152,7 @@ src/
     EditorArea.tsx      Tab strip + lazy-mounted Monaco editor host.
     BottomPanel.tsx     Terminal + problems/output container (xterm host).
     StatusBar.tsx       Cursor position, language, LSP status, run status.
-    PdfPanel.tsx        Right-side preview panel for PDF, image, and Markdown.
+    PdfPanel.tsx        Legacy/auxiliary right-side preview panel.
     HtmlPreview.tsx     Sandboxed inline rendered preview for HTML sources.
     Icon.tsx            Inline SVG icon set (original artwork).
     Resizer.tsx         Drag-to-resize splitters for panels.
@@ -206,7 +206,8 @@ src-tauri/
     lib.rs              Builder: plugins, AppState, invoke_handler (command list).
     app_info.rs         get_app_info data.
     file_ops.rs         read_file, write_file, read_file_bytes, app_config_path.
-    fs_ops.rs           Explorer file operations (read/create/rename/delete).
+    fs_ops.rs           Explorer file operations (read/create/rename/delete,
+                        undoable workspace-local trash restore/redo).
     search.rs           Workspace text search.
     walk.rs             Quick-open workspace file listing.
     terminal.rs         PTY manager + terminal_create/write/resize/close.
@@ -356,7 +357,10 @@ This satisfies `F12` (go to definition), `Shift+F12` (find references), and
   allowed for ordinary HTML demos, but `allow-same-origin` is intentionally
   omitted so previewed project HTML does not gain app/WebView privileges.
 - **PDFs:** PDF.js (`pdfjs-dist`) is **lazy-loaded** via `PdfViewer.tsx`, with
-  the worker (`pdf.worker`) configured for Vite bundling.
+  the worker (`pdf.worker`) configured for Vite bundling. The viewer renders a
+  canvas page plus PDF.js's text layer, so text can be selected/copied when the
+  source PDF contains embedded text. Zoom is available from the toolbar,
+  Cmd/Ctrl-wheel, and WebKit trackpad pinch gestures.
 - **Images:** `ImageViewer.tsx` is lazy-loaded and reads common browser image
   formats (`png`, `jpg`/`jpeg`, `gif`, `webp`, `bmp`, `avif`, `ico`, `svg`) as
   raw bytes, then
@@ -366,9 +370,15 @@ This satisfies `F12` (go to definition), `Shift+F12` (find references), and
   through `<img>`. Reading via a command keeps file access on the privileged side
   rather than granting broad asset access.
 - **Placement:** Markdown and HTML previews render inline over the active editor;
-  PDF and image previews render in the right-side preview panel.
-  `Cmd/Ctrl+Shift+V` opens the preview for supported active documents; clicking a
-  PDF/image in the explorer routes directly to the preview panel.
+  PDF and image files open as normal editor tabs backed by `PdfViewer.tsx` and
+  `ImageViewer.tsx`. `Cmd/Ctrl+Shift+V` toggles rendered preview for supported
+  text documents; clicking a PDF/image in the explorer routes directly to a
+  viewer tab.
+- **LaTeX compile/preview:** active `.tex` editor tabs expose Compile and
+  Preview actions. Both save the buffer, retarget `latexBuildCommand` to that
+  file's basename, run the command in the file's directory, and stream build
+  output to the Output panel. Compile leaves the source tab active after writing
+  the PDF; Preview opens the generated PDF as a viewer tab.
 
 ---
 
@@ -420,9 +430,8 @@ the **Tauri path API** (`app.path().app_config_dir()`), centralized in
 
 1. User triggers quick open (`Cmd/Ctrl+P`) or clicks a file in `Sidebar.tsx`.
 2. `useOpenFileBridge.ts` classifies the path by extension.
-3. PDFs and images set the matching preview path in `previewStore.ts`, show the
-   preview panel, and are read later by `read_file_bytes` from the preview
-   component.
+3. PDFs and images register viewer-tab docs in `editorStore.ts`; their viewer
+   components read bytes later via `read_file_bytes`.
 4. Text files call `ipc.readFile(path)` -> `read_file`, then create/update a
    Monaco model, register a tab in `editorStore.ts`, and focus `EditorArea.tsx`.
    The status bar updates language + cursor position.
@@ -431,7 +440,8 @@ the **Tauri path API** (`app.path().app_config_dir()`), centralized in
 
 ### 13.2 Run Julia selection
 
-1. User presses `Cmd/Ctrl+Enter` (run current file or selected code).
+1. User clicks the tab-bar Run button on a `.jl` file or presses
+   `Cmd/Ctrl+Enter` (run current file or selected code).
 2. The `julia.run` command reads the editor selection (or whole file) from the
    active Monaco model.
 3. It calls `run_julia` in `src-tauri/src/julia.rs`, which spawns `julia` (path

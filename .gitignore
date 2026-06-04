@@ -25,9 +25,11 @@ coverage/
 # Vite cache
 .vite/
 
+# Lyceum undoable delete storage
+.lyceum-trash/
+
 # Local Claude Code settings (personal; skills/ are tracked)
 .claude/settings.local.json
 
 .claude
 .vscode
-

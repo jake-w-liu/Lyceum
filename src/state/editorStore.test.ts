@@ -27,6 +27,7 @@ describe("editorStore", () => {
     expect(state.activePath).toBe("/proj/src/main.ts");
     expect(state.docs[0].name).toBe("main.ts");
     expect(state.docs[0].savedContent).toBe("hello");
+    expect(state.docs[0].kind).toBe("text");
   });
 
   it("openDoc with an existing path does not duplicate, just activates", () => {
@@ -54,6 +55,27 @@ describe("editorStore", () => {
     store.markSaved("/a.ts");
     doc = useEditorStore.getState().docs[0];
     expect(doc.savedContent).toBe("a changed");
+    expect(isDirty(doc)).toBe(false);
+  });
+
+  it("opens viewer tabs without dirty tracking or text mutation", () => {
+    const store = useEditorStore.getState();
+    store.openDoc({
+      path: "/w/paper.pdf",
+      content: "",
+      language: "pdf",
+      kind: "pdf",
+    });
+
+    store.updateContent("/w/paper.pdf", "accidental text");
+    let doc = useEditorStore.getState().docs[0];
+    expect(doc.kind).toBe("pdf");
+    expect(doc.content).toBe("");
+    expect(isDirty(doc)).toBe(false);
+
+    store.markSaved("/w/paper.pdf");
+    doc = useEditorStore.getState().docs[0];
+    expect(doc.savedContent).toBe("");
     expect(isDirty(doc)).toBe(false);
   });
 

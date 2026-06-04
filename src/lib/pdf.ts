@@ -15,6 +15,11 @@ export function zoomOut(z: number): number {
   return clampZoom(z / 1.25);
 }
 
+export function zoomFromWheel(z: number, deltaY: number): number {
+  if (deltaY === 0) return clampZoom(z);
+  return clampZoom(z * Math.exp(-deltaY / 500));
+}
+
 export function clampPage(page: number, total: number): number {
   if (total < 1) return 1;
   return Math.min(total, Math.max(1, Math.round(page)));

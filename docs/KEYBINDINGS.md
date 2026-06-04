@@ -48,7 +48,7 @@ to `Cmd` on macOS and `Ctrl` on Windows/Linux.
 | Duplicate line up | `Shift+Option+Up` | `Shift+Alt+Up` | `editor.duplicateLineUp` | M3 |
 | Duplicate line down | `Shift+Option+Down` | `Shift+Alt+Down` | `editor.duplicateLineDown` | M3 |
 | Run current file or selection | `Cmd+Enter` | `Ctrl+Enter` | `editor.run` | M8 |
-| Open Markdown/HTML/PDF/image preview | `Cmd+Shift+V` | `Ctrl+Shift+V` | `preview.open` | M6 / M11 |
+| Preview Markdown/HTML/LaTeX | `Cmd+Shift+V` | `Ctrl+Shift+V` | `preview.open` | M11 |
 | Close palette / quick open / find / modal | `Esc` | `Esc` | `workbench.dismiss` | M4 |
 
 ### Notes on specific bindings
@@ -58,10 +58,23 @@ to `Cmd` on macOS and `Ctrl` on Windows/Linux.
   behavior with `F12`. In the keymap JSON it is expressed with the `click` key token (see below).
 - **`editor.run`** is context-aware: with an active selection it runs the selected code; with no
   selection it runs the current file. In the Julia-first workflow this routes to the Julia
-  run-file / run-selection integration (M8). The `juliaPath` setting determines the interpreter.
-- **`preview.open`** opens the appropriate preview for the active file: Markdown/LaTeX
-  preview (M11), sandboxed HTML preview, PDF preview (M6, via PDF.js, lazy-loaded),
-  or a raw-byte image preview for common browser image formats.
+  run-file / run-selection integration (M8). Active `.jl` tabs also expose a
+  tab-bar Run button that dispatches the same command. The `juliaPath` setting
+  determines the interpreter.
+- **`preview.open`** toggles rendered preview for active Markdown and HTML
+  source tabs. For active `.tex` files, it saves the current buffer, compiles
+  that file, and opens the resulting PDF as a viewer tab. PDF and image files
+  open directly as viewer tabs when selected from the explorer or quick open.
+- **PDF preview** supports toolbar zoom, fit width, Cmd/Ctrl-wheel or trackpad
+  pinch zoom, and text selection/copy when the PDF contains embedded text.
+- **Explorer multi-select/delete undo** is scoped to the focused Explorer:
+  Cmd/Ctrl-click toggles individual rows, Shift-click selects a visible range,
+  Delete/Backspace deletes the current selection, Cmd/Ctrl+Z restores the last
+  Explorer delete, and Cmd/Ctrl+Shift+Z or Ctrl+Y redoes it.
+- **Compile LaTeX** is also available from the command palette
+  (`Cmd/Ctrl+Shift+P`). With a `.tex` tab active, it compiles that file,
+  removes the previous same-name PDF first, writes the fresh PDF beside the
+  source, refreshes the Explorer, and leaves the `.tex` tab active.
 - **`editor.goToDefinition` / `editor.findReferences`** are served by the generic JSON-RPC LSP
   client (M9). They require an active language server — Julia LanguageServer.jl first, then Python
   (pyright), then C# (csharp-ls / OmniSharp).

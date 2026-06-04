@@ -1,6 +1,6 @@
-// Right-side preview panel (M6 + M11). Renders the lazily-loaded pdf.js viewer
-// for a PDF, an image preview, the live Markdown preview for a .md file, or a
-// placeholder. Viewers are lazy so heavy deps stay out of the initial bundle.
+// Auxiliary right-side preview panel (M6 + M11). The normal PDF/image open path
+// is now editor viewer tabs, but this panel remains available for the shell's
+// preview surface. Viewers are lazy so heavy deps stay out of the initial bundle.
 
 import { Suspense, lazy } from "react";
 import { Icon } from "./Icon";

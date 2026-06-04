@@ -1,5 +1,6 @@
 // Persisted user settings: types, defaults, validation, and store (M10).
 import { create } from "zustand";
+import { STOCK_LATEX_BUILD_COMMAND } from "../lib/latex";
 
 export type ThemeId = "dark" | "light" | "hc";
 export type WordWrap = "off" | "on";
@@ -35,7 +36,7 @@ export const DEFAULT_SETTINGS: Settings = {
   shellPath: "",
   terminalCwdBehavior: "workspaceRoot",
   juliaPath: "",
-  latexBuildCommand: "latexmk -pdf main.tex",
+  latexBuildCommand: STOCK_LATEX_BUILD_COMMAND,
   restoreWorkspaceOnStartup: true,
   minimap: false,
   lineNumbers: true,

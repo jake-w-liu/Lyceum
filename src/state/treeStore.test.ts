@@ -69,4 +69,57 @@ describe("treeStore", () => {
     expect(get().children).toEqual({});
     expect(get().refreshNonce).toBe(0);
   });
+
+  it("selects one path, toggles individual paths, and clears selection", () => {
+    get().selectSingle("/root/a.txt");
+    expect(get().selectedPaths).toEqual(["/root/a.txt"]);
+    expect(get().anchorPath).toBe("/root/a.txt");
+
+    get().toggleSelected("/root/b.txt");
+    expect(get().selectedPaths).toEqual(["/root/a.txt", "/root/b.txt"]);
+    expect(get().anchorPath).toBe("/root/b.txt");
+
+    get().toggleSelected("/root/a.txt");
+    expect(get().selectedPaths).toEqual(["/root/b.txt"]);
+
+    get().clearSelection();
+    expect(get().selectedPaths).toEqual([]);
+    expect(get().anchorPath).toBeNull();
+    expect(get().focusedPath).toBeNull();
+  });
+
+  it("selectRange selects a contiguous visible range from the anchor", () => {
+    const visible = ["/root/a", "/root/b", "/root/c", "/root/d"];
+    get().selectSingle("/root/b");
+
+    get().selectRange(visible, "/root/d");
+
+    expect(get().selectedPaths).toEqual(["/root/b", "/root/c", "/root/d"]);
+    expect(get().anchorPath).toBe("/root/b");
+    expect(get().focusedPath).toBe("/root/d");
+  });
+
+  it("records undoable delete batches and supports redo stack movement", () => {
+    const batch = {
+      id: "batch-1",
+      items: [
+        {
+          originalPath: "/root/a.txt",
+          trashedPath: "/root/.lyceum-trash/batch-1/a.txt",
+          isDir: false,
+        },
+      ],
+    };
+
+    get().recordDeleteBatch(batch);
+    expect(get().deleteUndoStack).toEqual([batch]);
+    expect(get().deleteRedoStack).toEqual([]);
+
+    const undo = get().popDeleteUndo();
+    expect(undo).toEqual(batch);
+    expect(get().deleteUndoStack).toEqual([]);
+
+    get().pushDeleteRedo(batch);
+    expect(get().popDeleteRedo()).toEqual(batch);
+  });
 });

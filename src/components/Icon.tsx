@@ -9,7 +9,11 @@ export type IconName =
   | "terminal"
   | "problems"
   | "output"
+  | "run"
+  | "build"
   | "preview"
+  | "undo"
+  | "redo"
   | "close";
 
 function glyph(name: IconName): ReactNode {
@@ -58,11 +62,36 @@ function glyph(name: IconName): ReactNode {
           <line x1="4" y1="17" x2="20" y2="17" />
         </>
       );
+    case "run":
+      return <path d="M8 5v14l11-7z" />;
+    case "build":
+      return (
+        <>
+          <path d="M14 4l6 6" />
+          <path d="M13 9l2-2 2 2-2 2z" />
+          <path d="M4 20l8.5-8.5" />
+          <path d="M7 17l2 2" />
+        </>
+      );
     case "preview":
       return (
         <>
           <path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z" />
           <circle cx="12" cy="12" r="3" />
+        </>
+      );
+    case "undo":
+      return (
+        <>
+          <path d="M9 7H4v5" />
+          <path d="M4 12c2-4 6-6 10-4 3 1.5 5 4 5 8" />
+        </>
+      );
+    case "redo":
+      return (
+        <>
+          <path d="M15 7h5v5" />
+          <path d="M20 12c-2-4-6-6-10-4-3 1.5-5 4-5 8" />
         </>
       );
     case "close":

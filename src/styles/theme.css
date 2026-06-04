@@ -29,6 +29,7 @@
   --focus: #007fd4;
   --activity-active-border: #ffffff;
   --selection: #264f78;
+  --selection-fg: #ffffff;
 
   --ui-font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Helvetica Neue", sans-serif;
   --mono-font: "SF Mono", "JetBrains Mono", "Fira Code", "Cascadia Code", Menlo, Consolas, monospace;
@@ -55,6 +56,7 @@
   --focus: #007fd4;
   --activity-active-border: #ffffff;
   --selection: #add6ff;
+  --selection-fg: #000000;
 }
 
 :root[data-theme="hc"] {
@@ -78,4 +80,5 @@
   --focus: #f38518;
   --activity-active-border: #f38518;
   --selection: #ffffff;
+  --selection-fg: #000000;
 }

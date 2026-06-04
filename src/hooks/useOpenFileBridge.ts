@@ -1,7 +1,6 @@
-// Bridges the explorer's open-file intent to the right surface (M3 + M6):
-// binary previews (PDF/images) open in the preview panel; everything else opens
-// as a text document in the editor. Keeps the explorer decoupled from
-// editor/preview internals.
+// Bridges the explorer's open-file intent to the editor tab model (M3 + M6).
+// Previewable binary files (PDF/images) open as viewer tabs; everything else is
+// read as text. Keeps the explorer decoupled from editor/preview internals.
 
 import { useEffect } from "react";
 import { useWorkspaceStore } from "../state/workspaceStore";
@@ -20,14 +19,26 @@ export function useOpenFileBridge(): void {
     const path = pendingOpenPath;
 
     if (isPdfPath(path)) {
-      usePreviewStore.getState().openPdf(path);
-      useLayoutStore.getState().setPdfPanelVisible(true);
+      useEditorStore.getState().openDoc({
+        path,
+        content: "",
+        language: "pdf",
+        kind: "pdf",
+      });
+      usePreviewStore.getState().closePreview();
+      useLayoutStore.getState().setPdfPanelVisible(false);
       useWorkspaceStore.getState().clearPendingOpen();
       return;
     }
     if (isImagePath(path)) {
-      usePreviewStore.getState().openImage(path);
-      useLayoutStore.getState().setPdfPanelVisible(true);
+      useEditorStore.getState().openDoc({
+        path,
+        content: "",
+        language: "image",
+        kind: "image",
+      });
+      usePreviewStore.getState().closePreview();
+      useLayoutStore.getState().setPdfPanelVisible(false);
       useWorkspaceStore.getState().clearPendingOpen();
       return;
     }

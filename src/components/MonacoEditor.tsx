@@ -17,7 +17,7 @@ import JsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
 import CssWorker from "monaco-editor/esm/vs/language/css/css.worker?worker";
 import HtmlWorker from "monaco-editor/esm/vs/language/html/html.worker?worker";
 import TsWorker from "monaco-editor/esm/vs/language/typescript/ts.worker?worker";
-import { useEditorStore } from "../state/editorStore";
+import { isTextDoc, useEditorStore } from "../state/editorStore";
 import { useWorkspaceStore } from "../state/workspaceStore";
 import { useSettingsStore, type Settings } from "../state/settingsStore";
 import { monacoThemeFor, useThemeStore } from "../state/themeStore";
@@ -86,7 +86,12 @@ export default function MonacoEditor() {
   // A stable key for the *set* of open paths: changes only when a doc is opened
   // or closed, NOT on every keystroke (unlike subscribing to the docs array),
   // so the bind/dispose effects don't re-run while typing.
-  const openPaths = useEditorStore((s) => s.docs.map((d) => d.path).join("\n"));
+  const openPaths = useEditorStore((s) =>
+    s.docs
+      .filter(isTextDoc)
+      .map((d) => d.path)
+      .join("\n"),
+  );
   // Per-document (keyed by model URI) debounce + pending payload, so a change in
   // one document never cancels another document's pending didChange on a fast
   // tab switch (a single shared timer would drop the outgoing doc's last edit).
@@ -213,7 +218,12 @@ export default function MonacoEditor() {
     // Read the doc lazily (content/language are only needed at model creation);
     // this effect intentionally does NOT subscribe to doc content.
     const doc = useEditorStore.getState().docs.find((d) => d.path === activePath);
-    if (!doc) return;
+    if (!doc || !isTextDoc(doc)) {
+      editor.setModel(null);
+      currentPathRef.current = null;
+      useEditorStore.getState().setSelection("");
+      return;
+    }
     let model = modelsRef.current.get(activePath);
     if (!model) {
       const created = monaco.editor.createModel(
@@ -251,7 +261,9 @@ export default function MonacoEditor() {
   // Dispose models for documents that were closed (runs only when the open set
   // changes, not on every keystroke).
   useEffect(() => {
-    const open = new Set(useEditorStore.getState().docs.map((d) => d.path));
+    const open = new Set(
+      useEditorStore.getState().docs.filter(isTextDoc).map((d) => d.path),
+    );
     for (const [path, model] of modelsRef.current) {
       if (!open.has(path)) {
         const session = getSession(model.getLanguageId());

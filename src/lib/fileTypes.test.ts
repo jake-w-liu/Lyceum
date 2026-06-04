@@ -6,8 +6,10 @@ import {
   isHtmlPath,
   isImagePath,
   isInlinePreviewPath,
+  isJuliaSourcePath,
   isMarkdownPath,
   isPdfPath,
+  isTexSourcePath,
 } from "./fileTypes";
 
 describe("file type helpers", () => {
@@ -24,6 +26,10 @@ describe("file type helpers", () => {
     expect(isMarkdownPath("/w/notes.md")).toBe(true);
     expect(isHtmlPath("/w/index.HTML")).toBe(true);
     expect(isHtmlPath("/w/template.htm")).toBe(true);
+    expect(isTexSourcePath("/w/paper.TEX")).toBe(true);
+    expect(isTexSourcePath("/w/package.sty")).toBe(false);
+    expect(isJuliaSourcePath("/w/analysis.JL")).toBe(true);
+    expect(isJuliaSourcePath("/w/analysis.py")).toBe(false);
     expect(isInlinePreviewPath("/w/notes.md")).toBe(true);
     expect(isInlinePreviewPath("/w/index.html")).toBe(true);
     expect(isInlinePreviewPath("/w/main.ts")).toBe(false);

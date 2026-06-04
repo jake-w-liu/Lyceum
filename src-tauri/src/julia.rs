@@ -8,7 +8,10 @@
 // natural exit. This mirrors the terminal/LSP managers, which retain kill handles.
 
 use std::collections::HashMap;
+use std::env;
+use std::ffi::{OsStr, OsString};
 use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
@@ -24,13 +27,97 @@ pub struct RunManager {
     runs: RunMap,
 }
 
-/// Resolve the Julia executable: an explicit setting, else `julia` from PATH
-/// (juliaup provides it). Pure for testing.
+/// Resolve the Julia executable: an explicit setting, else common GUI-app PATH
+/// locations plus PATH (juliaup provides it). Pure-ish wrapper for production.
 pub fn resolve_julia(explicit: Option<String>) -> String {
+    resolve_julia_with_env(
+        explicit,
+        env::var_os("PATH").as_deref(),
+        env::var_os("HOME").as_deref(),
+    )
+}
+
+fn resolve_julia_with_env(
+    explicit: Option<String>,
+    path: Option<&OsStr>,
+    home: Option<&OsStr>,
+) -> String {
     match explicit {
-        Some(s) if !s.is_empty() => s,
-        _ => "julia".to_string(),
+        Some(s) if !s.is_empty() => return s,
+        _ => {}
     }
+    let search_path = augmented_path(path, home);
+    find_program_in_path("julia", &search_path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "julia".to_string())
+}
+
+fn augmented_path(path: Option<&OsStr>, home: Option<&OsStr>) -> OsString {
+    let mut dirs: Vec<PathBuf> = path.map(env::split_paths).into_iter().flatten().collect();
+    if let Some(home) = home {
+        let home = PathBuf::from(home);
+        dirs.push(home.join(".juliaup").join("bin"));
+        dirs.push(home.join(".cargo").join("bin"));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        dirs.push(PathBuf::from("/opt/homebrew/bin"));
+        dirs.push(PathBuf::from("/usr/local/bin"));
+        dirs.push(PathBuf::from("/Library/TeX/texbin"));
+    }
+    #[cfg(not(windows))]
+    {
+        dirs.push(PathBuf::from("/usr/bin"));
+        dirs.push(PathBuf::from("/bin"));
+        dirs.push(PathBuf::from("/usr/sbin"));
+        dirs.push(PathBuf::from("/sbin"));
+    }
+    env::join_paths(dedup_paths(dirs)).unwrap_or_default()
+}
+
+fn dedup_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for path in paths {
+        if !path.as_os_str().is_empty() && !out.contains(&path) {
+            out.push(path);
+        }
+    }
+    out
+}
+
+fn find_program_in_path(program: &str, path: &OsStr) -> Option<PathBuf> {
+    let program_path = Path::new(program);
+    if program_path.components().count() > 1 {
+        return is_executable_file(program_path).then(|| program_path.to_path_buf());
+    }
+    for dir in env::split_paths(path) {
+        let candidate = dir.join(program);
+        if is_executable_file(&candidate) {
+            return Some(candidate);
+        }
+        #[cfg(windows)]
+        {
+            let candidate = dir.join(format!("{program}.exe"));
+            if is_executable_file(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    path.metadata()
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
 }
 
 /// Build Julia CLI args: run inline `code` (`-e code`) if given, else a file
@@ -160,10 +247,15 @@ pub fn run_julia(
 ) -> Result<(), String> {
     let program = resolve_julia(julia_path);
     let args = julia_args(file.as_deref(), code.as_deref());
+    let path = augmented_path(
+        env::var_os("PATH").as_deref(),
+        env::var_os("HOME").as_deref(),
+    );
 
     let mut command = Command::new(&program);
     command
         .args(&args)
+        .env("PATH", path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Some(dir) = cwd {
@@ -235,6 +327,10 @@ pub fn run_build(
     command: String,
     cwd: Option<String>,
 ) -> Result<(), String> {
+    let path = augmented_path(
+        env::var_os("PATH").as_deref(),
+        env::var_os("HOME").as_deref(),
+    );
     let mut cmd = if cfg!(windows) {
         let mut c = Command::new("cmd");
         c.args(["/C", &command]);
@@ -244,7 +340,9 @@ pub fn run_build(
         c.args(["-c", &command]);
         c
     };
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.env("PATH", path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     if let Some(dir) = cwd {
         if !dir.is_empty() {
             cmd.current_dir(dir);
@@ -264,6 +362,22 @@ pub fn run_build(
     Ok(())
 }
 
+/// Report whether an executable is available through the same augmented PATH
+/// used for Julia runs and build commands. The frontend uses this for
+/// conservative tool selection without shelling out itself.
+#[tauri::command]
+pub fn program_available(program: String) -> bool {
+    let program = program.trim();
+    if program.is_empty() {
+        return false;
+    }
+    let path = augmented_path(
+        env::var_os("PATH").as_deref(),
+        env::var_os("HOME").as_deref(),
+    );
+    find_program_in_path(program, &path).is_some()
+}
+
 /// Cancel an in-flight run (Julia or build) by id, killing its process. Idempotent.
 #[tauri::command]
 pub fn run_cancel(state: State<RunManager>, id: String) -> Result<(), String> {
@@ -280,9 +394,62 @@ mod tests {
 
     #[test]
     fn resolve_julia_uses_explicit_then_default() {
-        assert_eq!(resolve_julia(Some("/opt/julia".into())), "/opt/julia");
-        assert_eq!(resolve_julia(Some(String::new())), "julia");
-        assert_eq!(resolve_julia(None), "julia");
+        assert_eq!(
+            resolve_julia_with_env(Some("/opt/julia".into()), None, None),
+            "/opt/julia"
+        );
+        assert_eq!(
+            resolve_julia_with_env(Some(String::new()), None, None),
+            "julia"
+        );
+        assert_eq!(resolve_julia_with_env(None, None, None), "julia");
+    }
+
+    #[test]
+    fn resolve_julia_finds_juliaup_home_bin() {
+        let root = std::env::temp_dir().join(format!("lyceum-julia-test-{}", std::process::id()));
+        let bin = root.join(".juliaup").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let executable = bin.join(if cfg!(windows) { "julia.exe" } else { "julia" });
+        std::fs::write(&executable, b"").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&executable, permissions).unwrap();
+        }
+
+        let resolved = resolve_julia_with_env(None, None, Some(root.as_os_str()));
+
+        assert_eq!(resolved, executable.to_string_lossy());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_julia_ignores_non_executable_path_entries() {
+        let root =
+            std::env::temp_dir().join(format!("lyceum-julia-non-exec-test-{}", std::process::id()));
+        let first = root.join("first");
+        let second = root.join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(first.join("julia"), b"").unwrap();
+        let executable = second.join("julia");
+        std::fs::write(&executable, b"").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&executable, permissions).unwrap();
+        }
+        let path = env::join_paths([first.as_path(), second.as_path()]).unwrap();
+
+        let resolved = resolve_julia_with_env(None, Some(path.as_os_str()), None);
+
+        assert_eq!(resolved, executable.to_string_lossy());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

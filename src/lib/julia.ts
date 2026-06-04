@@ -8,6 +8,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   getActiveDoc,
+  isTextDoc,
   useEditorStore,
   type EditorDoc,
 } from "../state/editorStore";
@@ -28,7 +29,7 @@ export function runInvocation(
   doc: EditorDoc | null,
   selection: string,
 ): JuliaInvocation | null {
-  if (!doc) return null;
+  if (!doc || !isTextDoc(doc)) return null;
   if (selection.trim().length > 0) return { code: selection };
   return { file: doc.path };
 }
@@ -97,10 +98,23 @@ export async function runActiveJulia(): Promise<void> {
     });
   } catch (e) {
     const store = useOutputStore.getState();
-    store.append(`failed to run julia: ${String(e)}`);
+    const message = String(e);
+    store.append(`failed to run julia: ${message}`);
+    const missingMessage = missingJuliaMessage(message);
+    if (missingMessage) store.append(missingMessage);
     store.setRunning(false);
     store.setRunId(null);
     offData();
     offExit();
   }
+}
+
+export function missingJuliaMessage(errorMessage: string): string | null {
+  return /No such file|os error 2|not found|failed to start/i.test(errorMessage)
+    ? [
+        "Julia was not found. Install Julia or Juliaup,",
+        "or set juliaPath in settings to the full Julia executable path",
+        "(for example /Users/jake/.juliaup/bin/julia).",
+      ].join(" ")
+    : null;
 }

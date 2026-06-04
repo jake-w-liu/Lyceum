@@ -44,7 +44,7 @@ describe("useOpenFileBridge", () => {
     expect(useWorkspaceStore.getState().pendingOpenPath).toBeNull();
   });
 
-  it("opens PDFs in the preview panel without reading as text", async () => {
+  it("opens PDFs as viewer tabs without reading as text", async () => {
     render(<Harness />);
     act(() => {
       useWorkspaceStore.getState().requestOpenFile("/w/paper.pdf");
@@ -54,12 +54,16 @@ describe("useOpenFileBridge", () => {
       expect(useWorkspaceStore.getState().pendingOpenPath).toBeNull();
     });
 
-    expect(usePreviewStore.getState().pdfPath).toBe("/w/paper.pdf");
-    expect(useLayoutStore.getState().pdfPanelVisible).toBe(true);
+    expect(useEditorStore.getState().docs).toMatchObject([
+      { path: "/w/paper.pdf", language: "pdf", kind: "pdf" },
+    ]);
+    expect(useEditorStore.getState().activePath).toBe("/w/paper.pdf");
+    expect(usePreviewStore.getState().pdfPath).toBeNull();
+    expect(useLayoutStore.getState().pdfPanelVisible).toBe(false);
     expect(readFile).not.toHaveBeenCalled();
   });
 
-  it("opens images in the preview panel without reading as text", async () => {
+  it("opens images as viewer tabs without reading as text", async () => {
     render(<Harness />);
     act(() => {
       useWorkspaceStore.getState().requestOpenFile("/w/Figure.SVG");
@@ -69,9 +73,12 @@ describe("useOpenFileBridge", () => {
       expect(useWorkspaceStore.getState().pendingOpenPath).toBeNull();
     });
 
-    expect(usePreviewStore.getState().imagePath).toBe("/w/Figure.SVG");
-    expect(useLayoutStore.getState().pdfPanelVisible).toBe(true);
-    expect(useEditorStore.getState().docs).toHaveLength(0);
+    expect(useEditorStore.getState().docs).toMatchObject([
+      { path: "/w/Figure.SVG", language: "image", kind: "image" },
+    ]);
+    expect(useEditorStore.getState().activePath).toBe("/w/Figure.SVG");
+    expect(usePreviewStore.getState().imagePath).toBeNull();
+    expect(useLayoutStore.getState().pdfPanelVisible).toBe(false);
     expect(readFile).not.toHaveBeenCalled();
   });
 });
