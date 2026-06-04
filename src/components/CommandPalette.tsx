@@ -42,7 +42,8 @@ export function CommandPalette() {
   function onKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setSelected((s) => Math.min(s + 1, results.length - 1));
+      // Clamp to 0 when empty so ArrowDown can't leave selected at -1 (matches QuickOpen).
+      setSelected((s) => Math.min(s + 1, Math.max(results.length - 1, 0)));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setSelected((s) => Math.max(s - 1, 0));

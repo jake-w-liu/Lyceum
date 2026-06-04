@@ -5,6 +5,7 @@
 import { useEffect, useRef, useState } from "react";
 import type {
   PDFDocumentProxy,
+  PDFPageProxy,
   RenderTask,
 } from "pdfjs-dist/types/src/display/api";
 import * as pdfjsLib from "pdfjs-dist";
@@ -20,17 +21,23 @@ export default function PdfViewer({ path }: { path: string }) {
   const docRef = useRef<PDFDocumentProxy | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
+  // The currently rendered page proxy, released when navigating to another page
+  // so pdf.js does not accumulate per-page operator lists for the doc's lifetime.
+  const lastPageRef = useRef<PDFPageProxy | null>(null);
 
   const saved = usePreviewStore.getState().viewState[path];
   const [doc, setDoc] = useState<PDFDocumentProxy | null>(null);
   const [numPages, setNumPages] = useState(0);
   const [page, setPage] = useState(saved?.page ?? 1);
   const [zoom, setZoom] = useState(saved?.zoom ?? 1);
-  const [error, setError] = useState<string | null>(null);
+  // A fatal load error replaces the whole viewer; a render error is transient and
+  // shown inline so the toolbar stays usable (the user can page/zoom to recover).
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [renderError, setRenderError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    setError(null);
+    setLoadError(null);
     (async () => {
       try {
         const data = await readFileBytes(path);
@@ -44,7 +51,7 @@ export default function PdfViewer({ path }: { path: string }) {
         setNumPages(pdf.numPages);
       } catch (e) {
         if (!cancelled) {
-          setError(e instanceof Error ? e.message : String(e));
+          setLoadError(e instanceof Error ? e.message : String(e));
         }
       }
     })();
@@ -53,6 +60,7 @@ export default function PdfViewer({ path }: { path: string }) {
       // Release the PDF document (and its worker resources) on unmount/reload.
       void docRef.current?.destroy();
       docRef.current = null;
+      lastPageRef.current = null;
     };
   }, [path]);
 
@@ -60,10 +68,17 @@ export default function PdfViewer({ path }: { path: string }) {
     if (!doc) return;
     let cancelled = false;
     let task: RenderTask | null = null;
+    setRenderError(null);
     (async () => {
       try {
         const pdfPage = await doc.getPage(page);
         if (cancelled) return;
+        // Release the page we navigated away from (no-op on zoom changes, where
+        // getPage returns the same cached proxy).
+        if (lastPageRef.current && lastPageRef.current !== pdfPage) {
+          lastPageRef.current.cleanup();
+        }
+        lastPageRef.current = pdfPage;
         const viewport = pdfPage.getViewport({ scale: zoom });
         const canvas = canvasRef.current;
         if (!canvas) return;
@@ -75,7 +90,7 @@ export default function PdfViewer({ path }: { path: string }) {
         await task.promise;
       } catch (e) {
         if (!cancelled) {
-          setError(e instanceof Error ? e.message : String(e));
+          setRenderError(e instanceof Error ? e.message : String(e));
         }
       }
     })();
@@ -96,14 +111,14 @@ export default function PdfViewer({ path }: { path: string }) {
       if (base.width <= 0) return;
       setZoom(clampZoom(wrap.clientWidth / base.width));
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setRenderError(e instanceof Error ? e.message : String(e));
     }
   };
 
-  if (error) {
+  if (loadError) {
     return (
       <div className="pdf-viewer">
-        <div className="pdf-error">Failed to load PDF: {error}</div>
+        <div className="pdf-error">Failed to load PDF: {loadError}</div>
       </div>
     );
   }
@@ -149,6 +164,11 @@ export default function PdfViewer({ path }: { path: string }) {
           Fit width
         </button>
       </div>
+      {renderError && (
+        <div className="pdf-error pdf-error-inline" role="alert">
+          Failed to render page: {renderError}
+        </div>
+      )}
       <div ref={wrapRef} className="pdf-canvas-wrap">
         <canvas ref={canvasRef} className="pdf-canvas" />
       </div>

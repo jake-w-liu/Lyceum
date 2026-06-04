@@ -42,12 +42,10 @@ pub fn read_dir_entries(dir: &Path) -> Result<Vec<DirEntryDto>, String> {
         });
     }
 
-    entries.sort_by(|a, b| {
-        // Directories before files, then case-insensitive name order.
-        b.is_dir
-            .cmp(&a.is_dir)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
+    // Directories before files, then case-insensitive name order.
+    // `sort_by_cached_key` lowercases each name once (O(n)) rather than on every
+    // comparison (O(n log n) temporary Strings).
+    entries.sort_by_cached_key(|e| (std::cmp::Reverse(e.is_dir), e.name.to_lowercase()));
 
     Ok(entries)
 }

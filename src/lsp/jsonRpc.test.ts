@@ -148,26 +148,38 @@ describe("createRpcClient", () => {
     });
   });
 
-  it("times out a non-initialize request but never times out initialize", async () => {
+  it("times out a non-initialize request at 60s and initialize at the longer cap", async () => {
     vi.useFakeTimers();
     try {
       const { transport } = makeTransport();
       const client = createRpcClient(transport);
 
       const hover = client.request("textDocument/hover");
-      // Attach the rejection handler BEFORE the timer fires (no unhandled rejection).
+      // Attach the rejection handlers BEFORE the timers fire (no unhandled rejection).
       const hoverRejects = expect(hover).rejects.toThrow(/timed out/);
       const init = client.request("initialize");
-      const initSettled = vi.fn();
-      const initHandled = init.then(initSettled, initSettled);
+      const initRejects = expect(init).rejects.toThrow(/timed out/);
+      let initDone = false;
+      init.then(
+        () => {
+          initDone = true;
+        },
+        () => {
+          initDone = true;
+        },
+      );
 
       await vi.advanceTimersByTimeAsync(60_000);
       await hoverRejects;
-      expect(initSettled).not.toHaveBeenCalled(); // initialize is exempt
+      // initialize is NOT exempt, but gets a long grace period (cold servers):
+      // still pending after the 60s mark.
+      await Promise.resolve();
+      expect(initDone).toBe(false);
 
-      client.dispose(); // rejects the still-pending initialize
-      await initHandled;
-      expect(initSettled).toHaveBeenCalledTimes(1);
+      // ...and DOES reject once the larger cap (300s total) elapses.
+      await vi.advanceTimersByTimeAsync(240_000);
+      await initRejects;
+      expect(initDone).toBe(true);
     } finally {
       vi.useRealTimers();
     }

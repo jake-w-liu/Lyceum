@@ -12,6 +12,7 @@ export type IconName =
   | "terminal"
   | "problems"
   | "output"
+  | "preview"
   | "close";
 
 function glyph(name: IconName): ReactNode {
@@ -79,6 +80,13 @@ function glyph(name: IconName): ReactNode {
           <line x1="4" y1="7" x2="20" y2="7" />
           <line x1="4" y1="12" x2="20" y2="12" />
           <line x1="4" y1="17" x2="20" y2="17" />
+        </>
+      );
+    case "preview":
+      return (
+        <>
+          <path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z" />
+          <circle cx="12" cy="12" r="3" />
         </>
       );
     case "close":

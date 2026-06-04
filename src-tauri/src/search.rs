@@ -10,6 +10,49 @@ use std::path::Path;
 /// Directory names that are skipped entirely (not descended into).
 const SKIP_DIRS: [&str; 5] = [".git", "node_modules", "target", "dist", ".vite"];
 
+/// Files larger than this are skipped, so a single huge file (a multi-GB log or
+/// dataset that happens to be valid UTF-8) cannot be slurped wholesale into a
+/// heap String. Mirrors the bound `lsp.rs` places on a single message.
+const MAX_FILE_SIZE: u64 = 16 * 1024 * 1024;
+
+/// Case-insensitive substring search returning the byte offset of the match in
+/// the ORIGINAL `haystack` (never in a lowercased copy), so the offset always
+/// lands on a char boundary. `needle_lower` must already be lowercased. The
+/// common all-ASCII path allocates nothing; the Unicode path allocates only the
+/// per-window comparison string. Returns `None` if not found.
+fn find_ci(haystack: &str, needle_lower: &str) -> Option<usize> {
+    if needle_lower.is_empty() {
+        return Some(0);
+    }
+    if haystack.is_ascii() && needle_lower.is_ascii() {
+        let hay = haystack.as_bytes();
+        let needle = needle_lower.as_bytes();
+        return hay
+            .windows(needle.len())
+            .position(|w| w.eq_ignore_ascii_case(needle));
+    }
+    // Unicode fallback: scan char boundaries of the original and compare each
+    // window lowercased, so the returned offset is a valid index into `haystack`.
+    let needle_chars = needle_lower.chars().count();
+    let starts: Vec<usize> = haystack.char_indices().map(|(i, _)| i).collect();
+    let n = starts.len();
+    if n < needle_chars {
+        return None;
+    }
+    for w in 0..=(n - needle_chars) {
+        let begin = starts[w];
+        let end = if w + needle_chars < n {
+            starts[w + needle_chars]
+        } else {
+            haystack.len()
+        };
+        if haystack[begin..end].to_lowercase() == needle_lower {
+            return Some(begin);
+        }
+    }
+    None
+}
+
 /// A single matching line within a workspace file. Line and column are 1-based;
 /// `text` is the matching line with any trailing newline trimmed.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -57,6 +100,12 @@ pub fn search_in_dir(root: &Path, query: &str, max: usize) -> Result<Vec<SearchM
             }
 
             let path = entry.path();
+            // Skip files too large to read into memory safely.
+            if let Ok(meta) = entry.metadata() {
+                if meta.len() > MAX_FILE_SIZE {
+                    continue;
+                }
+            }
             let contents = match std::fs::read_to_string(&path) {
                 Ok(c) => c,
                 Err(_) => continue,
@@ -67,7 +116,8 @@ pub fn search_in_dir(root: &Path, query: &str, max: usize) -> Result<Vec<SearchM
                 if matches.len() >= max {
                     break;
                 }
-                if let Some(byte_offset) = raw_line.to_lowercase().find(&needle) {
+                if let Some(byte_offset) = find_ci(raw_line, &needle) {
+                    // `byte_offset` indexes the original line on a char boundary.
                     let column = raw_line[..byte_offset].chars().count() as u32 + 1;
                     matches.push(SearchMatch {
                         path: path_str.clone(),
@@ -181,5 +231,40 @@ mod tests {
         let matches = search_in_dir(root, "hit", 2).expect("search");
 
         assert_eq!(matches.len(), 2);
+    }
+
+    #[test]
+    fn non_ascii_line_reports_correct_char_column_without_panic() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        // 'ẞ' (U+1E9E, 3 bytes) lowercases to 'ß' (2 bytes); a byte offset from a
+        // lowercased copy would be wrong and could slice mid-char. The column is
+        // the 1-based CHARACTER position of the match in the original line.
+        fs::write(root.join("u.txt"), "AẞBxy\n".as_bytes()).unwrap();
+
+        let matches = search_in_dir(root, "xy", 1000).expect("search");
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].column, 4); // chars: A(1) ẞ(2) B(3) x(4)
+        assert_eq!(matches[0].text, "AẞBxy");
+    }
+
+    #[test]
+    fn skips_files_larger_than_cap() {
+        // find_ci/search must never load an oversized file; verify via the cap.
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        // One small matching file and one oversized file (> MAX_FILE_SIZE) that
+        // also contains the needle but must be skipped.
+        fs::write(root.join("small.txt"), b"needle here\n").unwrap();
+        let big = vec![b'x'; (MAX_FILE_SIZE as usize) + 16];
+        let mut big = big;
+        big.extend_from_slice(b"\nneedle\n");
+        fs::write(root.join("big.txt"), &big).unwrap();
+
+        let matches = search_in_dir(root, "needle", 1000).expect("search");
+
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].path.ends_with("small.txt"));
     }
 }

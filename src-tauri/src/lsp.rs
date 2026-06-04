@@ -40,14 +40,25 @@ impl LspDecoder {
         let header_end = self.buf.windows(sep.len()).position(|w| w == sep)?;
         let headers = String::from_utf8_lossy(&self.buf[..header_end]);
 
-        let content_length = headers.lines().find_map(|line| {
+        let content_length = match headers.lines().find_map(|line| {
             let (key, value) = line.split_once(':')?;
             if key.trim().eq_ignore_ascii_case("Content-Length") {
                 value.trim().parse::<usize>().ok()
             } else {
                 None
             }
-        })?;
+        }) {
+            Some(len) => len,
+            None => {
+                // A complete header block with no parseable Content-Length is a
+                // desync. Drop it (and the separator) and resync on the
+                // remainder instead of returning None forever and wedging the
+                // buffer — a valid frame may follow. Each step strictly shrinks
+                // the buffer, so this terminates.
+                self.buf.drain(..header_end + sep.len());
+                return self.next_message();
+            }
+        };
 
         if content_length > MAX_CONTENT_LENGTH {
             // Desynced or malicious header — discard the buffer instead of
@@ -223,6 +234,19 @@ mod tests {
         decoder.push(b"Content-Length: 999999999\r\n\r\nx");
         assert_eq!(decoder.next_message(), None);
         // The giant pending frame must not be retained (no unbounded growth).
+        assert!(decoder.buf.is_empty());
+    }
+
+    #[test]
+    fn decoder_resyncs_past_header_block_with_no_content_length() {
+        let mut decoder = LspDecoder::default();
+        // A complete header block lacking Content-Length must not wedge the
+        // buffer; a valid frame pushed afterward must still decode.
+        decoder.push(b"X-Bad-Header: value\r\n\r\n");
+        assert_eq!(decoder.next_message(), None);
+        decoder.push(&encode_message("hello"));
+        assert_eq!(decoder.next_message(), Some("hello".to_string()));
+        assert_eq!(decoder.next_message(), None);
         assert!(decoder.buf.is_empty());
     }
 }

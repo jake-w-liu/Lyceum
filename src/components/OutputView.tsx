@@ -2,6 +2,7 @@
 // button and a running indicator.
 
 import { useOutputStore } from "../state/outputStore";
+import { stopActiveRun } from "../lib/run";
 
 export function OutputView() {
   const lines = useOutputStore((s) => s.lines);
@@ -12,6 +13,15 @@ export function OutputView() {
     <div className="output-view">
       <div className="output-toolbar">
         <span className="output-status">{running ? "Running…" : "Idle"}</span>
+        {running && (
+          <button
+            type="button"
+            className="output-stop"
+            onClick={() => void stopActiveRun()}
+          >
+            Stop
+          </button>
+        )}
         <button type="button" className="output-clear" onClick={clear}>
           Clear
         </button>

@@ -31,6 +31,10 @@ export const initialPreviewData: PreviewData = {
   viewState: {},
 };
 
+// Cap on remembered per-PDF view states. A long session opening many distinct
+// PDFs would otherwise accumulate an entry per path for the app's lifetime.
+const MAX_VIEW_STATES = 50;
+
 export const usePreviewStore = create<PreviewState>()((set) => ({
   ...initialPreviewData,
 
@@ -42,7 +46,16 @@ export const usePreviewStore = create<PreviewState>()((set) => ({
   closePreview: () => set({ pdfPath: null, markdownPath: null }),
 
   setViewState: (path, state) =>
-    set((s) => ({
-      viewState: { ...s.viewState, [path]: state },
-    })),
+    set((s) => {
+      // Delete-then-set so the just-touched path moves to the most-recent
+      // position (object key order is insertion order), giving a simple LRU.
+      const next = { ...s.viewState };
+      delete next[path];
+      next[path] = state;
+      const keys = Object.keys(next);
+      if (keys.length > MAX_VIEW_STATES) {
+        delete next[keys[0]]; // evict the least-recently-touched entry
+      }
+      return { viewState: next };
+    }),
 }));

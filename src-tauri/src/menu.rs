@@ -63,6 +63,7 @@ pub fn build_app_menu<R: Runtime>(handle: &AppHandle<R>) -> tauri::Result<Menu<R
 
     let run_menu = SubmenuBuilder::new(handle, "Run")
         .item(&MenuItemBuilder::with_id("editor.run", "Run File or Selection").build(handle)?)
+        .item(&MenuItemBuilder::with_id("run.stop", "Stop Running Process").build(handle)?)
         .item(&MenuItemBuilder::with_id("terminal.new", "New Terminal").build(handle)?)
         .item(&MenuItemBuilder::with_id("latex.build", "Build LaTeX").build(handle)?)
         .separator()

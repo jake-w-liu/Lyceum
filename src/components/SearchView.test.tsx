@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { SearchView } from "./SearchView";
 import { initialSearchData, useSearchStore } from "../state/searchStore";
@@ -70,5 +70,37 @@ describe("SearchView", () => {
     const result = await screen.findByText("a.jl:3");
     await userEvent.click(result);
     expect(useWorkspaceStore.getState().pendingOpenPath).toBe("/ws/a.jl");
+  });
+
+  it("ignores a stale search response that resolves after a newer one", async () => {
+    useWorkspaceStore.setState({ rootPath: ROOT });
+    const deferreds: Array<(v: SearchMatch[]) => void> = [];
+    vi.mocked(searchWorkspace).mockImplementation(
+      () => new Promise<SearchMatch[]>((resolve) => deferreds.push(resolve)),
+    );
+    const wait = (ms: number) =>
+      act(() => new Promise((r) => setTimeout(r, ms)));
+    render(<SearchView />);
+    const input = screen.getByLabelText("Search workspace");
+
+    // First query dispatches after the debounce window...
+    fireEvent.change(input, { target: { value: "ab" } });
+    await wait(300);
+    // ...then a newer query dispatches a second search.
+    fireEvent.change(input, { target: { value: "abc" } });
+    await wait(300);
+    expect(deferreds).toHaveLength(2);
+
+    // Resolve the NEWER request first, then the stale earlier one.
+    await act(async () => {
+      deferreds[1]([match("/ws/abc.jl", 1, "abc match")]);
+      deferreds[0]([match("/ws/ab.jl", 9, "stale ab match")]);
+      await Promise.resolve();
+    });
+
+    // The stale response must not overwrite the newer results.
+    expect(useSearchStore.getState().results.map((r) => r.text)).toEqual([
+      "abc match",
+    ]);
   });
 });

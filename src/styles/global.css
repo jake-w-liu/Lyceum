@@ -417,6 +417,36 @@ kbd {
   margin-right: 6px;
 }
 
+/* Right-aligned editor-title action (e.g. Markdown Preview), VS Code-style. */
+.tab-action {
+  flex: 0 0 auto;
+  margin-left: auto;
+  align-self: center;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  margin-right: 6px;
+  padding: 0 8px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--fg-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.tab-action:hover {
+  color: var(--fg);
+  background: var(--bg-hover);
+}
+
+.tab-action.active {
+  color: var(--fg);
+  background: var(--bg-tab-active);
+  border-color: var(--focus);
+}
+
 /* Monaco host (M3) */
 .editor-host-wrap {
   flex: 1 1 auto;
@@ -432,6 +462,14 @@ kbd {
 .editor-loading {
   padding: 16px;
   color: var(--fg-muted);
+}
+
+/* In-place Markdown preview: covers the (still-mounted) editor host. */
+.editor-preview-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  background: var(--bg);
 }
 
 /* Command palette / quick open modal (M4) */
@@ -759,14 +797,20 @@ kbd {
   flex: 0 0 26px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 6px;
   padding: 0 10px;
   border-bottom: 1px solid var(--border);
   font-size: 11px;
   color: var(--fg-muted);
 }
 
-.output-clear {
+/* Push the action buttons to the right of the status label. */
+.output-status {
+  margin-right: auto;
+}
+
+.output-clear,
+.output-stop {
   background: transparent;
   border: 1px solid var(--border);
   color: var(--fg);
@@ -774,6 +818,11 @@ kbd {
   padding: 1px 8px;
   cursor: pointer;
   font-size: 11px;
+}
+
+.output-stop {
+  border-color: rgba(244, 135, 113, 0.6);
+  color: #f48771;
 }
 
 .output-log {
@@ -843,6 +892,19 @@ kbd {
 .pdf-message {
   padding: 16px;
   color: var(--fg-muted);
+}
+
+.pdf-error {
+  padding: 16px;
+  color: #f48771;
+}
+
+/* Non-fatal render error: a banner above the still-usable toolbar/canvas. */
+.pdf-error-inline {
+  padding: 6px 12px;
+  font-size: 12px;
+  background: rgba(244, 135, 113, 0.12);
+  border-bottom: 1px solid rgba(244, 135, 113, 0.4);
 }
 
 /* Status bar */

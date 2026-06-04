@@ -4,12 +4,21 @@
 
 import { Icon } from "./Icon";
 import { isDirty, useEditorStore } from "../state/editorStore";
+import { useLayoutStore } from "../state/layoutStore";
+
+const MARKDOWN_RE = /\.(md|markdown)$/i;
 
 export function TabBar() {
   const docs = useEditorStore((s) => s.docs);
   const activePath = useEditorStore((s) => s.activePath);
   const setActive = useEditorStore((s) => s.setActive);
   const closeDoc = useEditorStore((s) => s.closeDoc);
+  const editorPreview = useLayoutStore((s) => s.editorPreview);
+  const toggleEditorPreview = useLayoutStore((s) => s.toggleEditorPreview);
+
+  const activeDoc = docs.find((d) => d.path === activePath);
+  const canPreview = !!activeDoc && MARKDOWN_RE.test(activeDoc.path);
+  const previewing = canPreview && editorPreview;
 
   return (
     <div className="tab-bar" role="tablist" aria-label="Open editors">
@@ -43,6 +52,21 @@ export function TabBar() {
           </div>
         );
       })}
+      {canPreview && (
+        <button
+          type="button"
+          className={"tab-action" + (previewing ? " active" : "")}
+          aria-label={
+            previewing ? "Show Markdown Source" : "Open Markdown Preview"
+          }
+          aria-pressed={previewing}
+          title="Toggle Preview (⌘/Ctrl+Shift+V)"
+          onClick={() => toggleEditorPreview()}
+        >
+          <Icon name={previewing ? "settings" : "preview"} size={14} />
+          <span>{previewing ? "Edit" : "Preview"}</span>
+        </button>
+      )}
     </div>
   );
 }

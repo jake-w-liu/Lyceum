@@ -49,8 +49,8 @@ describe("pickFolder", () => {
 });
 
 describe("readFileBytes", () => {
-  it("converts the number[] payload to a Uint8Array", async () => {
-    invokeMock.mockResolvedValue([1, 2, 255]);
+  it("wraps the binary ArrayBuffer payload in a Uint8Array", async () => {
+    invokeMock.mockResolvedValue(new Uint8Array([1, 2, 255]).buffer);
     const bytes = await readFileBytes("/f");
     expect(bytes).toBeInstanceOf(Uint8Array);
     expect(Array.from(bytes)).toEqual([1, 2, 255]);

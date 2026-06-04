@@ -60,10 +60,19 @@ export async function writeFile(path: string, content: string): Promise<void> {
   await invoke("write_file", { path, content });
 }
 
-/** Read a file's raw bytes (PDF viewer, M6). */
+/**
+ * Read a file's raw bytes (PDF viewer, M6). The backend returns a binary IPC
+ * response, so the bytes arrive as an ArrayBuffer — no intermediate JSON
+ * `number[]` and no second full-size copy.
+ */
 export async function readFileBytes(path: string): Promise<Uint8Array> {
-  const bytes = await invoke<number[]>("read_file_bytes", { path });
-  return Uint8Array.from(bytes);
+  const buf = await invoke<ArrayBuffer>("read_file_bytes", { path });
+  return new Uint8Array(buf);
+}
+
+/** Cancel an in-flight Julia/build run by id (`run_cancel`). */
+export async function runCancel(id: string): Promise<void> {
+  await invoke("run_cancel", { id });
 }
 
 /** Create a new empty file (errors if it already exists). */

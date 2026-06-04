@@ -20,6 +20,13 @@ function parentDir(path: string): string {
   return idx > 0 ? path.slice(0, idx) : path.slice(0, idx + 1);
 }
 
+// Join a parent directory and a child name without ever doubling the separator
+// (e.g. a parent of "/" must yield "/name", not "//name").
+function joinPath(parent: string, name: string): string {
+  const sep = parent.includes("\\") ? "\\" : "/";
+  return parent.endsWith(sep) ? `${parent}${name}` : `${parent}${sep}${name}`;
+}
+
 function loadInto(path: string) {
   readDirectory(path)
     .then((entries) => useTreeStore.getState().setChildren(path, entries))
@@ -65,7 +72,7 @@ function TreeNode({ entry, depth, onOpenFile }: NodeProps) {
     const trimmed = name.trim();
     if (!trimmed || trimmed === entry.name) return;
     try {
-      await renamePath(entry.path, `${parentDir(entry.path)}/${trimmed}`);
+      await renamePath(entry.path, joinPath(parentDir(entry.path), trimmed));
       useTreeStore.getState().refresh();
     } catch (err) {
       console.error("rename failed", err);
@@ -179,7 +186,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     setCreating(null);
     const trimmed = name.trim();
     if (!kind || !trimmed) return;
-    const target = `${rootPath}/${trimmed}`;
+    const target = joinPath(rootPath, trimmed);
     try {
       if (kind === "folder") await createDirectory(target);
       else await createFile(target);

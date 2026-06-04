@@ -42,7 +42,7 @@ export const DEFAULT_SETTINGS: Settings = {
   pdfPreviewMode: "sidePanel",
   autosave: false,
   restoreWorkspaceOnStartup: true,
-  minimap: true,
+  minimap: false,
   lineNumbers: true,
 };
 

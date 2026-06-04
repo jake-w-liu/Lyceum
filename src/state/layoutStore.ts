@@ -39,6 +39,12 @@ export interface LayoutData {
   activeBottomTab: BottomTab;
   pdfPanelVisible: boolean;
   pdfPanelWidth: number;
+  /**
+   * When true, the editor area renders the rendered Markdown preview in place of
+   * the source editor (for the active Markdown document). It replaces the editor
+   * view rather than opening the right-side panel; only applies to .md files.
+   */
+  editorPreview: boolean;
 }
 
 export interface LayoutActions {
@@ -68,6 +74,9 @@ export interface LayoutActions {
   togglePdfPanel: () => void;
   setPdfPanelVisible: (visible: boolean) => void;
   setPdfPanelWidth: (width: number) => void;
+
+  toggleEditorPreview: () => void;
+  setEditorPreview: (on: boolean) => void;
 }
 
 export type LayoutState = LayoutData & LayoutActions;
@@ -81,6 +90,7 @@ export const initialLayoutData: LayoutData = {
   activeBottomTab: "terminal",
   pdfPanelVisible: false,
   pdfPanelWidth: 480,
+  editorPreview: false,
 };
 
 export const useLayoutStore = create<LayoutState>((set) => ({
@@ -123,4 +133,7 @@ export const useLayoutStore = create<LayoutState>((set) => ({
   setPdfPanelVisible: (visible) => set({ pdfPanelVisible: visible }),
   setPdfPanelWidth: (width) =>
     set({ pdfPanelWidth: clamp(width, PDF_MIN_WIDTH, PDF_MAX_WIDTH) }),
+
+  toggleEditorPreview: () => set((s) => ({ editorPreview: !s.editorPreview })),
+  setEditorPreview: (on) => set({ editorPreview: on }),
 }));

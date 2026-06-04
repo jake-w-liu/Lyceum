@@ -18,6 +18,7 @@ import { getActiveDoc, useEditorStore } from "../state/editorStore";
 import { usePreviewStore } from "../state/previewStore";
 import { runActiveJulia } from "../lib/julia";
 import { runLatexBuild } from "../lib/latexBuild";
+import { stopActiveRun } from "../lib/run";
 import { saveSettings, settingsFilePath } from "../lib/settingsPersistence";
 import { runEditorAction } from "../lib/editorBridge";
 import { useTreeStore } from "../state/treeStore";
@@ -126,8 +127,9 @@ export function registerBuiltinCommands(): void {
       const preview = usePreviewStore.getState();
       const path = doc?.path.toLowerCase() ?? "";
       if (doc && (path.endsWith(".md") || path.endsWith(".markdown"))) {
-        preview.openMarkdown(doc.path);
-        layout().setPdfPanelVisible(true);
+        // Markdown previews in place (replaces the editor view), not in the
+        // side panel.
+        layout().toggleEditorPreview();
       } else if (doc && path.endsWith(".pdf")) {
         preview.openPdf(doc.path);
         layout().setPdfPanelVisible(true);
@@ -147,6 +149,12 @@ export function registerBuiltinCommands(): void {
     title: "Run File or Selection (Julia)",
     category: "Run",
     run: () => runActiveJulia(),
+  });
+  commandRegistry.register({
+    id: "run.stop",
+    title: "Stop Running Process",
+    category: "Run",
+    run: () => stopActiveRun(),
   });
   commandRegistry.register({
     id: "workbench.dismiss",

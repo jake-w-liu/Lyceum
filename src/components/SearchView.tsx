@@ -15,20 +15,32 @@ export function SearchView() {
   const searching = useSearchStore((s) => s.searching);
   const rootPath = useWorkspaceStore((s) => s.rootPath);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Monotonic request id: only the latest in-flight search may write state, so a
+  // slow earlier response can't clobber newer results (out-of-order race).
+  const seqRef = useRef(0);
 
   useEffect(() => {
     if (timer.current) clearTimeout(timer.current);
     const trimmed = query.trim();
     if (!rootPath || trimmed.length < 2) {
+      // Invalidate any in-flight search so it can't later overwrite the cleared list.
+      seqRef.current++;
       useSearchStore.getState().setResults([]);
       return;
     }
     timer.current = setTimeout(() => {
+      const seq = ++seqRef.current;
       useSearchStore.getState().setSearching(true);
       searchWorkspace(rootPath, trimmed)
-        .then((r) => useSearchStore.getState().setResults(r))
-        .catch(() => useSearchStore.getState().setResults([]))
-        .finally(() => useSearchStore.getState().setSearching(false));
+        .then((r) => {
+          if (seq === seqRef.current) useSearchStore.getState().setResults(r);
+        })
+        .catch(() => {
+          if (seq === seqRef.current) useSearchStore.getState().setResults([]);
+        })
+        .finally(() => {
+          if (seq === seqRef.current) useSearchStore.getState().setSearching(false);
+        });
     }, SEARCH_DEBOUNCE_MS);
     return () => {
       if (timer.current) clearTimeout(timer.current);

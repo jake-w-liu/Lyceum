@@ -28,9 +28,16 @@ pub fn app_config_path(app: tauri::AppHandle, name: String) -> Result<String, St
 }
 
 /// Read a file's raw bytes (used by the PDF viewer, M6).
+fn read_file_bytes_impl(path: &str) -> Result<Vec<u8>, String> {
+    std::fs::read(path).map_err(|e| format!("{path}: {e}"))
+}
+
+/// Read a file's raw bytes as a binary IPC `Response` (`InvokeResponseBody::Raw`)
+/// so the bytes travel as an `ArrayBuffer` — not a JSON `number[]` that would be
+/// materialized once as boxed numbers and copied again into a `Uint8Array`.
 #[tauri::command]
-pub fn read_file_bytes(path: String) -> Result<Vec<u8>, String> {
-    std::fs::read(&path).map_err(|e| format!("{path}: {e}"))
+pub fn read_file_bytes(path: String) -> Result<tauri::ipc::Response, String> {
+    Ok(tauri::ipc::Response::new(read_file_bytes_impl(&path)?))
 }
 
 #[cfg(test)]
@@ -72,7 +79,8 @@ mod tests {
         let path = tmp.path().join("data.bin").to_string_lossy().to_string();
         let bytes = vec![0u8, 1, 2, 253, 254, 255];
         std::fs::write(&path, &bytes).unwrap();
-        assert_eq!(read_file_bytes(path).expect("read bytes"), bytes);
+        // Test the inner helper; the command wraps it in a binary IPC Response.
+        assert_eq!(read_file_bytes_impl(&path).expect("read bytes"), bytes);
     }
 
     #[test]

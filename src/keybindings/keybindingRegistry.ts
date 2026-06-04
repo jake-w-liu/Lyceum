@@ -172,17 +172,33 @@ function matchChord(chord: Chord, e: KeyboardEvent, isMacOs: boolean): boolean {
   return matchMainKey(chord.mainKey, e);
 }
 
+// Parsed chords cached per keymap array identity. matchKeybinding runs on every
+// keydown; a chord parse depends only on the static `key` string, so re-parsing
+// the whole keymap per keystroke is wasted work. Both DEFAULT_KEYMAP and the
+// keymap store's `[...DEFAULT_KEYMAP, ...user]` yield a stable array reference
+// per keymap version, so the cache invalidates automatically on change.
+const chordCache = new WeakMap<Keybinding[], Chord[]>();
+
+function getChords(keymap: Keybinding[]): Chord[] {
+  let chords = chordCache.get(keymap);
+  if (!chords) {
+    chords = keymap.map((b) => parseChord(b.key));
+    chordCache.set(keymap, chords);
+  }
+  return chords;
+}
+
 export function matchKeybinding(
   e: KeyboardEvent,
   ctx: KeyContext,
   isMacOs: boolean,
   keymap: Keybinding[] = DEFAULT_KEYMAP
 ): string | null {
+  const chords = getChords(keymap);
   let result: string | null = null;
-  for (const binding of keymap) {
-    const chord = parseChord(binding.key);
-    if (matchChord(chord, e, isMacOs) && evaluateWhen(binding.when, ctx)) {
-      result = binding.command;
+  for (let i = 0; i < keymap.length; i++) {
+    if (matchChord(chords[i], e, isMacOs) && evaluateWhen(keymap[i].when, ctx)) {
+      result = keymap[i].command;
     }
   }
   return result;

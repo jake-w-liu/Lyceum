@@ -29,4 +29,11 @@ describe("lsp protocol helpers", () => {
     expect(params.rootUri).toBeNull();
     expect(params.workspaceFolders).toBeNull();
   });
+
+  it("falls back to the raw form on malformed percent-encoding (never throws)", () => {
+    // A lone '%' is invalid for decodeURIComponent; uriToPath must not throw out
+    // of the diagnostics dispatch.
+    expect(() => uriToPath("file:///bad/%ZZ/x")).not.toThrow();
+    expect(uriToPath("file:///bad/%ZZ/x")).toBe("/bad/%ZZ/x");
+  });
 });

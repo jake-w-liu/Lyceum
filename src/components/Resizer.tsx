@@ -34,11 +34,15 @@ export function Resizer({
     function up(): void {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
       document.body.style.cursor = "";
     }
 
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
+    // Treat pointercancel (interrupted touch, OS gesture takeover, device
+    // removal) like pointerup so the window listeners and body cursor never leak.
+    window.addEventListener("pointercancel", up);
     document.body.style.cursor =
       orientation === "vertical" ? "col-resize" : "row-resize";
   }

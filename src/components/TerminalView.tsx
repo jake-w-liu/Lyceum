@@ -125,10 +125,19 @@ export function TerminalView({
       }
     })();
 
+    // Only round-trip a resize to the PTY when the character grid actually
+    // changes — a drag-resize fires the observer many times per second but a few
+    // px usually keeps the same cols/rows, so the ioctl/IPC would be redundant.
+    let lastCols = term.cols;
+    let lastRows = term.rows;
     const observer = new ResizeObserver(() => {
       try {
         fit.fit();
-        void resizePty(id, term.cols, term.rows);
+        if (term.cols !== lastCols || term.rows !== lastRows) {
+          lastCols = term.cols;
+          lastRows = term.rows;
+          void resizePty(id, term.cols, term.rows);
+        }
       } catch {
         // ignore transient layout errors
       }

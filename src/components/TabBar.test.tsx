@@ -3,6 +3,7 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { TabBar } from "./TabBar";
 import { initialEditorData, useEditorStore } from "../state/editorStore";
+import { initialLayoutData, useLayoutStore } from "../state/layoutStore";
 
 const get = () => useEditorStore.getState();
 
@@ -13,6 +14,7 @@ const seed = () => {
 
 beforeEach(() => {
   useEditorStore.setState(initialEditorData, false);
+  useLayoutStore.setState(initialLayoutData, false);
 });
 
 describe("TabBar", () => {
@@ -69,5 +71,30 @@ describe("TabBar", () => {
 
     expect(within(dirtyTab).getByText("●")).toBeInTheDocument();
     expect(within(cleanTab).queryByText("●")).not.toBeInTheDocument();
+  });
+
+  it("toggles in-place preview when the Markdown Preview action is clicked", async () => {
+    get().openDoc({ path: "/w/notes.md", content: "# hi", language: "markdown" });
+    render(<TabBar />);
+
+    expect(useLayoutStore.getState().editorPreview).toBe(false);
+    await userEvent.click(
+      screen.getByRole("button", { name: "Open Markdown Preview" }),
+    );
+    expect(useLayoutStore.getState().editorPreview).toBe(true);
+
+    // The action flips to "Show Markdown Source" and toggles preview back off.
+    await userEvent.click(
+      screen.getByRole("button", { name: "Show Markdown Source" }),
+    );
+    expect(useLayoutStore.getState().editorPreview).toBe(false);
+  });
+
+  it("hides the Preview action for non-Markdown files", () => {
+    seed(); // .ts files
+    render(<TabBar />);
+    expect(
+      screen.queryByRole("button", { name: "Open Markdown Preview" }),
+    ).toBeNull();
   });
 });

@@ -6,17 +6,24 @@ import { create } from "zustand";
 export interface OutputData {
   lines: string[];
   running: boolean;
+  /** Backend run id of the in-flight run (Julia/build), for cancellation. */
+  runId: string | null;
 }
 
 export interface OutputActions {
   append: (line: string) => void;
   clear: () => void;
   setRunning: (running: boolean) => void;
+  setRunId: (runId: string | null) => void;
 }
 
 export type OutputState = OutputData & OutputActions;
 
-export const initialOutputData: OutputData = { lines: [], running: false };
+export const initialOutputData: OutputData = {
+  lines: [],
+  running: false,
+  runId: null,
+};
 
 // Cap the retained output so a very chatty/long run can't grow the buffer (and
 // the rendered <pre>) without bound; we keep the most recent lines.
@@ -36,4 +43,5 @@ export const useOutputStore = create<OutputState>()((set) => ({
     }),
   clear: () => set({ lines: [] }),
   setRunning: (running) => set({ running }),
+  setRunId: (runId) => set({ runId }),
 }));

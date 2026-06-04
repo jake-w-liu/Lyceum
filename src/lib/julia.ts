@@ -55,6 +55,7 @@ export async function runActiveJulia(): Promise<void> {
 
   const id = `julia-${(runSeq += 1)}`;
   out.setRunning(true);
+  out.setRunId(id);
   out.append(invocation.code ? "julia -e <selection>" : `julia ${doc.name}`);
 
   const offData = await listen<{ stream: string; line: string }>(
@@ -72,6 +73,7 @@ export async function runActiveJulia(): Promise<void> {
     const store = useOutputStore.getState();
     store.append(`[julia exited with code ${event.payload}]`);
     store.setRunning(false);
+    store.setRunId(null);
     offData();
     offExit();
   });
@@ -97,6 +99,7 @@ export async function runActiveJulia(): Promise<void> {
     const store = useOutputStore.getState();
     store.append(`failed to run julia: ${String(e)}`);
     store.setRunning(false);
+    store.setRunId(null);
     offData();
     offExit();
   }

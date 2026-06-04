@@ -42,4 +42,25 @@ describe("previewStore", () => {
     expect(viewState["/proj/a.pdf"]).toEqual({ page: 1, zoom: 1 });
     expect(viewState["/proj/b.pdf"]).toEqual({ page: 7, zoom: 2 });
   });
+
+  it("caps viewState entries (LRU eviction), keeping the most recently touched", () => {
+    const set = usePreviewStore.getState().setViewState;
+    // Insert well past the cap of 50.
+    for (let i = 0; i < 60; i++) set(`/p/${i}.pdf`, { page: 1, zoom: 1 });
+
+    const { viewState } = usePreviewStore.getState();
+    const keys = Object.keys(viewState);
+    expect(keys.length).toBe(50);
+    // The 10 oldest (0..9) were evicted; the newest remain.
+    expect(viewState["/p/0.pdf"]).toBeUndefined();
+    expect(viewState["/p/9.pdf"]).toBeUndefined();
+    expect(viewState["/p/59.pdf"]).toEqual({ page: 1, zoom: 1 });
+
+    // Re-touching an existing key refreshes its recency so it survives eviction.
+    set("/p/10.pdf", { page: 2, zoom: 2 });
+    set("/p/60.pdf", { page: 1, zoom: 1 }); // forces one eviction (now 51 -> 50)
+    const after = usePreviewStore.getState().viewState;
+    expect(after["/p/10.pdf"]).toEqual({ page: 2, zoom: 2 }); // survived (recently touched)
+    expect(after["/p/11.pdf"]).toBeUndefined(); // evicted as the new oldest
+  });
 });

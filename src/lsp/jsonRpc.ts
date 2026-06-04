@@ -26,11 +26,14 @@ interface IncomingMessage {
   error?: { code?: number; message?: string };
 }
 
-// Non-initialize requests are timed out so an un-answered request can't leak a
-// pending entry forever. `initialize` is exempt because a cold language server
-// (e.g. Julia precompiling) can legitimately take minutes; server death is
-// handled separately by dispose() via the exit event.
+// Requests are timed out so an un-answered request can't leak a pending entry
+// forever. `initialize` gets a much larger finite cap because a cold language
+// server (e.g. Julia precompiling) can legitimately take minutes — but it is NOT
+// exempt: a started-but-hung server that never replies would otherwise wedge the
+// session's `ready` promise forever. On timeout `ready` rejects and ensureServer
+// tears down + un-caches the session, allowing a clean retry.
 const REQUEST_TIMEOUT_MS = 60_000;
+const INITIALIZE_TIMEOUT_MS = 300_000;
 
 export function createRpcClient(transport: JsonRpcTransport): RpcClient {
   let nextId = 1;
@@ -49,13 +52,13 @@ export function createRpcClient(transport: JsonRpcTransport): RpcClient {
         resolve: resolve as (value: unknown) => void,
         reject,
       };
-      if (method !== "initialize") {
-        entry.timer = setTimeout(() => {
-          if (pending.delete(id)) {
-            reject(new Error(`LSP request timed out: ${method}`));
-          }
-        }, REQUEST_TIMEOUT_MS);
-      }
+      const timeoutMs =
+        method === "initialize" ? INITIALIZE_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
+      entry.timer = setTimeout(() => {
+        if (pending.delete(id)) {
+          reject(new Error(`LSP request timed out: ${method}`));
+        }
+      }, timeoutMs);
       pending.set(id, entry);
       transport.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
     });
@@ -112,7 +115,16 @@ export function createRpcClient(transport: JsonRpcTransport): RpcClient {
     // Notification (method, no id).
     if (typeof message.method === "string") {
       const list = handlers.get(message.method);
-      if (list) for (const handler of list) handler(message.params);
+      // Contain a throwing handler so one bad notification (e.g. a malformed
+      // diagnostics payload) can't break dispatch for everything that follows.
+      if (list)
+        for (const handler of list) {
+          try {
+            handler(message.params);
+          } catch {
+            /* notification handler error — ignore */
+          }
+        }
     }
   }
 

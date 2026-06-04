@@ -84,7 +84,7 @@ export function attachMonacoLsp(monaco: typeof Monaco): void {
 
     monaco.languages.registerHoverProvider(lang, {
       async provideHover(model, position) {
-        const rpc = getSession(lang)?.rpc;
+        const rpc = rpcWithCap(lang, "hoverProvider");
         if (!rpc) return null;
         try {
           const res = await rpc.request<LspHover | null>("textDocument/hover", {
@@ -101,7 +101,7 @@ export function attachMonacoLsp(monaco: typeof Monaco): void {
 
     monaco.languages.registerDefinitionProvider(lang, {
       async provideDefinition(model, position) {
-        const rpc = getSession(lang)?.rpc;
+        const rpc = rpcWithCap(lang, "definitionProvider");
         if (!rpc) return null;
         try {
           const res = await rpc.request<LspLocation | LspLocation[] | null>(
@@ -120,7 +120,7 @@ export function attachMonacoLsp(monaco: typeof Monaco): void {
 
     monaco.languages.registerReferenceProvider(lang, {
       async provideReferences(model, position, context) {
-        const rpc = getSession(lang)?.rpc;
+        const rpc = rpcWithCap(lang, "referencesProvider");
         if (!rpc) return null;
         try {
           const res = await rpc.request<LspLocation[] | null>(
@@ -140,7 +140,7 @@ export function attachMonacoLsp(monaco: typeof Monaco): void {
 
     monaco.languages.registerCompletionItemProvider(lang, {
       async provideCompletionItems(model, position) {
-        const rpc = getSession(lang)?.rpc;
+        const rpc = rpcWithCap(lang, "completionProvider");
         if (!rpc) return { suggestions: [] };
         const word = model.getWordUntilPosition(position);
         const range = {
@@ -175,7 +175,7 @@ export function attachMonacoLsp(monaco: typeof Monaco): void {
 
     monaco.languages.registerDocumentSymbolProvider(lang, {
       async provideDocumentSymbols(model) {
-        const rpc = getSession(lang)?.rpc;
+        const rpc = rpcWithCap(lang, "documentSymbolProvider");
         if (!rpc) return [];
         try {
           const res = await rpc.request<
@@ -192,7 +192,7 @@ export function attachMonacoLsp(monaco: typeof Monaco): void {
 
     monaco.languages.registerRenameProvider(lang, {
       async provideRenameEdits(model, position, newName) {
-        const rpc = getSession(lang)?.rpc;
+        const rpc = rpcWithCap(lang, "renameProvider");
         if (!rpc) return { edits: [] };
         try {
           const res = await rpc.request<LspWorkspaceEdit | null>(
@@ -212,7 +212,7 @@ export function attachMonacoLsp(monaco: typeof Monaco): void {
 
     monaco.languages.registerDocumentFormattingEditProvider(lang, {
       async provideDocumentFormattingEdits(model) {
-        const rpc = getSession(lang)?.rpc;
+        const rpc = rpcWithCap(lang, "documentFormattingProvider");
         if (!rpc) return [];
         try {
           const res = await rpc.request<LspTextEdit[] | null>(
@@ -232,6 +232,16 @@ export function attachMonacoLsp(monaco: typeof Monaco): void {
       },
     });
   }
+}
+
+// Return the session's RPC client only if the server advertised `cap` in its
+// initialize result (capabilities is empty until the handshake resolves, so
+// providers correctly stay inert until then). Avoids issuing requests for
+// features the server can't service.
+function rpcWithCap(lang: string, cap: string) {
+  const session = getSession(lang);
+  if (!session || !session.capabilities[cap]) return null;
+  return session.rpc;
 }
 
 function toLspPosition(position: {

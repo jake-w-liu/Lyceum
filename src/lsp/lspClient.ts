@@ -18,6 +18,12 @@ export interface LspSession {
   ready: Promise<void>;
   unlistens: UnlistenFn[];
   openDocs: Set<string>;
+  /**
+   * Server capabilities from the `initialize` result, used to gate Monaco
+   * providers so we never issue (e.g.) rename/format requests to a server that
+   * does not advertise them. Empty until the handshake resolves.
+   */
+  capabilities: Record<string, unknown>;
 }
 
 const sessions = new Map<string, LspSession>();
@@ -69,16 +75,30 @@ export async function ensureServer(
     }),
   );
 
+  const session: LspSession = {
+    id,
+    languageId,
+    rpc,
+    // Replaced just below once the handshake promise is constructed.
+    ready: Promise.resolve(),
+    unlistens,
+    openDocs: new Set(),
+    capabilities: {},
+  };
+
   const ready = (async () => {
     try {
       await lspStart(id, cmd, args, rootPath);
-      await rpc.request("initialize", buildInitializeParams(rootPath));
+      const initResult = await rpc.request<{
+        capabilities?: Record<string, unknown>;
+      }>("initialize", buildInitializeParams(rootPath));
+      session.capabilities = initResult?.capabilities ?? {};
       rpc.notify("initialized", {});
       useLspStatusStore.getState().setStatus(languageId, "ready");
     } catch (e) {
-      // Start/initialize failed (e.g. server binary missing): tear everything
-      // down and un-cache so a later open retries cleanly instead of reusing a
-      // dead session.
+      // Start/initialize failed (e.g. server binary missing OR a started server
+      // that never answers initialize within the cap): tear everything down and
+      // un-cache so a later open retries cleanly instead of reusing a dead session.
       useLspStatusStore.getState().setStatus(languageId, "error");
       unlistens.forEach((off) => off());
       rpc.dispose("lsp init failed");
@@ -87,18 +107,11 @@ export async function ensureServer(
       throw e instanceof Error ? e : new Error(String(e));
     }
   })();
+  session.ready = ready;
   // Defensive: ensure the ready rejection is never an unhandled rejection even
   // if no caller awaits it (didOpen/didChange await it in try/catch).
   void ready.catch(() => {});
 
-  const session: LspSession = {
-    id,
-    languageId,
-    rpc,
-    ready,
-    unlistens,
-    openDocs: new Set(),
-  };
   sessions.set(languageId, session);
   return session;
 }

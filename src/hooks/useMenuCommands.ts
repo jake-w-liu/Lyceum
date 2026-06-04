@@ -9,15 +9,22 @@ import { commandRegistry } from "../commands/commandRegistry";
 export function useMenuCommands(): void {
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
+    let disposed = false;
     listen<string>("menu", (event) => {
       void commandRegistry.execute(event.payload);
     })
       .then((fn) => {
-        unlisten = fn;
+        // If the effect was already cleaned up before listen() resolved, unlisten
+        // immediately — otherwise the listener leaks and re-fires every command.
+        if (disposed) fn();
+        else unlisten = fn;
       })
       .catch(() => {
         /* not running inside Tauri */
       });
-    return () => unlisten?.();
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, []);
 }

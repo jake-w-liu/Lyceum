@@ -9,7 +9,13 @@ export function pathToUri(path: string): string {
 
 export function uriToPath(uri: string): string {
   const withoutScheme = uri.replace(/^file:\/\//, "");
-  return decodeURIComponent(withoutScheme);
+  try {
+    return decodeURIComponent(withoutScheme);
+  } catch {
+    // Malformed percent-encoding from a server URI: fall back to the raw form
+    // rather than throwing out of the diagnostics dispatch.
+    return withoutScheme;
+  }
 }
 
 export interface InitializeParams {

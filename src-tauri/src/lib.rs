@@ -32,6 +32,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(terminal::TerminalManager::default())
         .manage(lsp::LspManager::default())
+        .manage(julia::RunManager::default())
         .setup(|app| {
             let menu = menu::build_app_menu(app.handle())?;
             app.set_menu(menu)?;
@@ -60,6 +61,7 @@ pub fn run() {
             terminal::terminal_close,
             julia::run_julia,
             julia::run_build,
+            julia::run_cancel,
             lsp::lsp_start,
             lsp::lsp_send,
             lsp::lsp_stop

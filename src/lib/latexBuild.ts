@@ -36,6 +36,7 @@ export async function runLatexBuild(): Promise<void> {
   const id = `build-${(buildSeq += 1)}`;
   const activeTex = getActiveDoc(useEditorStore.getState())?.path ?? null;
   out.setRunning(true);
+  out.setRunId(id);
   out.append(`$ ${command}   (cwd: ${rootPath})`);
 
   const offData = await listen<{ stream: string; line: string }>(
@@ -53,6 +54,7 @@ export async function runLatexBuild(): Promise<void> {
     const store = useOutputStore.getState();
     store.append(`[build exited with code ${event.payload}]`);
     store.setRunning(false);
+    store.setRunId(null);
     offData();
     offExit();
     if (event.payload === 0) {
@@ -70,6 +72,7 @@ export async function runLatexBuild(): Promise<void> {
     const store = useOutputStore.getState();
     store.append(`failed to run build: ${String(e)}`);
     store.setRunning(false);
+    store.setRunId(null);
     offData();
     offExit();
   }
