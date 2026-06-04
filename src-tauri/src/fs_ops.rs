@@ -5,7 +5,8 @@
 // are thin. Directory reads are explicit, on-demand (lazy) reads — no recursive
 // walking or background indexing (a v1 non-goal).
 
-use std::path::{Path, PathBuf};
+use std::collections::HashSet;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -39,6 +40,20 @@ pub struct TrashItemDto {
 pub struct TrashBatchDto {
     pub id: String,
     pub items: Vec<TrashItemDto>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MovedPathDto {
+    pub from: String,
+    pub to: String,
+    pub is_dir: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceEntryTarget {
+    path: PathBuf,
+    is_dir: bool,
 }
 
 /// List the immediate children of `dir`, directories first then files, each
@@ -120,11 +135,24 @@ pub fn rename_path(from: String, to: String) -> Result<(), String> {
     std::fs::rename(&from, &to).map_err(|e| format!("{from} -> {to}: {e}"))
 }
 
+/// Move one or more workspace paths into an existing destination directory.
+#[tauri::command]
+pub fn move_paths(
+    root: String,
+    paths: Vec<String>,
+    destination_dir: String,
+) -> Result<Vec<MovedPathDto>, String> {
+    move_paths_impl(Path::new(&root), paths, Path::new(&destination_dir))
+}
+
 /// Delete `path`, recursively removing directory trees and unlinking files.
 #[tauri::command]
 pub fn delete_path(path: String) -> Result<(), String> {
     let target = Path::new(&path);
-    if target.is_dir() {
+    let file_type = std::fs::symlink_metadata(target)
+        .map_err(|e| format!("{path}: {e}"))?
+        .file_type();
+    if file_type.is_dir() {
         std::fs::remove_dir_all(target).map_err(|e| format!("{path}: {e}"))
     } else {
         std::fs::remove_file(target).map_err(|e| format!("{path}: {e}"))
@@ -134,10 +162,12 @@ pub fn delete_path(path: String) -> Result<(), String> {
 #[tauri::command]
 pub fn delete_file_if_exists(path: String) -> Result<bool, String> {
     let target = Path::new(&path);
-    if !target.exists() {
-        return Ok(false);
-    }
-    if target.is_dir() {
+    let metadata = match std::fs::symlink_metadata(target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("{path}: {error}")),
+    };
+    if metadata.file_type().is_dir() {
         return Err(format!("expected a file, found directory: {path}"));
     }
     std::fs::remove_file(target)
@@ -174,23 +204,87 @@ fn move_paths_to_trash_impl(root: &Path, paths: Vec<String>) -> Result<TrashBatc
     let mut items = Vec::with_capacity(targets.len());
     for target in targets {
         let rel = target
+            .path
             .strip_prefix(&root)
-            .map_err(|e| format!("{}: {e}", target.display()))?;
+            .map_err(|e| format!("{}: {e}", target.path.display()))?;
         let destination = batch_dir.join(rel);
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
-        let is_dir = target.is_dir();
-        std::fs::rename(&target, &destination)
-            .map_err(|e| format!("{} -> {}: {e}", target.display(), destination.display()))?;
+        std::fs::rename(&target.path, &destination).map_err(|e| {
+            format!(
+                "{} -> {}: {e}",
+                target.path.display(),
+                destination.display()
+            )
+        })?;
         items.push(TrashItemDto {
-            original_path: target.to_string_lossy().to_string(),
+            original_path: target.path.to_string_lossy().to_string(),
             trashed_path: destination.to_string_lossy().to_string(),
-            is_dir,
+            is_dir: target.is_dir,
         });
     }
 
     Ok(TrashBatchDto { id, items })
+}
+
+fn move_paths_impl(
+    root: &Path,
+    paths: Vec<String>,
+    destination_dir: &Path,
+) -> Result<Vec<MovedPathDto>, String> {
+    let root = canonical_dir(root)?;
+    let destination = destination_dir
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", destination_dir.display()))?;
+    validate_move_destination(&root, &destination)?;
+    let targets = normalize_move_targets(&root, paths)?;
+
+    let mut planned = Vec::new();
+    let mut destinations = HashSet::new();
+    for target in targets {
+        let parent = target
+            .path
+            .parent()
+            .ok_or_else(|| format!("invalid move path: {}", target.path.display()))?;
+        if parent == destination {
+            continue;
+        }
+        if target.is_dir && destination.starts_with(&target.path) {
+            return Err(format!(
+                "cannot move a folder into itself: {} -> {}",
+                target.path.display(),
+                destination.display()
+            ));
+        }
+        let name = target
+            .path
+            .file_name()
+            .ok_or_else(|| format!("cannot determine file name for {}", target.path.display()))?;
+        let to = destination.join(name);
+        if !destinations.insert(to.clone()) {
+            return Err(format!(
+                "multiple moved items would overwrite {}",
+                to.display()
+            ));
+        }
+        if to.exists() {
+            return Err(format!("already exists: {}", to.display()));
+        }
+        planned.push((target.path.clone(), to, target.is_dir));
+    }
+
+    let mut moved = Vec::with_capacity(planned.len());
+    for (from, to, is_dir) in planned {
+        std::fs::rename(&from, &to)
+            .map_err(|e| format!("{} -> {}: {e}", from.display(), to.display()))?;
+        moved.push(MovedPathDto {
+            from: from.to_string_lossy().to_string(),
+            to: to.to_string_lossy().to_string(),
+            is_dir,
+        });
+    }
+    Ok(moved)
 }
 
 fn restore_trash_batch_impl(root: &Path, items: Vec<TrashItemDto>) -> Result<(), String> {
@@ -260,25 +354,77 @@ fn canonical_dir(path: &Path) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-fn normalize_delete_targets(root: &Path, paths: Vec<String>) -> Result<Vec<PathBuf>, String> {
-    let mut targets = Vec::new();
+fn normalize_delete_targets(
+    root: &Path,
+    paths: Vec<String>,
+) -> Result<Vec<WorkspaceEntryTarget>, String> {
+    let mut targets: Vec<WorkspaceEntryTarget> = Vec::new();
     for raw in paths {
-        let target = Path::new(&raw)
-            .canonicalize()
-            .map_err(|e| format!("{raw}: {e}"))?;
-        validate_workspace_target(root, &target)?;
-        if !targets.contains(&target) {
+        let target = existing_workspace_entry_target(&raw)?;
+        validate_workspace_target(root, &target.path)?;
+        if !targets.iter().any(|entry| entry.path == target.path) {
             targets.push(target);
         }
     }
-    targets.sort_by_key(|p| p.components().count());
-    let mut top_level: Vec<PathBuf> = Vec::new();
+    targets.sort_by_key(|entry| entry.path.components().count());
+    let mut top_level: Vec<WorkspaceEntryTarget> = Vec::new();
     for target in targets {
-        if !top_level.iter().any(|parent| target.starts_with(parent)) {
+        if !top_level
+            .iter()
+            .any(|parent| target.path.starts_with(&parent.path))
+        {
             top_level.push(target);
         }
     }
     Ok(top_level)
+}
+
+fn normalize_move_targets(
+    root: &Path,
+    paths: Vec<String>,
+) -> Result<Vec<WorkspaceEntryTarget>, String> {
+    let mut targets: Vec<WorkspaceEntryTarget> = Vec::new();
+    for raw in paths {
+        let target = existing_workspace_entry_target(&raw)?;
+        validate_workspace_move_target(root, &target.path)?;
+        if !targets.iter().any(|entry| entry.path == target.path) {
+            targets.push(target);
+        }
+    }
+    targets.sort_by_key(|entry| entry.path.components().count());
+    let mut top_level: Vec<WorkspaceEntryTarget> = Vec::new();
+    for target in targets {
+        if !top_level
+            .iter()
+            .any(|parent| target.path.starts_with(&parent.path))
+        {
+            top_level.push(target);
+        }
+    }
+    Ok(top_level)
+}
+
+fn existing_workspace_entry_target(raw: &str) -> Result<WorkspaceEntryTarget, String> {
+    let path = Path::new(raw);
+    if !path.is_absolute() {
+        return Err(format!("path is not absolute: {raw}"));
+    }
+    let file_type = std::fs::symlink_metadata(path)
+        .map_err(|e| format!("{raw}: {e}"))?
+        .file_type();
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("invalid path: {}", path.display()))?;
+    let canonical_parent = parent
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", parent.display()))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| format!("cannot determine file name for {}", path.display()))?;
+    Ok(WorkspaceEntryTarget {
+        path: canonical_parent.join(file_name),
+        is_dir: file_type.is_dir(),
+    })
 }
 
 fn validate_workspace_target(root: &Path, target: &Path) -> Result<(), String> {
@@ -297,18 +443,50 @@ fn validate_workspace_target(root: &Path, target: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_workspace_move_target(root: &Path, target: &Path) -> Result<(), String> {
+    if target == root {
+        return Err("refusing to move the workspace root".to_string());
+    }
+    if !target.starts_with(root) {
+        return Err(format!("outside workspace: {}", target.display()));
+    }
+    if path_starts_with_trash(root, target) {
+        return Err(format!(
+            "refusing to move Lyceum trash: {}",
+            target.display()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_move_destination(root: &Path, destination: &Path) -> Result<(), String> {
+    if !destination.is_dir() {
+        return Err(format!("not a directory: {}", destination.display()));
+    }
+    if !destination.starts_with(root) {
+        return Err(format!(
+            "move destination outside workspace: {}",
+            destination.display()
+        ));
+    }
+    if path_starts_with_trash(root, destination) {
+        return Err(format!(
+            "refusing to move into Lyceum trash: {}",
+            destination.display()
+        ));
+    }
+    Ok(())
+}
+
 fn validate_restore_pair(root: &Path, original: &Path, trashed: &Path) -> Result<(), String> {
+    validate_workspace_path_no_traversal(root, original, "restore destination")?;
+    validate_workspace_path_no_traversal(root, trashed, "trash item")?;
     let original_parent = original
         .parent()
         .ok_or_else(|| format!("invalid restore path: {}", original.display()))?;
-    let canonical_parent = original_parent
-        .canonicalize()
-        .unwrap_or_else(|_| original_parent.to_path_buf());
-    if !canonical_parent.starts_with(root) {
-        return Err(format!(
-            "restore destination outside workspace: {}",
-            original.display()
-        ));
+    validate_existing_ancestor_inside(root, original_parent, "restore destination")?;
+    if let Some(trashed_parent) = trashed.parent() {
+        validate_existing_ancestor_inside(root, trashed_parent, "trash item")?;
     }
     if path_starts_with_trash(root, original) {
         return Err(format!(
@@ -320,6 +498,57 @@ fn validate_restore_pair(root: &Path, original: &Path, trashed: &Path) -> Result
         return Err(format!(
             "trash item outside Lyceum trash: {}",
             trashed.display()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_existing_ancestor_inside(root: &Path, path: &Path, label: &str) -> Result<(), String> {
+    let mut current = Some(path);
+    while let Some(candidate) = current {
+        if candidate.exists() {
+            let canonical = candidate
+                .canonicalize()
+                .map_err(|e| format!("{}: {e}", candidate.display()))?;
+            if canonical.starts_with(root) {
+                return Ok(());
+            }
+            return Err(format!(
+                "{label} resolves outside workspace: {}",
+                path.display()
+            ));
+        }
+        current = candidate.parent();
+    }
+    Err(format!(
+        "{label} has no existing workspace ancestor: {}",
+        path.display()
+    ))
+}
+
+fn validate_workspace_path_no_traversal(
+    root: &Path,
+    path: &Path,
+    label: &str,
+) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err(format!("{label} is not absolute: {}", path.display()));
+    }
+    if !path.starts_with(root) {
+        return Err(format!("{label} outside workspace: {}", path.display()));
+    }
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    if relative.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err(format!(
+            "{label} contains path traversal: {}",
+            path.display()
         ));
     }
     Ok(())
@@ -502,6 +731,37 @@ mod tests {
         assert!(result.unwrap_err().contains("expected a file"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn delete_helpers_unlink_symlinks_without_touching_targets() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let target_dir = tmp.path().join("target-dir");
+        let link_dir = tmp.path().join("link-dir");
+        fs::create_dir(&target_dir).unwrap();
+        fs::write(target_dir.join("leaf.txt"), b"leaf").unwrap();
+        symlink(&target_dir, &link_dir).unwrap();
+
+        delete_path(link_dir.to_string_lossy().to_string()).expect("delete symlinked dir entry");
+
+        assert!(std::fs::symlink_metadata(&link_dir).is_err());
+        assert_eq!(fs::read(target_dir.join("leaf.txt")).unwrap(), b"leaf");
+
+        let target_file = tmp.path().join("target-file.txt");
+        let link_file = tmp.path().join("link-file.txt");
+        fs::write(&target_file, b"target").unwrap();
+        symlink(&target_file, &link_file).unwrap();
+
+        assert!(
+            delete_file_if_exists(link_file.to_string_lossy().to_string())
+                .expect("delete symlinked file entry")
+        );
+
+        assert!(std::fs::symlink_metadata(&link_file).is_err());
+        assert_eq!(fs::read(&target_file).unwrap(), b"target");
+    }
+
     #[test]
     fn move_restore_and_redo_trash_batch_round_trips_files_and_directories() {
         let tmp = tempfile::tempdir().expect("create temp dir");
@@ -578,5 +838,319 @@ mod tests {
         let outside_result =
             move_paths_to_trash_impl(root, vec![outside.path().to_string_lossy().to_string()]);
         assert!(outside_result.unwrap_err().contains("outside workspace"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn move_to_trash_moves_symlink_itself_not_target() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let target = root.join("target.txt");
+        let link = root.join("shortcut.txt");
+        fs::write(&target, b"target").unwrap();
+        symlink(&target, &link).unwrap();
+        let expected_original = root.canonicalize().unwrap().join("shortcut.txt");
+
+        let batch = move_paths_to_trash_impl(root, vec![link.to_string_lossy().to_string()])
+            .expect("trash symlink entry");
+
+        assert_eq!(batch.items.len(), 1);
+        assert_eq!(
+            Path::new(&batch.items[0].original_path),
+            expected_original.as_path()
+        );
+        assert!(!batch.items[0].is_dir);
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"target");
+        assert!(std::fs::symlink_metadata(&batch.items[0].trashed_path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn move_to_trash_allows_workspace_symlink_to_outside_without_touching_target() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let outside = tempfile::NamedTempFile::new().expect("outside file");
+        let root = tmp.path();
+        let link = root.join("outside-shortcut.txt");
+        fs::write(outside.path(), b"outside").unwrap();
+        symlink(outside.path(), &link).unwrap();
+
+        let batch = move_paths_to_trash_impl(root, vec![link.to_string_lossy().to_string()])
+            .expect("trash external symlink entry");
+
+        assert_eq!(batch.items.len(), 1);
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        assert_eq!(fs::read(outside.path()).unwrap(), b"outside");
+        assert!(std::fs::symlink_metadata(&batch.items[0].trashed_path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    fn move_paths_moves_files_into_destination_directory() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let src = root.join("note.txt");
+        let dst = root.join("folder");
+        fs::write(&src, b"note").unwrap();
+        fs::create_dir(&dst).unwrap();
+        let expected_from = src.canonicalize().unwrap().to_string_lossy().to_string();
+        let expected_to = dst
+            .canonicalize()
+            .unwrap()
+            .join("note.txt")
+            .to_string_lossy()
+            .to_string();
+
+        let moved = move_paths_impl(root, vec![src.to_string_lossy().to_string()], &dst)
+            .expect("move file");
+
+        assert_eq!(moved.len(), 1);
+        assert_eq!(moved[0].from, expected_from);
+        assert_eq!(moved[0].to, expected_to);
+        assert!(!src.exists());
+        assert_eq!(fs::read(dst.join("note.txt")).unwrap(), b"note");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn move_paths_moves_symlink_itself_not_target() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let target = root.join("target.txt");
+        let link = root.join("shortcut.txt");
+        let dst = root.join("folder");
+        fs::write(&target, b"target").unwrap();
+        fs::create_dir(&dst).unwrap();
+        symlink(&target, &link).unwrap();
+        let expected_from = root
+            .canonicalize()
+            .unwrap()
+            .join("shortcut.txt")
+            .to_string_lossy()
+            .to_string();
+        let expected_to = dst
+            .canonicalize()
+            .unwrap()
+            .join("shortcut.txt")
+            .to_string_lossy()
+            .to_string();
+
+        let moved = move_paths_impl(root, vec![link.to_string_lossy().to_string()], &dst)
+            .expect("move symlink entry");
+
+        assert_eq!(moved.len(), 1);
+        assert_eq!(moved[0].from, expected_from);
+        assert_eq!(moved[0].to, expected_to);
+        assert!(!moved[0].is_dir);
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"target");
+        assert!(std::fs::symlink_metadata(dst.join("shortcut.txt"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    fn move_paths_deduplicates_nested_selections_and_skips_same_parent() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let dst = root.join("dst");
+        let dir = root.join("src");
+        let leaf = dir.join("leaf.txt");
+        let already_there = dst.join("already.txt");
+        fs::create_dir(&dst).unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&leaf, b"leaf").unwrap();
+        fs::write(&already_there, b"same parent").unwrap();
+        let expected_from = dir.canonicalize().unwrap().to_string_lossy().to_string();
+
+        let moved = move_paths_impl(
+            root,
+            vec![
+                dir.to_string_lossy().to_string(),
+                leaf.to_string_lossy().to_string(),
+                already_there.to_string_lossy().to_string(),
+            ],
+            &dst,
+        )
+        .expect("move top-level selection");
+
+        assert_eq!(moved.len(), 1);
+        assert_eq!(moved[0].from, expected_from);
+        assert!(dst.join("src/leaf.txt").is_file());
+    }
+
+    #[test]
+    fn move_paths_rejects_overwrite_and_duplicate_destinations() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let dst = root.join("dst");
+        let a = root.join("a").join("note.txt");
+        let b = root.join("b").join("note.txt");
+        fs::create_dir(&dst).unwrap();
+        fs::create_dir_all(a.parent().unwrap()).unwrap();
+        fs::create_dir_all(b.parent().unwrap()).unwrap();
+        fs::write(&a, b"a").unwrap();
+        fs::write(&b, b"b").unwrap();
+
+        let duplicate_err = move_paths_impl(
+            root,
+            vec![
+                a.to_string_lossy().to_string(),
+                b.to_string_lossy().to_string(),
+            ],
+            &dst,
+        )
+        .unwrap_err();
+        assert!(duplicate_err.contains("multiple moved items"));
+
+        fs::write(dst.join("note.txt"), b"existing").unwrap();
+        let exists_err =
+            move_paths_impl(root, vec![a.to_string_lossy().to_string()], &dst).unwrap_err();
+        assert!(exists_err.contains("already exists"));
+    }
+
+    #[test]
+    fn move_paths_rejects_root_trash_outside_and_self_descendant_moves() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let outside = tempfile::tempdir().expect("outside dir");
+        let dir = root.join("dir");
+        let nested = dir.join("nested");
+        let trash = root.join(LYCEUM_TRASH_DIR);
+        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir(&trash).unwrap();
+
+        assert!(
+            move_paths_impl(root, vec![root.to_string_lossy().to_string()], &dir)
+                .unwrap_err()
+                .contains("workspace root")
+        );
+        assert!(move_paths_impl(
+            root,
+            vec![dir.to_string_lossy().to_string()],
+            outside.path()
+        )
+        .unwrap_err()
+        .contains("outside workspace"));
+        assert!(
+            move_paths_impl(root, vec![dir.to_string_lossy().to_string()], &nested)
+                .unwrap_err()
+                .contains("itself")
+        );
+        assert!(
+            move_paths_impl(root, vec![dir.to_string_lossy().to_string()], &trash)
+                .unwrap_err()
+                .contains("Lyceum trash")
+        );
+    }
+
+    #[test]
+    fn restore_rejects_path_traversal_in_original_path() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let trashed = root.join(LYCEUM_TRASH_DIR).join("batch").join("note.txt");
+        fs::create_dir_all(trashed.parent().unwrap()).unwrap();
+        fs::write(&trashed, b"note").unwrap();
+        let item = TrashItemDto {
+            original_path: root
+                .join("../outside/note.txt")
+                .to_string_lossy()
+                .to_string(),
+            trashed_path: trashed.to_string_lossy().to_string(),
+            is_dir: false,
+        };
+
+        let err = restore_trash_batch_impl(root, vec![item]).unwrap_err();
+
+        assert!(err.contains("path traversal") || err.contains("outside workspace"));
+    }
+
+    #[test]
+    fn restore_rejects_path_traversal_in_trash_path() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let item = TrashItemDto {
+            original_path: root.join("note.txt").to_string_lossy().to_string(),
+            trashed_path: root
+                .join(LYCEUM_TRASH_DIR)
+                .join("../outside/note.txt")
+                .to_string_lossy()
+                .to_string(),
+            is_dir: false,
+        };
+
+        let err = restore_trash_batch_impl(root, vec![item]).unwrap_err();
+
+        assert!(err.contains("path traversal") || err.contains("outside workspace"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_rejects_symlinked_destination_ancestor_outside_workspace() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let outside = tempfile::tempdir().expect("create outside dir");
+        let root = tmp.path();
+        symlink(outside.path(), root.join("link")).unwrap();
+        let trashed = root.join(LYCEUM_TRASH_DIR).join("batch").join("note.txt");
+        fs::create_dir_all(trashed.parent().unwrap()).unwrap();
+        fs::write(&trashed, b"note").unwrap();
+        let item = TrashItemDto {
+            original_path: root
+                .join("link/nested/note.txt")
+                .to_string_lossy()
+                .to_string(),
+            trashed_path: trashed.to_string_lossy().to_string(),
+            is_dir: false,
+        };
+
+        let err = restore_trash_batch_impl(root, vec![item]).unwrap_err();
+
+        assert!(
+            err.contains("resolves outside workspace") || err.contains("outside workspace"),
+            "{err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_rejects_symlinked_trash_ancestor_outside_workspace() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let outside = tempfile::tempdir().expect("create outside dir");
+        let root = tmp.path();
+        let trash_root = root.join(LYCEUM_TRASH_DIR);
+        fs::create_dir_all(&trash_root).unwrap();
+        fs::write(outside.path().join("note.txt"), b"note").unwrap();
+        symlink(outside.path(), trash_root.join("link")).unwrap();
+        let item = TrashItemDto {
+            original_path: root.join("note.txt").to_string_lossy().to_string(),
+            trashed_path: trash_root
+                .join("link/note.txt")
+                .to_string_lossy()
+                .to_string(),
+            is_dir: false,
+        };
+
+        let err = restore_trash_batch_impl(root, vec![item]).unwrap_err();
+
+        assert!(
+            err.contains("resolves outside workspace") || err.contains("outside workspace"),
+            "{err}"
+        );
     }
 }

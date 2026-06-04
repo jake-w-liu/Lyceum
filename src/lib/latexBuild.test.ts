@@ -166,6 +166,36 @@ describe("runLatexBuild", () => {
     );
   });
 
+  it("uses the backend-reported PDF path as the success source of truth", async () => {
+    invokeMock.mockResolvedValue(
+      plan({
+        pdfPath: "/w/build-output/main.pdf",
+      }),
+    );
+    useWorkspaceStore.getState().openWorkspace("/w");
+    useEditorStore.getState().openDoc({
+      path: "/w/main.tex",
+      content: "\\documentclass{article}",
+      language: "latex",
+    });
+
+    await runLatexBuild({ openOnSuccess: true });
+
+    const exitKey = Array.from(handlers.keys()).find((key) =>
+      key.startsWith("build:exit:"),
+    );
+    expect(exitKey).toBeDefined();
+
+    handlers.get(exitKey!)!({ payload: 0 });
+
+    expect(useOutputStore.getState().lines).toContain(
+      "[latex] wrote /w/build-output/main.pdf",
+    );
+    expect(useWorkspaceStore.getState().pendingOpenPath).toBe(
+      "/w/build-output/main.pdf",
+    );
+  });
+
   it("surfaces Rust builder preflight errors", async () => {
     invokeMock.mockRejectedValue(new Error("No LaTeX compiler was found"));
     useWorkspaceStore.getState().openWorkspace("/w");

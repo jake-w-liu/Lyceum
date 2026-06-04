@@ -56,6 +56,7 @@ export interface EditorActions {
   setActive: (path: string) => void;
   updateContent: (path: string, content: string) => void;
   markSaved: (path: string) => void;
+  moveDocPaths: (moves: Array<{ from: string; to: string }>) => void;
   setSelection: (text: string) => void;
 }
 
@@ -118,6 +119,28 @@ export const useEditorStore = create<EditorState>()((set) => ({
           : doc,
       ),
     })),
+
+  moveDocPaths: (moves) =>
+    set((s) => {
+      if (moves.length === 0) return {};
+      const movedPath = (path: string): string => {
+        for (const move of moves) {
+          if (path === move.from) return move.to;
+          const sep = move.from.includes("\\") ? "\\" : "/";
+          const prefix = move.from.endsWith(sep) ? move.from : `${move.from}${sep}`;
+          if (path.startsWith(prefix)) {
+            return `${move.to}${path.slice(move.from.length)}`;
+          }
+        }
+        return path;
+      };
+      const docs = s.docs.map((doc) => {
+        const path = movedPath(doc.path);
+        return path === doc.path ? doc : { ...doc, path, name: baseName(path) };
+      });
+      const activePath = s.activePath ? movedPath(s.activePath) : s.activePath;
+      return { docs, activePath };
+    }),
 
   setSelection: (text) => set({ selection: text }),
 }));

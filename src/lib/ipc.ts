@@ -32,6 +32,12 @@ export interface TrashBatch {
   items: TrashItem[];
 }
 
+export interface MovedPath {
+  from: string;
+  to: string;
+  isDir: boolean;
+}
+
 export interface LatexToolInfo {
   tool: string;
   path: string;
@@ -105,6 +111,15 @@ export async function createDirectory(path: string): Promise<void> {
 /** Rename/move a path (errors if the destination exists). */
 export async function renamePath(from: string, to: string): Promise<void> {
   await invoke("rename_path", { from, to });
+}
+
+/** Move files/directories into an existing workspace directory. */
+export async function movePaths(
+  root: string,
+  paths: string[],
+  destinationDir: string,
+): Promise<MovedPath[]> {
+  return invoke<MovedPath[]>("move_paths", { root, paths, destinationDir });
 }
 
 /** Delete a file or directory tree. */

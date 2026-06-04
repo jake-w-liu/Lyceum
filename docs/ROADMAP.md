@@ -110,7 +110,10 @@ planned but not yet started. This roadmap is the agreed plan of record.
 **Done when:**
 - Choosing a folder shows its tree in the sidebar.
 - Expanding a directory lazily lists its children; selecting a file emits an open intent.
-- Cmd/Ctrl-click toggles selected rows; Shift-click selects visible ranges; Explorer deletes move files to a workspace-local trash that supports undo/redo.
+- Cmd/Ctrl-click toggles selected rows; Shift-click selects visible ranges;
+  toolbar create targets the selected folder or selected file's parent;
+  drag-and-drop moves selected files/folders into another folder; Explorer
+  deletes move files to a workspace-local trash that supports undo/redo.
 - No background indexing occurs (directories read on demand only).
 
 **Tests that must pass:**

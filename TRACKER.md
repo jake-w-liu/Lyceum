@@ -103,6 +103,7 @@ Primary progress tracker for the lightweight, VS Code-inspired research IDE buil
 - [x] File explorer tree component in the sidebar (expand/collapse, lazy children) — `Explorer.tsx`
 - [x] Open-file action wired from explorer (emits an open *intent* via `workspaceStore.requestOpenFile`; the editor consumes it in M3)
 - [x] Zustand workspace store (root path, open folder state) — `workspaceStore.ts`
+- [x] Context-aware Explorer create/move: toolbar create targets the selected folder/file parent, drag-and-drop moves selected files/folders into another folder, and open tabs follow rename/move path changes
 - [x] **Tests**
   - [x] Rust: directory-read command returns expected entries for a temp tree (4 `fs_ops` tests)
   - [x] Frontend: explorer renders a mocked tree and expands/collapses nodes

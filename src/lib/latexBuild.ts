@@ -74,7 +74,7 @@ export async function runLatexBuild(
   }
 
   const id = `build-${(buildSeq += 1)}`;
-  const expectedPdfPath = pdfPathForTexPath(targetPath);
+  let pdfPathForSuccess = pdfPathForTexPath(targetPath);
   let commandForMessages = configuredCommand;
   out.setRunning(true);
   out.setRunId(id);
@@ -104,10 +104,10 @@ export async function runLatexBuild(
     offExit();
     if (event.payload === 0) {
       useTreeStore.getState().refresh();
-      store.append(`[latex] wrote ${expectedPdfPath}`);
+      store.append(`[latex] wrote ${pdfPathForSuccess}`);
       if (openOnSuccess) {
-        useEditorStore.getState().closeDoc(expectedPdfPath);
-        useWorkspaceStore.getState().requestOpenFile(expectedPdfPath);
+        useEditorStore.getState().closeDoc(pdfPathForSuccess);
+        useWorkspaceStore.getState().requestOpenFile(pdfPathForSuccess);
         useLayoutStore.getState().setPdfPanelVisible(false);
       }
     }
@@ -120,6 +120,9 @@ export async function runLatexBuild(
       configuredCommand,
     });
     commandForMessages = plan.command;
+    if (plan.pdfPath.trim()) {
+      pdfPathForSuccess = plan.pdfPath;
+    }
     if (plan.removedStalePdf) {
       useTreeStore.getState().refresh();
     }

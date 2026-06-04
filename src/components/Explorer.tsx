@@ -2,10 +2,11 @@
 // children cache) so it supports refresh / collapse-all / reveal, plus a toolbar
 // and per-row actions for create / rename / delete. Directories load lazily.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import {
   createDirectory,
   createFile,
+  movePaths,
   movePathsToTrash,
   readDirectory,
   redoTrashBatch,
@@ -38,12 +39,24 @@ function isSameOrDescendant(path: string, parent: string): boolean {
   return path === parent || path.startsWith(parent.endsWith(sep) ? parent : `${parent}${sep}`);
 }
 
+function isDirectChild(path: string, parent: string): boolean {
+  return parentDir(path) === parent;
+}
+
 function isEditableEventTarget(target: EventTarget | null): boolean {
   return (
     target instanceof HTMLInputElement ||
     target instanceof HTMLTextAreaElement ||
     (target instanceof HTMLElement && target.isContentEditable)
   );
+}
+
+function isSafeEntryName(name: string): boolean {
+  return !!name && name !== "." && name !== ".." && !/[\\/]/.test(name);
+}
+
+function unsafeEntryNameMessage(name: string): string {
+  return `Invalid name "${name}". Enter a single file or folder name, not a path.`;
 }
 
 function loadInto(path: string) {
@@ -55,6 +68,11 @@ function loadInto(path: string) {
 interface VisibleEntry {
   entry: DirEntry;
   depth: number;
+}
+
+interface CreatingState {
+  kind: "file" | "folder";
+  parentPath: string;
 }
 
 function flattenVisibleEntries(
@@ -81,9 +99,17 @@ interface NodeProps {
   depth: number;
   onOpenFile: (path: string) => void;
   onDeleteEntries: (entries: DirEntry[]) => void;
+  onMoveEntries: (entries: DirEntry[], destinationDir: string) => void;
+  creating: CreatingState | null;
+  createInputRef: RefObject<HTMLInputElement | null>;
+  onCommitCreate: (name: string) => void;
   selectedPaths: string[];
   visiblePaths: string[];
   selectedEntries: DirEntry[];
+  draggingEntries: DirEntry[];
+  setDraggingEntries: (entries: DirEntry[]) => void;
+  dropTargetPath: string | null;
+  setDropTargetPath: (path: string | null) => void;
 }
 
 function TreeNode({
@@ -91,9 +117,17 @@ function TreeNode({
   depth,
   onOpenFile,
   onDeleteEntries,
+  onMoveEntries,
+  creating,
+  createInputRef,
+  onCommitCreate,
   selectedPaths,
   visiblePaths,
   selectedEntries,
+  draggingEntries,
+  setDraggingEntries,
+  dropTargetPath,
+  setDropTargetPath,
 }: NodeProps) {
   const expanded = useTreeStore((s) => Boolean(s.expanded[entry.path]));
   const children = useTreeStore((s) => s.children[entry.path]);
@@ -125,6 +159,10 @@ function TreeNode({
     return selected && selectedEntries.length > 1 ? selectedEntries : [entry];
   }
 
+  function entriesForDrag(): DirEntry[] {
+    return selected && selectedEntries.length > 1 ? selectedEntries : [entry];
+  }
+
   function onDelete(e: React.MouseEvent) {
     e.stopPropagation();
     onDeleteEntries(entriesForDelete());
@@ -134,19 +172,66 @@ function TreeNode({
     setRenaming(false);
     const trimmed = name.trim();
     if (!trimmed || trimmed === entry.name) return;
+    if (!isSafeEntryName(trimmed)) {
+      alert(unsafeEntryNameMessage(trimmed));
+      return;
+    }
     try {
-      await renamePath(entry.path, joinPath(parentDir(entry.path), trimmed));
+      const to = joinPath(parentDir(entry.path), trimmed);
+      await renamePath(entry.path, to);
+      useEditorStore.getState().moveDocPaths([{ from: entry.path, to }]);
       useTreeStore.getState().refresh();
     } catch (err) {
       console.error("rename failed", err);
     }
   }
 
+  function canDropHere(): boolean {
+    return entry.isDir && canMoveEntriesTo(draggingEntries, entry.path);
+  }
+
   return (
     <li className="tree-node" role="none">
       <div
-        className={"tree-row" + (selected ? " selected" : "")}
+        className={
+          "tree-row" +
+          (selected ? " selected" : "") +
+          (dropTargetPath === entry.path ? " drop-target" : "")
+        }
+        draggable={!renaming}
         style={{ paddingLeft: 8 + depth * 12 }}
+        onDragStart={(e) => {
+          const entries = entriesForDrag();
+          if (!selected) useTreeStore.getState().selectSingle(entry.path);
+          setDraggingEntries(entries);
+          e.dataTransfer.effectAllowed = "move";
+          e.dataTransfer.setData(
+            "application/x-lyceum-paths",
+            JSON.stringify(entries.map((dragEntry) => dragEntry.path)),
+          );
+        }}
+        onDragEnd={() => {
+          setDraggingEntries([]);
+          setDropTargetPath(null);
+        }}
+        onDragOver={(e) => {
+          if (!canDropHere()) return;
+          e.preventDefault();
+          e.stopPropagation();
+          e.dataTransfer.dropEffect = "move";
+          setDropTargetPath(entry.path);
+        }}
+        onDragLeave={(e) => {
+          if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+          if (dropTargetPath === entry.path) setDropTargetPath(null);
+        }}
+        onDrop={(e) => {
+          if (!canDropHere()) return;
+          e.preventDefault();
+          e.stopPropagation();
+          setDropTargetPath(null);
+          onMoveEntries(draggingEntries, entry.path);
+        }}
       >
         <button
           type="button"
@@ -193,22 +278,95 @@ function TreeNode({
           </span>
         )}
       </div>
-      {entry.isDir && expanded && children && (
+      {entry.isDir &&
+        expanded &&
+        (children || creating?.parentPath === entry.path) && (
         <ul className="tree-children" role="group">
-          {children.map((child) => (
+          {creating?.parentPath === entry.path && (
+            <CreateInput
+              creating={creating}
+              depth={depth + 1}
+              inputRef={createInputRef}
+              onCommit={onCommitCreate}
+            />
+          )}
+          {children?.map((child) => (
             <TreeNode
               key={child.path}
               entry={child}
               depth={depth + 1}
               onOpenFile={onOpenFile}
               onDeleteEntries={onDeleteEntries}
+              onMoveEntries={onMoveEntries}
+              creating={creating}
+              createInputRef={createInputRef}
+              onCommitCreate={onCommitCreate}
               selectedPaths={selectedPaths}
               visiblePaths={visiblePaths}
               selectedEntries={selectedEntries}
+              draggingEntries={draggingEntries}
+              setDraggingEntries={setDraggingEntries}
+              dropTargetPath={dropTargetPath}
+              setDropTargetPath={setDropTargetPath}
             />
           ))}
         </ul>
       )}
+    </li>
+  );
+}
+
+function canMoveEntriesTo(entries: DirEntry[], destinationDir: string): boolean {
+  const movable = entries.filter((entry) => !isDirectChild(entry.path, destinationDir));
+  return (
+    movable.length > 0 &&
+    movable.every(
+      (entry) =>
+        entry.path !== destinationDir &&
+        !(entry.isDir && isSameOrDescendant(destinationDir, entry.path)),
+    )
+  );
+}
+
+function topLevelEntries(entries: DirEntry[]): DirEntry[] {
+  const sorted = [...entries].sort(
+    (a, b) => a.path.split(/[\\/]/).length - b.path.split(/[\\/]/).length,
+  );
+  const out: DirEntry[] = [];
+  for (const entry of sorted) {
+    if (!out.some((parent) => isSameOrDescendant(entry.path, parent.path))) {
+      out.push(entry);
+    }
+  }
+  return out;
+}
+
+function CreateInput({
+  creating,
+  depth,
+  inputRef,
+  onCommit,
+}: {
+  creating: CreatingState;
+  depth: number;
+  inputRef: RefObject<HTMLInputElement | null>;
+  onCommit: (value: string) => void;
+}) {
+  return (
+    <li className="tree-node" role="none">
+      <div className="tree-row" style={{ paddingLeft: 20 + depth * 12 }}>
+        <input
+          ref={inputRef}
+          className="tree-rename-input"
+          aria-label={creating.kind === "folder" ? "New folder name" : "New file name"}
+          placeholder={creating.kind === "folder" ? "folder name" : "file name"}
+          onBlur={(e) => onCommit(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") onCommit(e.currentTarget.value);
+            else if (e.key === "Escape") onCommit("");
+          }}
+        />
+      </div>
     </li>
   );
 }
@@ -221,6 +379,12 @@ function RenameInput({
   onCommit: (value: string) => void;
 }) {
   const [value, setValue] = useState(initial);
+  const committedRef = useRef(false);
+  function commit(next: string) {
+    if (committedRef.current) return;
+    committedRef.current = true;
+    onCommit(next);
+  }
   return (
     <input
       className="tree-rename-input"
@@ -229,10 +393,10 @@ function RenameInput({
       value={value}
       onClick={(e) => e.stopPropagation()}
       onChange={(e) => setValue(e.target.value)}
-      onBlur={() => onCommit(value)}
+      onBlur={() => commit(value)}
       onKeyDown={(e) => {
-        if (e.key === "Enter") onCommit(value);
-        else if (e.key === "Escape") onCommit(initial);
+        if (e.key === "Enter") commit(value);
+        else if (e.key === "Escape") commit(initial);
       }}
     />
   );
@@ -251,8 +415,11 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
   const selectedPaths = useTreeStore((s) => s.selectedPaths);
   const deleteUndoStack = useTreeStore((s) => s.deleteUndoStack);
   const deleteRedoStack = useTreeStore((s) => s.deleteRedoStack);
-  const [creating, setCreating] = useState<null | "file" | "folder">(null);
+  const [creating, setCreating] = useState<CreatingState | null>(null);
+  const [draggingEntries, setDraggingEntries] = useState<DirEntry[]>([]);
+  const [dropTargetPath, setDropTargetPath] = useState<string | null>(null);
   const createInputRef = useRef<HTMLInputElement>(null);
+  const createCommittedRef = useRef(false);
   const visibleEntries = useMemo(
     () => flattenVisibleEntries(rootChildren, allChildren, expanded),
     [rootChildren, allChildren, expanded],
@@ -273,14 +440,39 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     if (rootChildren === undefined) loadInto(rootPath);
   }, [rootPath, rootChildren, refreshNonce]);
 
+  function createParentPath(): string {
+    if (selectedEntries.length !== 1) return rootPath;
+    const selected = selectedEntries[0];
+    return selected.isDir ? selected.path : parentDir(selected.path);
+  }
+
+  function startCreate(kind: "file" | "folder") {
+    const parentPath = createParentPath();
+    createCommittedRef.current = false;
+    if (parentPath !== rootPath) {
+      useTreeStore.getState().setExpanded(parentPath, true);
+      if (useTreeStore.getState().children[parentPath] === undefined) {
+        loadInto(parentPath);
+      }
+    }
+    setCreating({ kind, parentPath });
+    queueMicrotask(() => createInputRef.current?.focus());
+  }
+
   async function commitCreate(name: string) {
-    const kind = creating;
+    const pending = creating;
+    if (createCommittedRef.current) return;
+    createCommittedRef.current = true;
     setCreating(null);
     const trimmed = name.trim();
-    if (!kind || !trimmed) return;
-    const target = joinPath(rootPath, trimmed);
+    if (!pending || !trimmed) return;
+    if (!isSafeEntryName(trimmed)) {
+      alert(unsafeEntryNameMessage(trimmed));
+      return;
+    }
+    const target = joinPath(pending.parentPath, trimmed);
     try {
-      if (kind === "folder") await createDirectory(target);
+      if (pending.kind === "folder") await createDirectory(target);
       else await createFile(target);
       useTreeStore.getState().refresh();
     } catch (err) {
@@ -356,6 +548,35 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     }
   }
 
+  async function moveEntries(entries: DirEntry[], destinationDir: string) {
+    const movable = topLevelEntries(
+      entries.filter((entry) => !isDirectChild(entry.path, destinationDir)),
+    );
+    if (!canMoveEntriesTo(movable, destinationDir)) return;
+    try {
+      const moved = await movePaths(
+        rootPath,
+        movable.map((entry) => entry.path),
+        destinationDir,
+      );
+      if (moved.length > 0) {
+        const localMoves = movable.map((entry) => ({
+          from: entry.path,
+          to: joinPath(destinationDir, entry.name),
+        }));
+        useEditorStore.getState().moveDocPaths(localMoves);
+        useTreeStore.getState().setSelection(localMoves.map((item) => item.to));
+      }
+      if (destinationDir !== rootPath) {
+        useTreeStore.getState().setExpanded(destinationDir, true);
+      }
+      useTreeStore.getState().refresh();
+    } catch (err) {
+      console.error("move failed", err);
+      alert(`Move failed: ${String(err)}`);
+    }
+  }
+
   function onExplorerKeyDown(e: React.KeyboardEvent) {
     if (isEditableEventTarget(e.target)) return;
     const key = e.key.toLowerCase();
@@ -385,10 +606,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
           className="icon-button"
           aria-label="New File"
           title="New File"
-          onClick={() => {
-            setCreating("file");
-            queueMicrotask(() => createInputRef.current?.focus());
-          }}
+          onClick={() => startCreate("file")}
         >
           +
         </button>
@@ -397,10 +615,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
           className="icon-button"
           aria-label="New Folder"
           title="New Folder"
-          onClick={() => {
-            setCreating("folder");
-            queueMicrotask(() => createInputRef.current?.focus());
-          }}
+          onClick={() => startCreate("folder")}
         >
           ▸+
         </button>
@@ -453,23 +668,34 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
           <Icon name="redo" size={12} />
         </button>
       </div>
-      <ul className="tree" role="tree" aria-label="Files">
-        {creating && (
-          <li className="tree-node" role="none">
-            <div className="tree-row" style={{ paddingLeft: 20 }}>
-              <input
-                ref={createInputRef}
-                className="tree-rename-input"
-                aria-label={creating === "folder" ? "New folder name" : "New file name"}
-                placeholder={creating === "folder" ? "folder name" : "file name"}
-                onBlur={(e) => commitCreate(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") commitCreate(e.currentTarget.value);
-                  else if (e.key === "Escape") setCreating(null);
-                }}
-              />
-            </div>
-          </li>
+      <ul
+        className={"tree" + (dropTargetPath === rootPath ? " drop-target" : "")}
+        role="tree"
+        aria-label="Files"
+        onDragOver={(e) => {
+          if (!canMoveEntriesTo(draggingEntries, rootPath)) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "move";
+          setDropTargetPath(rootPath);
+        }}
+        onDragLeave={(e) => {
+          if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+          if (dropTargetPath === rootPath) setDropTargetPath(null);
+        }}
+        onDrop={(e) => {
+          if (!canMoveEntriesTo(draggingEntries, rootPath)) return;
+          e.preventDefault();
+          setDropTargetPath(null);
+          void moveEntries(draggingEntries, rootPath);
+        }}
+      >
+        {creating?.parentPath === rootPath && (
+          <CreateInput
+            creating={creating}
+            depth={0}
+            inputRef={createInputRef}
+            onCommit={commitCreate}
+          />
         )}
         {rootChildren === undefined && <li className="tree-loading">Loading…</li>}
         {rootChildren !== undefined && rootChildren.length === 0 && !creating && (
@@ -482,9 +708,17 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
             depth={0}
             onOpenFile={onOpenFile}
             onDeleteEntries={deleteEntries}
+            onMoveEntries={moveEntries}
+            creating={creating}
+            createInputRef={createInputRef}
+            onCommitCreate={commitCreate}
             selectedPaths={selectedPaths}
             visiblePaths={visiblePaths}
             selectedEntries={selectedEntries}
+            draggingEntries={draggingEntries}
+            setDraggingEntries={setDraggingEntries}
+            dropTargetPath={dropTargetPath}
+            setDropTargetPath={setDropTargetPath}
           />
         ))}
       </ul>

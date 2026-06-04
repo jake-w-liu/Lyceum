@@ -39,7 +39,9 @@ oversight.
 
 ### Additional deferrals
 
-- **Drag-and-drop in the file explorer** — no drag-to-move/reorder of files or folders in the Sidebar explorer for v1.
+- **File-explorer drag reorder** — drag-to-move between folders is implemented,
+  but arbitrary custom sort/reorder within a directory is still out of scope
+  because the Explorer mirrors filesystem ordering.
 - **Rename-symbol when the language server lacks it** — rename is offered only when the active LSP server advertises rename support; no client-side fallback rename.
 - **PDF text search** — if text extraction/search via PDF.js proves infeasible within the Tauri worker/CSP setup, PDF text search is deferred (rendering/preview still ships).
 - **Plot viewer** — no dedicated panel for rendering Julia/plotting output (e.g. inline figures) in v1.

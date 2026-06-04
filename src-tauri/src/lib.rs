@@ -49,6 +49,7 @@ pub fn run() {
             fs_ops::create_file,
             fs_ops::create_directory,
             fs_ops::rename_path,
+            fs_ops::move_paths,
             fs_ops::delete_path,
             fs_ops::delete_file_if_exists,
             fs_ops::move_paths_to_trash,

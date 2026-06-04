@@ -246,10 +246,12 @@ fn pdf_path_for_tex(path: &Path) -> Result<PathBuf, String> {
 }
 
 fn remove_stale_pdf(path: &Path) -> Result<bool, String> {
-    if !path.exists() {
-        return Ok(false);
-    }
-    if path.is_dir() {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("{}: {error}", path.display())),
+    };
+    if metadata.file_type().is_dir() {
         return Err(format!(
             "expected a file, found directory: {}",
             path.display()
@@ -298,18 +300,77 @@ fn strip_shell_quotes(value: &str) -> &str {
 }
 
 fn retarget_tex_command(command: &str, tex_name: &str) -> String {
-    let mut tokens: Vec<String> = command
-        .split_whitespace()
-        .map(|token| token.to_string())
-        .collect();
-    for token in tokens.iter_mut().rev() {
+    let replacement = quote_shell_arg(tex_name);
+    for span in shell_token_spans(command).into_iter().rev() {
+        let token = &command[span.start..span.end];
         if strip_shell_quotes(token).to_lowercase().ends_with(".tex") {
-            *token = quote_shell_arg(tex_name);
-            return tokens.join(" ");
+            let mut out = String::with_capacity(command.len() + replacement.len());
+            out.push_str(&command[..span.start]);
+            out.push_str(&replacement);
+            out.push_str(&command[span.end..]);
+            return out;
         }
     }
-    tokens.push(quote_shell_arg(tex_name));
-    tokens.join(" ")
+    if command.trim().is_empty() {
+        replacement
+    } else {
+        format!("{} {}", command.trim_end(), replacement)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TokenSpan {
+    start: usize,
+    end: usize,
+}
+
+fn shell_token_spans(command: &str) -> Vec<TokenSpan> {
+    let mut spans = Vec::new();
+    let mut start: Option<usize> = None;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+
+    for (idx, ch) in command.char_indices() {
+        if start.is_none() {
+            if ch.is_whitespace() {
+                continue;
+            }
+            start = Some(idx);
+        }
+
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if !cfg!(windows) && ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(ch, '"' | '\'') {
+            quote = Some(ch);
+            continue;
+        }
+        if ch.is_whitespace() {
+            if let Some(start) = start.take() {
+                spans.push(TokenSpan { start, end: idx });
+            }
+        }
+    }
+
+    if let Some(start) = start {
+        spans.push(TokenSpan {
+            start,
+            end: command.len(),
+        });
+    }
+
+    spans
 }
 
 fn shell_command(command: &str) -> (String, Vec<String>) {
@@ -345,6 +406,13 @@ fn quote_shell_executable(value: &str) -> String {
 }
 
 fn quote_shell_arg(value: &str) -> String {
+    quote_shell_arg_for(value, cfg!(windows))
+}
+
+fn quote_shell_arg_for(value: &str, windows: bool) -> String {
+    if windows {
+        return format!("\"{}\"", value.replace('"', "\\\""));
+    }
     let mut quoted = String::with_capacity(value.len() + 2);
     quoted.push('"');
     for ch in value.chars() {
@@ -450,6 +518,48 @@ mod tests {
     }
 
     #[test]
+    fn custom_build_retargets_quoted_tex_arguments_with_spaces() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tex = tmp.path().join("new paper.tex");
+        std::fs::write(&tex, "\\documentclass{article}").unwrap();
+
+        let plan = plan_latex_build_impl(
+            &tex,
+            r#""/Applications/TeX Tools/latexmk" -pdf "old main.tex" -silent"#,
+            OsStr::new(""),
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.command,
+            r#""/Applications/TeX Tools/latexmk" -pdf "new paper.tex" -silent"#
+        );
+    }
+
+    #[test]
+    fn custom_build_appends_current_file_when_no_tex_argument_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tex = tmp.path().join("paper.tex");
+        std::fs::write(&tex, "\\documentclass{article}").unwrap();
+
+        let plan = plan_latex_build_impl(&tex, "tectonic --keep-logs", OsStr::new("")).unwrap();
+
+        assert_eq!(plan.command, r#"tectonic --keep-logs "paper.tex""#);
+    }
+
+    #[test]
+    fn shell_argument_quoting_is_platform_aware() {
+        assert_eq!(
+            quote_shell_arg_for(r"C:\tmp\a$b.tex", true),
+            r#""C:\tmp\a$b.tex""#
+        );
+        assert_eq!(
+            quote_shell_arg_for(r#"a "$`\ file.tex"#, false),
+            r#""a \"\$\`\\ file.tex""#
+        );
+    }
+
+    #[test]
     fn stale_pdf_removal_is_file_only() {
         let tmp = tempfile::tempdir().unwrap();
         let pdf = tmp.path().join("paper.pdf");
@@ -459,5 +569,28 @@ mod tests {
         assert!(!pdf.exists());
 
         assert!(!remove_stale_pdf(&pdf).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_pdf_removal_unlinks_symlinks_without_touching_targets() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("target.pdf");
+        let linked_pdf = tmp.path().join("paper.pdf");
+        std::fs::write(&target, b"target").unwrap();
+        symlink(&target, &linked_pdf).unwrap();
+
+        assert!(remove_stale_pdf(&linked_pdf).unwrap());
+        assert!(std::fs::symlink_metadata(&linked_pdf).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"target");
+
+        let broken_pdf = tmp.path().join("broken.pdf");
+        symlink(tmp.path().join("missing.pdf"), &broken_pdf).unwrap();
+        assert!(!broken_pdf.exists());
+
+        assert!(remove_stale_pdf(&broken_pdf).unwrap());
+        assert!(std::fs::symlink_metadata(&broken_pdf).is_err());
     }
 }

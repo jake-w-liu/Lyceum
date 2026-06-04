@@ -151,10 +151,13 @@ See [docs/KEYBINDINGS.md](docs/KEYBINDINGS.md) for the full reference.
 
 - **Explorer selection and delete undo:** click a file or folder normally to
   select and open/toggle it. Cmd/Ctrl-click toggles individual rows, and
-  Shift-click selects a contiguous visible range. **Delete Selected** moves
-  items into a workspace-local `.lyceum-trash/` folder hidden from the Explorer;
-  with the Explorer focused, Cmd/Ctrl+Z restores the last delete and
-  Cmd/Ctrl+Shift+Z or Ctrl+Y redoes it.
+  Shift-click selects a contiguous visible range. **New File** / **New Folder**
+  create inside the selected folder, beside a selected file, or at the workspace
+  root when there is no single selected target. Drag selected files/folders onto
+  another folder to move them. **Delete Selected** moves items into a
+  workspace-local `.lyceum-trash/` folder hidden from the Explorer; with the
+  Explorer focused, Cmd/Ctrl+Z restores the last delete and Cmd/Ctrl+Shift+Z or
+  Ctrl+Y redoes it.
 - **Run Julia:** open a `.jl` file and click the tab-bar **Run** button, or
   press Cmd/Ctrl+Enter. If text is selected, only the selection runs; otherwise
   the whole file runs. Output appears in the bottom Output panel. The

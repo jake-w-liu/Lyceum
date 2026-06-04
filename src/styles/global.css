@@ -237,6 +237,13 @@ kbd {
   background: var(--selection);
 }
 
+.tree-row.drop-target,
+.tree.drop-target {
+  background: color-mix(in srgb, var(--focus) 22%, transparent);
+  outline: 1px solid var(--focus);
+  outline-offset: -1px;
+}
+
 .tree-row-main {
   flex: 1 1 auto;
   display: flex;

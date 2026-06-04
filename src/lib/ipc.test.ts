@@ -12,6 +12,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 import {
   deleteFileIfExists,
   getAppInfo,
+  movePaths,
   pickFolder,
   readFileBytes,
   resolveLatexTools,
@@ -71,6 +72,23 @@ describe("deleteFileIfExists", () => {
 
     expect(invokeMock).toHaveBeenCalledWith("delete_file_if_exists", {
       path: "/w/main.pdf",
+    });
+  });
+});
+
+describe("movePaths", () => {
+  it("invokes the scoped Explorer move command", async () => {
+    const moved = [{ from: "/w/a.txt", to: "/w/src/a.txt", isDir: false }];
+    invokeMock.mockResolvedValue(moved);
+
+    await expect(movePaths("/w", ["/w/a.txt"], "/w/src")).resolves.toEqual(
+      moved,
+    );
+
+    expect(invokeMock).toHaveBeenCalledWith("move_paths", {
+      root: "/w",
+      paths: ["/w/a.txt"],
+      destinationDir: "/w/src",
     });
   });
 });

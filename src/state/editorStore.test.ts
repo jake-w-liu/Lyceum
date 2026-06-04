@@ -114,4 +114,32 @@ describe("editorStore", () => {
     useEditorStore.setState({ activePath: null });
     expect(getActiveDoc(useEditorStore.getState())).toBeNull();
   });
+
+  it("moveDocPaths rewrites moved files and descendants while preserving content", () => {
+    const store = useEditorStore.getState();
+    store.openDoc({
+      path: "/w/src/main.ts",
+      content: "main",
+      language: "typescript",
+    });
+    store.openDoc({
+      path: "/w/README.md",
+      content: "readme",
+      language: "markdown",
+    });
+
+    store.moveDocPaths([
+      { from: "/w/src", to: "/w/archive/src" },
+      { from: "/w/README.md", to: "/w/docs/README.md" },
+    ]);
+
+    const state = useEditorStore.getState();
+    expect(state.docs.map((doc) => doc.path)).toEqual([
+      "/w/archive/src/main.ts",
+      "/w/docs/README.md",
+    ]);
+    expect(state.docs.map((doc) => doc.name)).toEqual(["main.ts", "README.md"]);
+    expect(state.docs[0].content).toBe("main");
+    expect(state.activePath).toBe("/w/docs/README.md");
+  });
 });
