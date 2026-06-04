@@ -59,6 +59,16 @@ describe("matchKeybinding mod resolution", () => {
     const e = new KeyboardEvent("keydown", { key: "b", ctrlKey: true });
     expect(matchKeybinding(e, {}, true)).toBeNull();
   });
+
+  it("mac ctrl+backquote => terminal.toggle", () => {
+    const e = new KeyboardEvent("keydown", { code: "Backquote", ctrlKey: true });
+    expect(matchKeybinding(e, {}, true)).toBe("terminal.toggle");
+  });
+
+  it("mac meta+backquote => null", () => {
+    const e = new KeyboardEvent("keydown", { code: "Backquote", metaKey: true });
+    expect(matchKeybinding(e, {}, true)).toBeNull();
+  });
 });
 
 describe("evaluateWhen", () => {

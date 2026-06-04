@@ -132,8 +132,8 @@ Primary progress tracker for the lightweight, VS Code-inspired research IDE buil
   - [x] Cmd/Ctrl+P quick open
   - [x] Cmd/Ctrl+Shift+P command palette
   - [x] Cmd/Ctrl+B toggle sidebar
-  - [x] Cmd/Ctrl+` toggle terminal panel
-  - [x] Cmd/Ctrl+Shift+` new terminal
+  - [x] Ctrl+` toggle terminal panel (including macOS)
+  - [x] Ctrl+Shift+` new terminal (including macOS)
   - [x] Cmd/Ctrl+J toggle bottom panel
   - [x] Cmd/Ctrl+S save
   - [x] Cmd/Ctrl+W close tab

@@ -162,7 +162,10 @@ pub fn run_julia(
     let args = julia_args(file.as_deref(), code.as_deref());
 
     let mut command = Command::new(&program);
-    command.args(&args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     if let Some(dir) = cwd {
         if !dir.is_empty() {
             command.current_dir(dir);
@@ -288,7 +291,10 @@ mod tests {
             julia_args(Some("/w/a.jl"), Some("println(1)")),
             vec!["-e".to_string(), "println(1)".to_string()]
         );
-        assert_eq!(julia_args(Some("/w/a.jl"), None), vec!["/w/a.jl".to_string()]);
+        assert_eq!(
+            julia_args(Some("/w/a.jl"), None),
+            vec!["/w/a.jl".to_string()]
+        );
         assert!(julia_args(None, None).is_empty());
     }
 
@@ -327,6 +333,9 @@ mod tests {
         kill_pid(pid);
         // Should be reaped promptly (signalled) rather than after 30s.
         let status = child.wait().expect("wait child");
-        assert!(!status.success(), "killed child should not exit successfully");
+        assert!(
+            !status.success(),
+            "killed child should not exit successfully"
+        );
     }
 }

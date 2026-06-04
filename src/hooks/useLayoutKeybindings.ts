@@ -28,13 +28,15 @@ export function isMac(): boolean {
  * Pure (no DOM access beyond the passed event) so it is trivially testable.
  */
 export function matchLayoutCommand(e: KeyboardEvent): LayoutCommand | null {
-  const mod = isMac() ? e.metaKey : e.ctrlKey;
-  if (!mod || e.altKey) return null;
-
-  // Backquote (`) — terminal toggles. Use `code` so it's layout-independent.
-  if (e.code === "Backquote") {
+  // Terminal shortcuts intentionally use Ctrl+Backquote on every platform,
+  // including macOS. This is app-specific; other workbench shortcuts still use
+  // Cmd on macOS via the primary modifier.
+  if (e.code === "Backquote" && e.ctrlKey && !e.metaKey && !e.altKey) {
     return e.shiftKey ? "newTerminal" : "toggleTerminal";
   }
+
+  const mod = isMac() ? e.metaKey : e.ctrlKey;
+  if (!mod || e.altKey) return null;
 
   const key = e.key.toLowerCase();
   if (e.shiftKey) {

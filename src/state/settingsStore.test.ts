@@ -20,13 +20,20 @@ describe("mergeSettings", () => {
     const result = mergeSettings({
       fontSize: 100,
       tabSize: 0,
+      lineHeight: 20,
       theme: "bogus",
       junk: 1,
     });
     expect(result.fontSize).toBe(40);
     expect(result.tabSize).toBe(1);
+    expect(result.lineHeight).toBe(20);
     expect(result.theme).toBe("dark");
     expect("junk" in result).toBe(false);
+  });
+
+  it("normalizes line-height multipliers to Monaco pixel values", () => {
+    expect(mergeSettings({ fontSize: 16, lineHeight: 1.5 }).lineHeight).toBe(24);
+    expect(mergeSettings({ lineHeight: -1 }).lineHeight).toBe(0);
   });
 
   it("overrides only the provided valid keys", () => {

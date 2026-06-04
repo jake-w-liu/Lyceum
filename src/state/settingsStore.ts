@@ -58,6 +58,12 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+function normalizeLineHeight(value: number, fontSize: number): number {
+  if (value <= 0) return 0;
+  if (value < 8) return Math.round(fontSize * value);
+  return clamp(value, 8, 80);
+}
+
 // Validate `partial` against DEFAULT_SETTINGS, ignoring unknown keys/wrong types.
 export function mergeSettings(partial: unknown): Settings {
   const out: Settings = { ...DEFAULT_SETTINGS };
@@ -126,7 +132,7 @@ export function mergeSettings(partial: unknown): Settings {
 
   out.fontSize = clamp(out.fontSize, 8, 40);
   out.tabSize = clamp(out.tabSize, 1, 8);
-  out.lineHeight = clamp(out.lineHeight, 0, 4);
+  out.lineHeight = normalizeLineHeight(out.lineHeight, out.fontSize);
   out.version = DEFAULT_SETTINGS.version;
   return out;
 }

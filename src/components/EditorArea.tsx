@@ -34,7 +34,7 @@ function Welcome() {
             <kbd>{mod}</kbd> + <kbd>J</kbd> Toggle panel
           </li>
           <li>
-            <kbd>{mod}</kbd> + <kbd>`</kbd> Toggle terminal
+            <kbd>Ctrl</kbd> + <kbd>`</kbd> Toggle terminal
           </li>
         </ul>
       </div>

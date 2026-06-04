@@ -325,7 +325,7 @@ This satisfies `F12` (go to definition), `Shift+F12` (find references), and
   `term_resize(id, cols, rows)`.
 - **Multiple terminals:** each terminal has a unique id; the backend keeps a map
   `id -> PtyHandle` in `AppState`. Creating, switching, and closing terminals is
-  command-driven (`Cmd/Ctrl+\`` toggles the panel; `Cmd/Ctrl+Shift+\`` creates a
+  command-driven (`Ctrl+\`` toggles the panel; `Ctrl+Shift+\`` creates a
   new terminal; `Cmd/Ctrl+J` toggles the bottom panel).
 - **Working directory** follows the `terminalCwdBehavior` setting
   (`workspaceRoot` or `currentFileDir`).
@@ -450,7 +450,7 @@ through commands (`settings.rs`). Locations resolve via the **Tauri path API**
 
 ### 13.4 Toggle the terminal
 
-1. `Cmd/Ctrl+\`` runs `view.toggleTerminal`, flipping a flag in `layoutStore.ts`.
+1. `Ctrl+\`` runs `terminal.toggle`, flipping a flag in `layoutStore.ts`.
 2. On first show, `terminal.ts` lazily creates an xterm instance and calls
    `term_create`; thereafter it only re-attaches. Output continues flowing on the
    per-id event channel regardless of panel visibility.

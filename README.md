@@ -117,15 +117,16 @@ Lyceum/
 
 ## Default keybindings
 
-Use **Cmd** on macOS, **Ctrl** on Windows/Linux.
+Use **Cmd** on macOS and **Ctrl** on Windows/Linux, except rows that explicitly
+say **Ctrl**.
 
 | Shortcut | Action |
 | --- | --- |
 | Cmd/Ctrl+P | Quick open |
 | Cmd/Ctrl+Shift+P | Command palette |
 | Cmd/Ctrl+B | Toggle sidebar |
-| Cmd/Ctrl+` | Toggle terminal panel |
-| Cmd/Ctrl+Shift+` | New terminal |
+| Ctrl+` | Toggle terminal panel |
+| Ctrl+Shift+` | New terminal |
 | Cmd/Ctrl+J | Toggle bottom panel |
 | Cmd/Ctrl+S | Save |
 | Cmd/Ctrl+W | Close tab |
@@ -150,15 +151,3 @@ See [docs/KEYBINDINGS.md](docs/KEYBINDINGS.md) for the full reference.
 Persisted as JSON in the OS app-config dir: `theme`, `fontFamily`, `fontSize`, `lineHeight`, `ligatures`, `tabSize`, `wordWrap`, `shellPath`, `terminalCwdBehavior` (`workspaceRoot` | `currentFileDir`), `juliaPath`, `latexBuildCommand` (e.g. `latexmk -pdf main.tex`), `pdfPreviewMode` (`tab` | `sidePanel`), `autosave`, `restoreWorkspaceOnStartup`, `minimap`, `lineNumbers`.
 
 Themes: light, dark, high-contrast, and a VS Code-like default dark. See [docs/SETTINGS_SCHEMA.md](docs/SETTINGS_SCHEMA.md) for the full schema.
-
-## Project skills
-
-Development helper skills live in `.claude/skills/`:
-
-- **build** — build, compile, type-check, and run the app in dev or release mode, with fast iteration on the Rust backend and React frontend.
-- **debug** — reproduce, diagnose, and fix issues across the frontend and Rust backend.
-- **review** — review changes for correctness, test coverage, and adherence to the canonical tech decisions.
-
-## Scope
-
-Built with original code and permissive open-source dependencies only. **Non-goals for v1:** no VS Code extension compatibility, no debugger, no marketplace, no remote SSH, no notebooks, no full Git UI, no plugin system, and no exact VS Code API compatibility.

@@ -13,6 +13,9 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use tauri::{AppHandle, Emitter, State};
 
+const TERMINAL_ERASE_BYTE: u8 = b'\x08';
+const TERMINAL_DELETE_BYTE: u8 = b'\x7f';
+
 struct Session {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
@@ -44,6 +47,33 @@ pub fn resolve_shell(explicit: Option<String>, env_shell: Option<String>) -> Str
     }
 }
 
+fn terminal_command(shell: &str) -> CommandBuilder {
+    let mut cmd = if cfg!(unix) {
+        let mut c = CommandBuilder::new("/bin/sh");
+        c.args(["-lc", "stty erase '^H' 2>/dev/null; exec \"$LYCEUM_SHELL\""]);
+        c.env("LYCEUM_SHELL", shell);
+        c
+    } else {
+        CommandBuilder::new(shell)
+    };
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    cmd
+}
+
+fn normalize_terminal_input(data: &str) -> Vec<u8> {
+    data.as_bytes()
+        .iter()
+        .map(|&b| {
+            if b == TERMINAL_DELETE_BYTE {
+                TERMINAL_ERASE_BYTE
+            } else {
+                b
+            }
+        })
+        .collect()
+}
+
 /// Spawn a new PTY session running a shell, streaming its output to the frontend.
 #[tauri::command]
 pub fn terminal_create(
@@ -66,7 +96,7 @@ pub fn terminal_create(
         .map_err(|e| e.to_string())?;
 
     let shell = resolve_shell(shell, std::env::var("SHELL").ok());
-    let mut cmd = CommandBuilder::new(&shell);
+    let mut cmd = terminal_command(&shell);
     if let Some(dir) = cwd {
         if !dir.is_empty() {
             cmd.cwd(dir);
@@ -118,12 +148,16 @@ pub fn terminal_create(
 
 /// Send input bytes to a session's shell.
 #[tauri::command]
-pub fn terminal_write(state: State<TerminalManager>, id: String, data: String) -> Result<(), String> {
+pub fn terminal_write(
+    state: State<TerminalManager>,
+    id: String,
+    data: String,
+) -> Result<(), String> {
     let mut sessions = state.sessions.lock().unwrap();
     let session = sessions.get_mut(&id).ok_or("no such terminal")?;
     session
         .writer
-        .write_all(data.as_bytes())
+        .write_all(&normalize_terminal_input(&data))
         .map_err(|e| e.to_string())?;
     session.writer.flush().map_err(|e| e.to_string())?;
     Ok(())
@@ -174,12 +208,38 @@ mod tests {
 
     #[test]
     fn resolve_shell_falls_back_to_env_then_default() {
-        assert_eq!(
-            resolve_shell(None, Some("/bin/fish".into())),
-            "/bin/fish"
-        );
+        assert_eq!(resolve_shell(None, Some("/bin/fish".into())), "/bin/fish");
         assert_eq!(resolve_shell(Some(String::new()), None), "/bin/sh");
         assert_eq!(resolve_shell(None, None), "/bin/sh");
+    }
+
+    #[test]
+    fn normalizes_del_to_ctrl_h_for_backspace() {
+        assert_eq!(normalize_terminal_input("abc\x7fd"), b"abc\x08d");
+        assert_eq!("λ".as_bytes(), normalize_terminal_input("λ"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_command_wraps_shell_with_ctrl_h_erase() {
+        let cmd = terminal_command("/bin/zsh");
+        let argv: Vec<String> = cmd
+            .get_argv()
+            .iter()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(argv[0], "/bin/sh");
+        assert_eq!(argv[1], "-lc");
+        assert!(argv[2].contains("stty erase '^H'"));
+        assert_eq!(
+            cmd.get_env("LYCEUM_SHELL")
+                .map(|v| v.to_string_lossy().to_string()),
+            Some("/bin/zsh".to_string())
+        );
+        assert_eq!(
+            cmd.get_env("TERM").map(|v| v.to_string_lossy().to_string()),
+            Some("xterm-256color".to_string())
+        );
     }
 
     #[cfg(unix)]
@@ -216,5 +276,62 @@ mod tests {
         }
         let _ = child.wait();
         assert!(out.contains("LYCEUM_OK"), "pty output was: {out:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ctrl_h_erases_character_in_canonical_pty_input() {
+        let pty_system = native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.args([
+            "-c",
+            "stty erase '^H'; printf 'READY\\n'; IFS= read -r value; printf '<%s>' \"$value\"",
+        ]);
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut out = String::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    out.push_str(&String::from_utf8_lossy(&buf[..n]));
+                    if out.contains("READY") {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+
+        let mut writer = pair.master.take_writer().unwrap();
+        writer.write_all(b"abc\x08d\r").unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    out.push_str(&String::from_utf8_lossy(&buf[..n]));
+                    if out.contains("<abd>") {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = child.wait();
+        assert!(out.contains("<abd>"), "pty output was: {out:?}");
     }
 }

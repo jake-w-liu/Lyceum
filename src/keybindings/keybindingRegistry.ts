@@ -13,8 +13,8 @@ export const DEFAULT_KEYMAP: Keybinding[] = [
   { key: "mod+p", command: "quickOpen.show" },
   { key: "mod+shift+p", command: "commandPalette.show" },
   { key: "mod+b", command: "workbench.toggleSidebar" },
-  { key: "mod+backquote", command: "terminal.toggle" },
-  { key: "mod+shift+backquote", command: "terminal.new" },
+  { key: "ctrl+backquote", command: "terminal.toggle" },
+  { key: "ctrl+shift+backquote", command: "terminal.new" },
   { key: "mod+j", command: "workbench.toggleBottomPanel" },
   { key: "mod+s", command: "file.save" },
   { key: "mod+w", command: "editor.closeTab" },
@@ -145,28 +145,10 @@ function matchChord(chord: Chord, e: KeyboardEvent, isMacOs: boolean): boolean {
     return false;
   }
 
-  if (chord.mod) {
-    if (isMacOs) {
-      if (e.metaKey !== true || e.ctrlKey !== false) {
-        return false;
-      }
-    } else {
-      if (e.ctrlKey !== true || e.metaKey !== false) {
-        return false;
-      }
-    }
-  } else if (chord.cmd || chord.meta) {
-    if (e.metaKey !== true) {
-      return false;
-    }
-  } else if (chord.ctrl) {
-    if (e.ctrlKey !== true) {
-      return false;
-    }
-  } else {
-    if (e.metaKey !== false || e.ctrlKey !== false) {
-      return false;
-    }
+  const wantsCtrl = chord.ctrl || (chord.mod && !isMacOs);
+  const wantsMeta = chord.cmd || chord.meta || (chord.mod && isMacOs);
+  if (e.ctrlKey !== wantsCtrl || e.metaKey !== wantsMeta) {
+    return false;
   }
 
   return matchMainKey(chord.mainKey, e);

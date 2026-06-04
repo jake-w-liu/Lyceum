@@ -21,6 +21,7 @@ import { useSettingsStore } from "../state/settingsStore";
 import { useWorkspaceStore } from "../state/workspaceStore";
 import { getActiveDoc, useEditorStore } from "../state/editorStore";
 import { resolveTerminalCwd } from "../lib/terminalCwd";
+import { terminalKeyOverride } from "../lib/terminalKeys";
 import { isMac } from "../hooks/useLayoutKeybindings";
 
 export interface TerminalViewProps {
@@ -65,25 +66,28 @@ export function TerminalView({
 
     // Clipboard: copy the selection (Cmd/Ctrl+C with a selection), paste
     // (Cmd/Ctrl+V). Ctrl+C with no selection still reaches the PTY (interrupt).
+    // Backspace is sent explicitly because some WebView/browser key events can
+    // be mis-mapped before xterm turns them into terminal bytes.
     term.attachCustomKeyEventHandler((e) => {
-      if (e.type !== "keydown") return true;
-      const mod = isMac() ? e.metaKey : e.ctrlKey;
-      if (!mod) return true;
-      const key = e.key.toLowerCase();
-      if (key === "c" && term.hasSelection()) {
-        navigator.clipboard?.writeText(term.getSelection()).catch(() => {});
-        return false;
+      const override = terminalKeyOverride(e, isMac(), term.hasSelection());
+      if (!override) return true;
+      switch (override.type) {
+        case "send":
+          void writePty(id, override.data);
+          break;
+        case "copy":
+          navigator.clipboard?.writeText(term.getSelection()).catch(() => {});
+          break;
+        case "paste":
+          navigator.clipboard
+            ?.readText()
+            .then((text) => {
+              if (text) void writePty(id, text);
+            })
+            .catch(() => {});
+          break;
       }
-      if (key === "v") {
-        navigator.clipboard
-          ?.readText()
-          .then((text) => {
-            if (text) void writePty(id, text);
-          })
-          .catch(() => {});
-        return false;
-      }
-      return true;
+      return false;
     });
 
     const dataDisp = term.onData((data) => void writePty(id, data));

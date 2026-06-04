@@ -66,7 +66,7 @@ export interface LayoutActions {
   /** Open the bottom panel and focus a specific tab. */
   showBottomTab: (tab: BottomTab) => void;
   /**
-   * Cmd/Ctrl+` behavior: open the panel on the terminal tab, or close it if the
+   * Ctrl+` behavior: open the panel on the terminal tab, or close it if the
    * terminal tab is already showing, or switch to terminal if another tab is.
    */
   toggleTerminal: () => void;

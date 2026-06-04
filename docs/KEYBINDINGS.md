@@ -29,8 +29,8 @@ to `Cmd` on macOS and `Ctrl` on Windows/Linux.
 | Quick open (files) | `Cmd+P` | `Ctrl+P` | `quickOpen.show` | M4 |
 | Command palette | `Cmd+Shift+P` | `Ctrl+Shift+P` | `commandPalette.show` | M4 |
 | Toggle sidebar | `Cmd+B` | `Ctrl+B` | `workbench.toggleSidebar` | M1 |
-| Toggle terminal panel | `` Cmd+` `` | `` Ctrl+` `` | `terminal.toggle` | M5 |
-| New terminal | `` Cmd+Shift+` `` | `` Ctrl+Shift+` `` | `terminal.new` | M5 |
+| Toggle terminal panel | `` Ctrl+` `` | `` Ctrl+` `` | `terminal.toggle` | M5 |
+| New terminal | `` Ctrl+Shift+` `` | `` Ctrl+Shift+` `` | `terminal.new` | M5 |
 | Toggle bottom panel | `Cmd+J` | `Ctrl+J` | `workbench.toggleBottomPanel` | M1 |
 | Save file | `Cmd+S` | `Ctrl+S` | `file.save` | M3 |
 | Close tab | `Cmd+W` | `Ctrl+W` | `editor.closeTab` | M3 |
@@ -162,8 +162,8 @@ The snippet below shows the defaults in user-override form. Use `mod` for the Cm
     { "key": "mod+p", "command": "quickOpen.show" },
     { "key": "mod+shift+p", "command": "commandPalette.show" },
     { "key": "mod+b", "command": "workbench.toggleSidebar" },
-    { "key": "mod+backquote", "command": "terminal.toggle" },
-    { "key": "mod+shift+backquote", "command": "terminal.new" },
+    { "key": "ctrl+backquote", "command": "terminal.toggle" },
+    { "key": "ctrl+shift+backquote", "command": "terminal.new" },
     { "key": "mod+j", "command": "workbench.toggleBottomPanel" },
     { "key": "mod+s", "command": "file.save", "when": "editorFocus" },
     { "key": "mod+w", "command": "editor.closeTab" },

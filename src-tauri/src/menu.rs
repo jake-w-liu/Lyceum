@@ -48,13 +48,20 @@ pub fn build_app_menu<R: Runtime>(handle: &AppHandle<R>) -> tauri::Result<Menu<R
         .separator()
         .item(&MenuItemBuilder::with_id("workbench.toggleSidebar", "Toggle Sidebar").build(handle)?)
         .item(
-            &MenuItemBuilder::with_id("workbench.toggleBottomPanel", "Toggle Panel").build(handle)?,
+            &MenuItemBuilder::with_id("workbench.toggleBottomPanel", "Toggle Panel")
+                .build(handle)?,
         )
         .item(&MenuItemBuilder::with_id("terminal.toggle", "Toggle Terminal").build(handle)?)
         .item(&MenuItemBuilder::with_id("preview.open", "Open Preview").build(handle)?)
         .separator()
-        .item(&MenuItemBuilder::with_id("workbench.searchWorkspace", "Find in Files").build(handle)?)
-        .item(&MenuItemBuilder::with_id("editor.goToSymbol", "Go to Symbol in Editor…").build(handle)?)
+        .item(
+            &MenuItemBuilder::with_id("workbench.searchWorkspace", "Find in Files")
+                .build(handle)?,
+        )
+        .item(
+            &MenuItemBuilder::with_id("editor.goToSymbol", "Go to Symbol in Editor…")
+                .build(handle)?,
+        )
         .item(&MenuItemBuilder::with_id("editor.goToLine", "Go to Line…").build(handle)?)
         .separator()
         .item(&MenuItemBuilder::with_id("explorer.refresh", "Refresh Explorer").build(handle)?)
@@ -68,7 +75,10 @@ pub fn build_app_menu<R: Runtime>(handle: &AppHandle<R>) -> tauri::Result<Menu<R
         .item(&MenuItemBuilder::with_id("latex.build", "Build LaTeX").build(handle)?)
         .separator()
         .item(&MenuItemBuilder::with_id("julia.repl", "Open Julia REPL").build(handle)?)
-        .item(&MenuItemBuilder::with_id("terminal.runSelection", "Send Selection to Terminal").build(handle)?)
+        .item(
+            &MenuItemBuilder::with_id("terminal.runSelection", "Send Selection to Terminal")
+                .build(handle)?,
+        )
         .build()?;
 
     let window_menu = SubmenuBuilder::new(handle, "Window")

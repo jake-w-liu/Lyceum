@@ -156,8 +156,8 @@ planned but not yet started. This roadmap is the agreed plan of record.
   - `Cmd/Ctrl+/` toggle line comment; `Alt/Option+Up/Down` move line;
     `Shift+Alt/Option+Up/Down` duplicate line.
   - `Esc` closes command palette / quick open / find box / modal panel.
-  - (Terminal, run, preview, and LSP bindings land with their feature milestones: `Cmd/Ctrl+`` and
-    `Cmd/Ctrl+Shift+`` in M5; `Cmd/Ctrl+Enter` in M8; `Cmd/Ctrl+Shift+V` in M6/M11; `F12`,
+  - (Terminal, run, preview, and LSP bindings land with their feature milestones: `Ctrl+`` and
+    `Ctrl+Shift+`` in M5; `Cmd/Ctrl+Enter` in M8; `Cmd/Ctrl+Shift+V` in M6/M11; `F12`,
     `Shift+F12`, `Cmd/Ctrl+Click` in M9.)
 - Keybindings persisted as JSON (foundation reused by M10).
 
@@ -181,7 +181,7 @@ planned but not yet started. This roadmap is the agreed plan of record.
 - Rust: spawn a real PTY with the `portable-pty` crate; stream output to the frontend over Tauri events;
   accept input via Tauri commands; support resize and termination.
 - Frontend: lazy-loaded xterm.js terminal view in the bottom panel; wire input/output to the backend.
-- Support multiple terminals; honor `Cmd/Ctrl+`` (toggle terminal panel) and `Cmd/Ctrl+Shift+``
+- Support multiple terminals; honor `Ctrl+`` (toggle terminal panel) and `Ctrl+Shift+``
   (new terminal).
 - Respect `shellPath` and `terminalCwdBehavior` settings (default reasonable behavior until M10 persists them).
 

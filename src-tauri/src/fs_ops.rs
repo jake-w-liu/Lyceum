@@ -131,7 +131,10 @@ mod tests {
         let entries = read_dir_entries(root).expect("read dir");
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         // Directories (case-insensitive sorted) first, then files.
-        assert_eq!(names, vec!["Alpha_dir", "zeta_dir", "A_file.txt", "b_file.txt"]);
+        assert_eq!(
+            names,
+            vec!["Alpha_dir", "zeta_dir", "A_file.txt", "b_file.txt"]
+        );
 
         let dirs: Vec<bool> = entries.iter().map(|e| e.is_dir).collect();
         assert_eq!(dirs, vec![true, true, false, false]);

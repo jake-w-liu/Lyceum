@@ -66,14 +66,6 @@ export async function ensureServer(
   });
 
   const unlistens: UnlistenFn[] = [];
-  unlistens.push(await onLspMessage(id, (raw) => rpc.handleMessage(raw)));
-  unlistens.push(
-    await onLspExit(id, () => {
-      useLspStatusStore.getState().setStatus(languageId, "off");
-      rpc.dispose("server exited");
-      sessions.delete(languageId);
-    }),
-  );
 
   const session: LspSession = {
     id,
@@ -85,9 +77,20 @@ export async function ensureServer(
     openDocs: new Set(),
     capabilities: {},
   };
+  sessions.set(languageId, session);
 
   const ready = (async () => {
     try {
+      unlistens.push(await onLspMessage(id, (raw) => rpc.handleMessage(raw)));
+      unlistens.push(
+        await onLspExit(id, () => {
+          useLspStatusStore.getState().setStatus(languageId, "off");
+          rpc.dispose("server exited");
+          if (sessions.get(languageId) === session) {
+            sessions.delete(languageId);
+          }
+        }),
+      );
       await lspStart(id, cmd, args, rootPath);
       const initResult = await rpc.request<{
         capabilities?: Record<string, unknown>;
@@ -102,7 +105,9 @@ export async function ensureServer(
       useLspStatusStore.getState().setStatus(languageId, "error");
       unlistens.forEach((off) => off());
       rpc.dispose("lsp init failed");
-      sessions.delete(languageId);
+      if (sessions.get(languageId) === session) {
+        sessions.delete(languageId);
+      }
       void lspStop(id);
       throw e instanceof Error ? e : new Error(String(e));
     }
@@ -111,8 +116,6 @@ export async function ensureServer(
   // Defensive: ensure the ready rejection is never an unhandled rejection even
   // if no caller awaits it (didOpen/didChange await it in try/catch).
   void ready.catch(() => {});
-
-  sessions.set(languageId, session);
   return session;
 }
 
