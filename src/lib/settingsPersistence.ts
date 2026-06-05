@@ -100,6 +100,50 @@ export async function restoreWorkspace(): Promise<void> {
   }
 }
 
+/**
+ * If launched with a folder argument (`lyceum /path`, i.e. `open -na Lyceum
+ * --args /path`), open it as the workspace — overriding any restored workspace.
+ * No-op for a plain launch or outside Tauri.
+ */
+export async function openLaunchDir(): Promise<void> {
+  try {
+    const dir = await invoke<string | null>("get_launch_dir");
+    if (typeof dir === "string" && dir.length > 0) {
+      useWorkspaceStore.getState().openWorkspace(dir);
+    }
+  } catch {
+    // not in Tauri, or no launch dir
+  }
+}
+
+/**
+ * When the app is already running, a second `lyceum /path` is intercepted by the
+ * single-instance plugin, which focuses this window and emits `open-launch-dir`.
+ * Subscribe so that folder becomes the workspace. Returns an unsubscribe fn.
+ */
+export function listenLaunchDir(): () => void {
+  let active = true;
+  let unlisten: (() => void) | null = null;
+  void (async () => {
+    try {
+      const { listen } = await import("@tauri-apps/api/event");
+      const un = await listen<string>("open-launch-dir", (event) => {
+        if (typeof event.payload === "string" && event.payload.length > 0) {
+          useWorkspaceStore.getState().openWorkspace(event.payload);
+        }
+      });
+      if (active) unlisten = un;
+      else un(); // unmounted before listen resolved
+    } catch {
+      // not in Tauri
+    }
+  })();
+  return () => {
+    active = false;
+    unlisten?.();
+  };
+}
+
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let persistenceInitialized = false;
 

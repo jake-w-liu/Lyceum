@@ -20,6 +20,28 @@ mod walk;
 use app_info::AppInfo;
 use tauri::{Emitter, Manager, RunEvent};
 
+/// The folder Lyceum was asked to open on launch, e.g. via `lyceum .` which
+/// runs `open -na Lyceum --args /abs/path`. Resolved once from argv at startup;
+/// `None` for a plain double-click launch. The frontend reads this on mount and
+/// opens it as the workspace, taking precedence over the restored workspace.
+struct LaunchDir(Option<String>);
+
+/// First argv entry that is an existing directory, canonicalized to an absolute
+/// path. Filtering on `is_dir` skips the program name and macOS-injected flags
+/// like `-psn_0_12345`, so a plain launch yields `None`.
+fn first_dir_arg<I: IntoIterator<Item = String>>(args: I) -> Option<String> {
+    args.into_iter()
+        .map(std::path::PathBuf::from)
+        .find(|p| p.is_dir())
+        .and_then(|p| std::fs::canonicalize(&p).ok())
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// The launch folder for a cold start, resolved from this process's argv.
+fn launch_dir_from_args() -> Option<String> {
+    first_dir_arg(std::env::args().skip(1))
+}
+
 /// Returns basic information about the running app and host platform.
 /// Used by the status bar (M1) and the command palette / about view later.
 #[tauri::command]
@@ -27,11 +49,31 @@ fn get_app_info() -> AppInfo {
     app_info::app_info()
 }
 
+/// The folder passed on the command line at launch (or `null`).
+#[tauri::command]
+fn get_launch_dir(state: tauri::State<'_, LaunchDir>) -> Option<String> {
+    state.0.clone()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Must be the first plugin: a second `lyceum <dir>` launch forwards its
+        // argv here instead of starting a duplicate app. We focus the existing
+        // window and emit the folder so the frontend switches workspace —
+        // matching `code .` reusing its single window.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if let Some(dir) = first_dir_arg(argv.into_iter().skip(1)) {
+                let _ = app.emit("open-launch-dir", dir);
+            }
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .manage(LaunchDir(launch_dir_from_args()))
         .manage(terminal::TerminalManager::default())
         .manage(lsp::LspManager::default())
         .manage(julia::RunManager::default())
@@ -46,6 +88,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_app_info,
+            get_launch_dir,
             fs_ops::read_directory,
             fs_ops::create_file,
             fs_ops::create_directory,

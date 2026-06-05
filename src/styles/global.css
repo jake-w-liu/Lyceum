@@ -992,14 +992,16 @@ kbd {
   cursor: default;
 }
 
-.pdf-canvas-wrap {
+.pdf-scroll {
   flex: 1 1 auto;
   overflow: auto;
   display: flex;
-  justify-content: center;
-  align-items: flex-start;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
   padding: 12px;
   background: #525659;
+  scroll-padding-top: 12px;
 }
 
 .pdf-page-layer {

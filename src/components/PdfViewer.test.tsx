@@ -86,21 +86,38 @@ afterEach(() => {
 });
 
 describe("PdfViewer", () => {
-  it("clamps a restored page to the loaded document's page count", async () => {
-    usePreviewStore
-      .getState()
-      .setViewState("/w/paper.pdf", { page: 9, zoom: 1 });
-    mockPdfDocument(2);
+  it("renders every page of a multi-page document in one continuous scroll", async () => {
+    mockPdfDocument(3);
 
-    render(<PdfViewer path="/w/paper.pdf" />);
+    const { container } = render(<PdfViewer path="/w/paper.pdf" />);
 
-    expect(await screen.findByText("2 / 2")).toBeInTheDocument();
-    await waitFor(() => expect(pdfMocks.getPage).toHaveBeenCalledWith(2));
+    // Indicator shows the total; the top page is current.
+    expect(await screen.findByText("1 / 3")).toBeInTheDocument();
+    // One page-layer per page, stacked in a single scroll container — i.e. a
+    // continuous document, not a single paged canvas.
+    const scroll = container.querySelector(".pdf-scroll") as HTMLElement;
+    expect(scroll.querySelectorAll(".pdf-page-layer")).toHaveLength(3);
+    // The visible page actually renders (async).
+    await waitFor(() => expect(pdfMocks.getPage).toHaveBeenCalledWith(1));
     expect(usePreviewStore.getState().viewState["/w/paper.pdf"]).toEqual({
-      page: 2,
+      page: 1,
       zoom: 1,
     });
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("restores the saved zoom on reopen", async () => {
+    usePreviewStore
+      .getState()
+      .setViewState("/w/zoomed.pdf", { page: 1, zoom: 1.5 });
+    mockPdfDocument(2);
+
+    render(<PdfViewer path="/w/zoomed.pdf" />);
+
+    expect(await screen.findByText("150%")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(pdfMocks.getViewport).toHaveBeenCalledWith({ scale: 1.5 }),
+    );
   });
 
   it("renders the canvas at the device pixel ratio for crisp HiDPI output", async () => {

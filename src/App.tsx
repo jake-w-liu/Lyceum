@@ -15,8 +15,10 @@ import { useLayoutStore } from "./state/layoutStore";
 import { applyThemeAttribute, useThemeStore } from "./state/themeStore";
 import {
   initSettingsPersistence,
+  listenLaunchDir,
   loadKeybindings,
   loadSettings,
+  openLaunchDir,
   restoreWorkspace,
 } from "./lib/settingsPersistence";
 import "./commands/builtinCommands";
@@ -36,8 +38,14 @@ export default function App() {
       await loadKeybindings();
       await restoreWorkspace();
       initSettingsPersistence();
+      // A launch-dir (`lyceum /path`) overrides the restored workspace; runs
+      // after persistence init so the opened folder is remembered next time.
+      await openLaunchDir();
     })();
   }, []);
+
+  // While running, a second `lyceum /path` (single-instance) switches workspace.
+  useEffect(() => listenLaunchDir(), []);
 
   const sidebarVisible = useLayoutStore((s) => s.sidebarVisible);
   const bottomPanelVisible = useLayoutStore((s) => s.bottomPanelVisible);
