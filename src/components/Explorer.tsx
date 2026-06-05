@@ -16,7 +16,48 @@ import {
 } from "../lib/ipc";
 import { useTreeStore } from "../state/treeStore";
 import { useEditorStore } from "../state/editorStore";
+import { useGitStore } from "../state/gitStore";
 import { Icon } from "./Icon";
+
+// VS Code-style single-letter badge for a changed file; folders show a dot.
+function gitBadgeChar(status: string, isDir: boolean): string {
+  if (isDir) return "●";
+  switch (status) {
+    case "modified":
+      return "M";
+    case "added":
+      return "A";
+    case "untracked":
+      return "U";
+    case "deleted":
+      return "D";
+    case "renamed":
+      return "R";
+    case "conflict":
+      return "C";
+    default:
+      return "";
+  }
+}
+
+function gitStatusLabel(status: string): string {
+  switch (status) {
+    case "modified":
+      return "Modified";
+    case "added":
+      return "Added";
+    case "untracked":
+      return "Untracked";
+    case "deleted":
+      return "Deleted";
+    case "renamed":
+      return "Renamed";
+    case "conflict":
+      return "Conflict";
+    default:
+      return "";
+  }
+}
 
 function parentDir(path: string): string {
   const idx = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
@@ -146,6 +187,9 @@ function TreeNode({
   const expanded = useTreeStore((s) => Boolean(s.expanded[entry.path]));
   const children = useTreeStore((s) => s.children[entry.path]);
   const refreshNonce = useTreeStore((s) => s.refreshNonce);
+  const gitStatus = useGitStore((s) =>
+    entry.isDir ? s.folders[entry.path] ?? null : s.files[entry.path] ?? null,
+  );
   const [renaming, setRenaming] = useState(false);
   const selected = selectedPaths.includes(entry.path);
 
@@ -195,10 +239,16 @@ function TreeNode({
     try {
       const to = joinPath(parentDir(entry.path), trimmed);
       await renamePath(entry.path, to);
-      useEditorStore.getState().moveDocPaths([{ from: entry.path, to }]);
+      const move = [{ from: entry.path, to }];
+      useEditorStore.getState().moveDocPaths(move);
+      useTreeStore.getState().remapExpanded(move);
+      useTreeStore.getState().setSelection([to]);
       useTreeStore.getState().refresh();
     } catch (err) {
       console.error("rename failed", err);
+      // Re-sync the tree to disk and tell the user why (e.g. name already taken).
+      useTreeStore.getState().refresh();
+      alert(`Rename failed: ${String(err)}`);
     }
   }
 
@@ -255,7 +305,11 @@ function TreeNode({
           aria-selected={selected}
           className="tree-row-main"
           aria-expanded={entry.isDir ? expanded : undefined}
-          title={entry.name}
+          title={
+            gitStatus && !entry.isDir
+              ? `${entry.name} — ${gitStatusLabel(gitStatus)}`
+              : entry.name
+          }
           onClick={onActivate}
         >
           <span
@@ -267,9 +321,16 @@ function TreeNode({
           {renaming ? (
             <RenameInput initial={entry.name} onCommit={commitRename} />
           ) : (
-            <span className="tree-label">{entry.name}</span>
+            <span className={"tree-label" + (gitStatus ? ` git-${gitStatus}` : "")}>
+              {entry.name}
+            </span>
           )}
         </button>
+        {!renaming && gitStatus && (
+          <span className={`git-badge git-${gitStatus}`} aria-hidden="true">
+            {gitBadgeChar(gitStatus, entry.isDir)}
+          </span>
+        )}
         {!renaming && (
           <span className="tree-actions">
             <button
@@ -468,6 +529,20 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     if (rootChildren === undefined) loadInto(rootPath, refreshNonce);
   }, [rootPath, rootChildren, refreshNonce]);
 
+  // Refresh git decorations on workspace open and after any tree mutation
+  // (create/rename/delete/move all bump refreshNonce).
+  useEffect(() => {
+    void useGitStore.getState().refresh();
+  }, [rootPath, refreshNonce]);
+
+  // Refresh when the window regains focus (catches external edits, terminal
+  // git commands, branch switches, etc.).
+  useEffect(() => {
+    const onFocus = () => void useGitStore.getState().refresh();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, []);
+
   // Start the inline create flow when a global command (New File / New Folder /
   // Cmd+Ctrl+N) requests it, then clear the request so it fires exactly once.
   useEffect(() => {
@@ -516,6 +591,9 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
       useTreeStore.getState().refresh();
     } catch (err) {
       console.error("create failed", err);
+      // Surface duplicate-name / invalid-name failures instead of silently no-op.
+      useTreeStore.getState().refresh();
+      alert(`Create failed: ${String(err)}`);
     }
   }
 
@@ -545,6 +623,9 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
       if (batch.items.length > 0) {
         useTreeStore.getState().recordDeleteBatch(batch);
         closeDeletedDocs(batch.items.map((item) => item.originalPath));
+        useTreeStore
+          .getState()
+          .dropExpanded(batch.items.map((item) => item.originalPath));
       }
       useTreeStore.getState().clearSelection();
       useTreeStore.getState().refresh();
@@ -606,6 +687,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
           to: joinPath(destinationDir, entry.name),
         }));
         useEditorStore.getState().moveDocPaths(localMoves);
+        useTreeStore.getState().remapExpanded(localMoves);
         useTreeStore.getState().setSelection(localMoves.map((item) => item.to));
       }
       if (destinationDir !== rootPath) {

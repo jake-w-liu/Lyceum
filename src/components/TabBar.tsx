@@ -10,7 +10,7 @@ import {
 } from "../lib/fileTypes";
 import { runActiveJulia } from "../lib/julia";
 import { runLatexBuild } from "../lib/latexBuild";
-import { isDirty, useEditorStore } from "../state/editorStore";
+import { confirmDiscard, isDirty, useEditorStore } from "../state/editorStore";
 import { useLayoutStore } from "../state/layoutStore";
 import { useOutputStore } from "../state/outputStore";
 
@@ -57,7 +57,9 @@ export function TabBar() {
                 type="button"
                 className="tab-close icon-button"
                 aria-label={`Close ${doc.name}`}
-                onClick={() => closeDoc(doc.path)}
+                onClick={() => {
+                  if (confirmDiscard(doc.path)) closeDoc(doc.path);
+                }}
               >
                 <Icon name="close" size={12} />
               </button>

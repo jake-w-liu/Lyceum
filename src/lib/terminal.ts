@@ -23,16 +23,31 @@ export async function createPty(id: string, opts: CreatePtyOptions): Promise<voi
   });
 }
 
+// write/resize/close target a PTY that may already have exited (shell quit, tab
+// closed). They are fire-and-forget, so swallow the rejection here rather than
+// leaving an unhandled promise rejection at every call site.
 export async function writePty(id: string, data: string): Promise<void> {
-  await invoke("terminal_write", { id, data });
+  try {
+    await invoke("terminal_write", { id, data });
+  } catch {
+    /* PTY gone; terminal input is best-effort */
+  }
 }
 
 export async function resizePty(id: string, cols: number, rows: number): Promise<void> {
-  await invoke("terminal_resize", { id, cols, rows });
+  try {
+    await invoke("terminal_resize", { id, cols, rows });
+  } catch {
+    /* PTY gone; resize is best-effort */
+  }
 }
 
 export async function closePty(id: string): Promise<void> {
-  await invoke("terminal_close", { id });
+  try {
+    await invoke("terminal_close", { id });
+  } catch {
+    /* PTY already closed/never created */
+  }
 }
 
 /** Decode a base64 string (terminal output payload) to raw bytes. */

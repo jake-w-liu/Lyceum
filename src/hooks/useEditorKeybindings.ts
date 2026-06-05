@@ -5,7 +5,8 @@
 
 import { useEffect } from "react";
 import { isMac } from "./useLayoutKeybindings";
-import { getActiveDoc, isTextDoc, useEditorStore } from "../state/editorStore";
+import { confirmDiscard, getActiveDoc, isTextDoc, useEditorStore } from "../state/editorStore";
+import { useGitStore } from "../state/gitStore";
 import { writeFile } from "../lib/ipc";
 
 /** Persist the active document to disk and mark it saved. No-op if none open. */
@@ -17,6 +18,8 @@ export async function saveActiveDoc(): Promise<void> {
     // Pass the exact content written: if the user kept typing during the async
     // write, the live buffer diverges and the doc must stay dirty (not be cleared).
     useEditorStore.getState().markSaved(doc.path, doc.content);
+    // A save changes working-tree status; refresh Explorer git decorations.
+    void useGitStore.getState().refresh();
   } catch (e) {
     // Surfaced via the problems/output panel in a later milestone.
     console.error("Failed to save", doc.path, e);
@@ -32,10 +35,10 @@ export function focusAdjacentTab(dir: 1 | -1): void {
   setActive(docs[nextIdx].path);
 }
 
-/** Close the active tab, if any. */
+/** Close the active tab, if any. Prompts before discarding unsaved changes. */
 export function closeActiveTab(): void {
   const { activePath, closeDoc } = useEditorStore.getState();
-  if (activePath) closeDoc(activePath);
+  if (activePath && confirmDiscard(activePath)) closeDoc(activePath);
 }
 
 export function useEditorKeybindings(): void {

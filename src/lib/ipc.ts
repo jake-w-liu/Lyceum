@@ -46,7 +46,7 @@ export interface LatexToolInfo {
 
 const FALLBACK_APP_INFO: AppInfo = {
   name: "lyceum",
-  version: "0.1.4",
+  version: "0.2.0",
   os: "web",
   arch: "unknown",
 };
@@ -167,6 +167,31 @@ export interface SearchMatch {
   line: number;
   column: number;
   text: string;
+}
+
+/** Git working-tree status for a single tree entry (mirrors the Rust vocabulary). */
+export type GitFileStatus =
+  | "modified"
+  | "added"
+  | "untracked"
+  | "deleted"
+  | "renamed"
+  | "conflict"
+  | "ignored";
+
+/** Workspace git status, mirroring the Rust `GitStatusDto`. */
+export interface GitStatus {
+  isRepo: boolean;
+  /** Absolute path -> status. */
+  files: Record<string, GitFileStatus>;
+}
+
+/**
+ * Fetch git working-tree status for the workspace (Explorer decorations).
+ * The backend is best-effort: a non-git folder resolves to `{ isRepo: false }`.
+ */
+export async function gitStatus(root: string): Promise<GitStatus> {
+  return invoke<GitStatus>("git_status", { root });
 }
 
 /** Search file contents under a workspace root (Cmd/Ctrl+Shift+F). */

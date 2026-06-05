@@ -8,6 +8,7 @@
 mod app_info;
 mod file_ops;
 mod fs_ops;
+mod git;
 mod julia;
 mod latex;
 mod lsp;
@@ -17,7 +18,7 @@ mod terminal;
 mod walk;
 
 use app_info::AppInfo;
-use tauri::Emitter;
+use tauri::{Emitter, Manager, RunEvent};
 
 /// Returns basic information about the running app and host platform.
 /// Used by the status bar (M1) and the command palette / about view later.
@@ -56,6 +57,7 @@ pub fn run() {
             fs_ops::restore_trash_batch,
             fs_ops::redo_trash_batch,
             search::search_workspace,
+            git::git_status,
             file_ops::read_file,
             file_ops::write_file,
             file_ops::read_file_bytes,
@@ -66,8 +68,6 @@ pub fn run() {
             terminal::terminal_resize,
             terminal::terminal_close,
             julia::run_julia,
-            julia::run_build,
-            julia::program_available,
             julia::run_cancel,
             latex::resolve_latex_tools,
             latex::run_latex_build,
@@ -75,6 +75,15 @@ pub fn run() {
             lsp::lsp_send,
             lsp::lsp_stop
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // On quit, tear down every child process we manage so language
+            // servers, shells, and Julia runs are never orphaned.
+            if let RunEvent::ExitRequested { .. } = event {
+                app.state::<terminal::TerminalManager>().shutdown_all();
+                app.state::<lsp::LspManager>().shutdown_all();
+                app.state::<julia::RunManager>().shutdown_all();
+            }
+        });
 }

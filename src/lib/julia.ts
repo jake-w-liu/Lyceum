@@ -12,7 +12,11 @@ import {
   useEditorStore,
   type EditorDoc,
 } from "../state/editorStore";
-import { useOutputStore } from "../state/outputStore";
+import {
+  appendOutputBuffered,
+  flushOutputBuffer,
+  useOutputStore,
+} from "../state/outputStore";
 import { useLayoutStore } from "../state/layoutStore";
 import { useWorkspaceStore } from "../state/workspaceStore";
 import { useSettingsStore } from "../state/settingsStore";
@@ -62,16 +66,15 @@ export async function runActiveJulia(): Promise<void> {
   const offData = await listen<{ stream: string; line: string }>(
     `julia:output:${id}`,
     (event) =>
-      useOutputStore
-        .getState()
-        .append(
-          event.payload.stream === "stderr"
-            ? `[stderr] ${event.payload.line}`
-            : event.payload.line,
-        ),
+      appendOutputBuffered(
+        event.payload.stream === "stderr"
+          ? `[stderr] ${event.payload.line}`
+          : event.payload.line,
+      ),
   );
   const offExit = await listen<number>(`julia:exit:${id}`, (event) => {
     const store = useOutputStore.getState();
+    flushOutputBuffer(); // ensure streamed lines land before the exit line
     store.append(`[julia exited with code ${event.payload}]`);
     store.setRunning(false);
     store.setRunId(null);

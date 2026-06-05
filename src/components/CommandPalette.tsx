@@ -17,6 +17,15 @@ export function CommandPalette() {
     setSelected(0);
   }, [query]);
 
+  // Reset the search each time the palette opens so a stale query from a prior
+  // session doesn't linger (the component stays mounted while hidden).
+  useEffect(() => {
+    if (activeModal === "palette") {
+      setQuery("");
+      setSelected(0);
+    }
+  }, [activeModal]);
+
   // Memoized; only computed while the palette is open (commandRegistry.list()
   // is not hoisted above the gate so it doesn't run on every closed-state render).
   const results = useMemo(

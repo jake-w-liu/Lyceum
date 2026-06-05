@@ -27,6 +27,18 @@ pub struct RunManager {
     pub(crate) runs: RunMap,
 }
 
+impl RunManager {
+    /// Kill every in-flight run (whole process group each). Called on app exit
+    /// so a long-running Julia process is not orphaned when Lyceum quits.
+    pub fn shutdown_all(&self) {
+        if let Ok(mut runs) = self.runs.lock() {
+            for (_id, pid) in runs.drain() {
+                kill_pid(pid);
+            }
+        }
+    }
+}
+
 /// Resolve the Julia executable: an explicit setting, else common GUI-app PATH
 /// locations plus PATH (juliaup provides it). Pure-ish wrapper for production.
 pub fn resolve_julia(explicit: Option<String>) -> String {
@@ -309,8 +321,7 @@ pub fn run_julia(
 
 /// Stream a spawned child's stdout/stderr as `<out_event>` (OutputLine payloads)
 /// and its exit code as `<exit_event>`. Registers the child in `runs` (keyed by
-/// `id`) so it can be cancelled, and removes it on exit. Shared by run_julia and
-/// run_build.
+/// `id`) so it can be cancelled, and removes it on exit.
 pub(crate) fn stream_child(
     app: AppHandle,
     mut child: Child,
@@ -339,85 +350,37 @@ pub(crate) fn stream_child(
         // reused the pid). Draining the pumps below can block (e.g. if a grandchild
         // holds the pipe open), so this must happen before the joins, not after.
         runs.lock().unwrap().remove(&id);
-        // Drain all output before signaling exit so the frontend (which tears
-        // down its output listener on exit) never loses trailing lines.
-        if let Some(handle) = out_handle {
-            let _ = handle.join();
-        }
-        if let Some(handle) = err_handle {
-            let _ = handle.join();
-        }
+        // Drain output before signaling exit so the frontend (which tears down
+        // its output listener on exit) does not lose trailing lines — but bound
+        // the wait. A grandchild that inherited the pipe (e.g. latexmk forking
+        // pdflatex into the background) can hold it open after the leader exits;
+        // the exit event must still fire so the UI never hangs "running" forever.
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            if let Some(handle) = out_handle {
+                let _ = handle.join();
+            }
+            if let Some(handle) = err_handle {
+                let _ = handle.join();
+            }
+            let _ = tx.send(());
+        });
+        let _ = rx.recv_timeout(std::time::Duration::from_secs(2));
         let _ = app.emit(&exit_event, code);
     });
 }
 
-/// Run a build command (e.g. `latexmk -pdf main.tex`) via the system shell,
-/// streaming output as `build:output:<id>` / `build:exit:<id>` events (M11).
-#[tauri::command]
-pub fn run_build(
-    app: AppHandle,
-    state: State<RunManager>,
-    id: String,
-    command: String,
-    cwd: Option<String>,
-) -> Result<(), String> {
-    let path = augmented_path(
-        env::var_os("PATH").as_deref(),
-        env::var_os("HOME").as_deref(),
-    );
-    let mut cmd = if cfg!(windows) {
-        let mut c = Command::new("cmd");
-        c.args(["/C", &command]);
-        c
-    } else {
-        let mut c = Command::new("sh");
-        c.args(["-c", &command]);
-        c
-    };
-    cmd.env("PATH", path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if let Some(dir) = cwd {
-        if !dir.is_empty() {
-            cmd.current_dir(dir);
-        }
-    }
-    configure_process_group(&mut cmd);
-    let child = cmd
-        .spawn()
-        .map_err(|e| format!("failed to run build: {e}"))?;
-    stream_child(
-        app,
-        child,
-        id.clone(),
-        state.runs.clone(),
-        format!("build:output:{id}"),
-        format!("build:exit:{id}"),
-    );
-    Ok(())
-}
-
-/// Report whether an executable is available through the same augmented PATH
-/// used for Julia runs and build commands. The frontend uses this for
-/// conservative tool selection without shelling out itself.
-#[tauri::command]
-pub fn program_available(program: String) -> bool {
-    let program = program.trim();
-    if program.is_empty() {
-        return false;
-    }
-    let path = augmented_path(
-        env::var_os("PATH").as_deref(),
-        env::var_os("HOME").as_deref(),
-    );
-    find_program_in_path(program, &path).is_some()
-}
-
-/// Cancel an in-flight run (Julia or build) by id, killing its process. Idempotent.
+/// Cancel an in-flight Julia run by id, killing its whole process group.
+/// Idempotent. The kill happens while the `runs` lock is held so it is
+/// serialized against the reaper thread's removal of the same entry: whichever
+/// thread removes the id first owns it, and the other observes `None` and does
+/// nothing — only one `kill_pid` can ever fire for a given run. Killing the
+/// process group (negative pid) further bounds blast radius if the leader pid
+/// were ever reused before the entry is dropped.
 #[tauri::command]
 pub fn run_cancel(state: State<RunManager>, id: String) -> Result<(), String> {
-    let pid = state.runs.lock().unwrap().remove(&id);
-    if let Some(pid) = pid {
+    let mut runs = state.runs.lock().unwrap();
+    if let Some(pid) = runs.remove(&id) {
         kill_pid(pid);
     }
     Ok(())

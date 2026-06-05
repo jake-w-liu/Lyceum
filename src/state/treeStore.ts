@@ -39,6 +39,11 @@ export interface TreeActions {
   refresh: () => void;
   /** Mark all given paths expanded (used by reveal for each ancestor dir). */
   expandPaths: (paths: string[]) => void;
+  /** Rewrite expanded keys after a rename/move so expanded dirs stay expanded
+   * (and stale keys for the old paths don't leak). */
+  remapExpanded: (moves: Array<{ from: string; to: string }>) => void;
+  /** Drop expanded entries for deleted paths and their descendants. */
+  dropExpanded: (paths: string[]) => void;
   /** Replace the Explorer selection. */
   setSelection: (paths: string[], anchorPath?: string | null) => void;
   /** Select exactly one path and use it as the range anchor. */
@@ -98,6 +103,41 @@ export const useTreeStore = create<TreeState>()((set, get) => ({
       const expanded = { ...s.expanded };
       for (const path of paths) {
         expanded[path] = true;
+      }
+      return { expanded };
+    }),
+  remapExpanded: (moves) =>
+    set((s) => {
+      if (moves.length === 0) return {};
+      const remap = (key: string): string => {
+        for (const move of moves) {
+          if (key === move.from) return move.to;
+          const sep = move.from.includes("\\") ? "\\" : "/";
+          const prefix = move.from.endsWith(sep) ? move.from : `${move.from}${sep}`;
+          if (key.startsWith(prefix)) {
+            return `${move.to}${key.slice(move.from.length)}`;
+          }
+        }
+        return key;
+      };
+      const expanded: Record<string, boolean> = {};
+      for (const [key, value] of Object.entries(s.expanded)) {
+        expanded[remap(key)] = value;
+      }
+      return { expanded };
+    }),
+  dropExpanded: (paths) =>
+    set((s) => {
+      const expanded = { ...s.expanded };
+      for (const key of Object.keys(expanded)) {
+        for (const path of paths) {
+          const sep = path.includes("\\") ? "\\" : "/";
+          const prefix = path.endsWith(sep) ? path : `${path}${sep}`;
+          if (key === path || key.startsWith(prefix)) {
+            delete expanded[key];
+            break;
+          }
+        }
       }
       return { expanded };
     }),

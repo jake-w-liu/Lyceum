@@ -3,7 +3,6 @@
 // preview store so reopening a PDF restores its last view.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { WheelEvent } from "react";
 import type {
   PDFDocumentProxy,
   PDFPageProxy,
@@ -198,12 +197,21 @@ export default function PdfViewer({ path }: { path: string }) {
     }
   };
 
-  const onWheel = (event: WheelEvent<HTMLDivElement>) => {
-    if (!event.ctrlKey && !event.metaKey) return;
-    event.preventDefault();
-    event.stopPropagation();
-    setZoom((current) => zoomFromWheel(current, event.deltaY));
-  };
+  // Ctrl/Cmd + wheel = zoom. React attaches `onWheel` as a passive listener, so
+  // preventDefault() there is a no-op (the page zooms/scrolls instead). Attach a
+  // non-passive native listener so the gesture is captured by the viewer.
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const handler = (event: WheelEvent) => {
+      if (!event.ctrlKey && !event.metaKey) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setZoom((current) => zoomFromWheel(current, event.deltaY));
+    };
+    el.addEventListener("wheel", handler, { passive: false });
+    return () => el.removeEventListener("wheel", handler);
+  }, []);
 
   if (loadError) {
     return (
@@ -259,7 +267,7 @@ export default function PdfViewer({ path }: { path: string }) {
           Failed to render page: {renderError}
         </div>
       )}
-      <div ref={wrapRef} className="pdf-canvas-wrap" onWheel={onWheel}>
+      <div ref={wrapRef} className="pdf-canvas-wrap">
         <div ref={pageLayerRef} className="pdf-page-layer">
           <canvas ref={canvasRef} className="pdf-canvas" />
           <div

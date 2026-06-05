@@ -6,7 +6,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useSettingsStore } from "../state/settingsStore";
 import { useWorkspaceStore } from "../state/workspaceStore";
-import { useOutputStore } from "../state/outputStore";
+import {
+  appendOutputBuffered,
+  flushOutputBuffer,
+  useOutputStore,
+} from "../state/outputStore";
 import { useLayoutStore } from "../state/layoutStore";
 import { getActiveDoc, isTextDoc, useEditorStore } from "../state/editorStore";
 import { useTreeStore } from "../state/treeStore";
@@ -87,18 +91,17 @@ export async function runLatexBuild(
   const offData = await listen<{ stream: string; line: string }>(
     `build:output:${id}`,
     (event) =>
-      useOutputStore
-        .getState()
-        .append(
-          event.payload.stream === "stderr"
-            ? `[stderr] ${event.payload.line}`
-            : event.payload.line,
-        ),
+      appendOutputBuffered(
+        event.payload.stream === "stderr"
+          ? `[stderr] ${event.payload.line}`
+          : event.payload.line,
+      ),
   );
   const handleExit = (exitCode: number) => {
     if (handledExit) return;
     handledExit = true;
     const store = useOutputStore.getState();
+    flushOutputBuffer(); // ensure streamed lines land before the exit line
     store.append(`[build exited with code ${exitCode}]`);
     const missingToolMessage = missingBuildToolMessage(
       commandForMessages,

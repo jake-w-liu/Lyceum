@@ -4,7 +4,8 @@
 // `cargo test` (no Tauri runtime needed). The `#[tauri::command]` wrapper is
 // thin. Skipped directories (.git, node_modules, etc.) are never descended into.
 
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 /// Directory names that are skipped entirely (not descended into).
 const SKIP_DIRS: [&str; 5] = [".git", "node_modules", "target", "dist", ".vite"];
@@ -18,7 +19,13 @@ pub fn list_files(root: &Path, max: usize) -> Result<Vec<String>, String> {
     }
 
     let mut files: Vec<String> = Vec::new();
-    let mut stack: Vec<std::path::PathBuf> = vec![root.to_path_buf()];
+    let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
+    // Canonical paths of directories already walked. Guards against descending
+    // the same tree twice and against symlink cycles. Seeded with `root`.
+    let mut visited: HashSet<PathBuf> = HashSet::new();
+    if let Ok(canon) = root.canonicalize() {
+        visited.insert(canon);
+    }
 
     while let Some(dir) = stack.pop() {
         if files.len() >= max {
@@ -37,17 +44,39 @@ pub fn list_files(root: &Path, max: usize) -> Result<Vec<String>, String> {
             let Ok(file_type) = entry.file_type() else {
                 continue;
             };
-            if file_type.is_dir() {
+            let path = entry.path();
+            // Resolve the REAL kind: file_type() reports a symlink as a symlink
+            // (is_dir() == false), so a symlinked directory would otherwise be
+            // recorded as a bogus "file" that fails to open. Follow the link.
+            let is_dir = if file_type.is_symlink() {
+                match std::fs::metadata(&path) {
+                    Ok(meta) => meta.is_dir(),
+                    Err(_) => continue, // broken symlink — skip
+                }
+            } else {
+                file_type.is_dir()
+            };
+            if is_dir {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if SKIP_DIRS.contains(&name.as_str()) {
                     continue;
                 }
-                stack.push(entry.path());
+                // Canonicalize before descending so a tree reachable via a
+                // symlink (or two paths) is walked at most once.
+                match path.canonicalize() {
+                    Ok(canon) => {
+                        if !visited.insert(canon) {
+                            continue;
+                        }
+                    }
+                    Err(_) => continue,
+                }
+                stack.push(path);
             } else {
                 if files.len() >= max {
                     break;
                 }
-                files.push(entry.path().to_string_lossy().to_string());
+                files.push(path.to_string_lossy().to_string());
             }
         }
     }
@@ -118,6 +147,43 @@ mod tests {
 
         let files = list_files(root, 3).expect("walk");
         assert_eq!(files.len(), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_directory_is_descended_not_listed_as_a_file() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let real = root.join("real");
+        fs::create_dir(&real).unwrap();
+        fs::write(real.join("inner.txt"), b"x").unwrap();
+        // A symlink to the real dir must not appear as a file; its contents
+        // should be reachable, and the file must not be double-listed.
+        std::os::unix::fs::symlink(&real, root.join("link")).unwrap();
+
+        let files = list_files(root, 5000).expect("walk");
+
+        // The symlink path itself is never recorded as a file entry.
+        assert!(!files.iter().any(|f| f.ends_with("/link")));
+        // The file under the real dir is found exactly once.
+        let inner: Vec<_> = files.iter().filter(|f| f.ends_with("inner.txt")).collect();
+        assert_eq!(inner.len(), 1, "inner.txt should be listed exactly once");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_cycle_does_not_hang() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let sub = root.join("sub");
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("f.txt"), b"x").unwrap();
+        // sub/loop -> root, forming a cycle. The visited-canonical guard must
+        // terminate the walk rather than recursing forever.
+        std::os::unix::fs::symlink(root, sub.join("loop")).unwrap();
+
+        let files = list_files(root, 5000).expect("walk terminates");
+        assert!(files.iter().any(|f| f.ends_with("f.txt")));
     }
 
     #[cfg(unix)]

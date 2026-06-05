@@ -204,6 +204,63 @@ kbd {
   text-overflow: ellipsis;
 }
 
+/* Git decorations (VS Code-style): tint the filename and show a status badge.
+ * The class lives on .tree-label so its color wins over the selected-row color,
+ * matching VS Code (decorations persist while the row is selected). */
+.tree-label.git-modified,
+.tree-label.git-renamed {
+  color: var(--git-modified);
+}
+.tree-label.git-added {
+  color: var(--git-added);
+}
+.tree-label.git-untracked {
+  color: var(--git-untracked);
+}
+.tree-label.git-deleted {
+  color: var(--git-deleted);
+  text-decoration: line-through;
+}
+.tree-label.git-conflict {
+  color: var(--git-conflict);
+}
+.tree-label.git-ignored {
+  color: var(--git-ignored);
+}
+
+/* Right-aligned status badge (letter for files, dot for folders). Hidden on
+ * hover so the per-row create/rename/delete actions can take its place. */
+.git-badge {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  padding-right: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+}
+.tree-row:hover .git-badge {
+  display: none;
+}
+.git-badge.git-modified,
+.git-badge.git-renamed {
+  color: var(--git-modified);
+}
+.git-badge.git-added {
+  color: var(--git-added);
+}
+.git-badge.git-untracked {
+  color: var(--git-untracked);
+}
+.git-badge.git-deleted {
+  color: var(--git-deleted);
+}
+.git-badge.git-conflict {
+  color: var(--git-conflict);
+}
+
 .tree-loading,
 .tree-empty,
 .tree-error {

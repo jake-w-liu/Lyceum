@@ -30,13 +30,18 @@ function buildContext(): KeyContext {
 export function useCommandKeybindings(): void {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      const ctx = buildContext();
       const id = matchKeybinding(
         e,
-        buildContext(),
+        ctx,
         isMac(),
         useKeymapStore.getState().keymap,
       );
       if (!id) return;
+      // While a modal (Command Palette / Quick Open) owns the keyboard, only let
+      // the dismiss command through — otherwise chords like Cmd+S / Cmd+W /
+      // Cmd+Enter fire editor commands while the user is typing in the modal.
+      if (ctx.modalOpen && id !== "workbench.dismiss") return;
       e.preventDefault();
       void commandRegistry.execute(id);
     };

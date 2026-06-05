@@ -31,6 +31,11 @@ export interface TerminalViewProps {
   startupCommand?: string;
 }
 
+// Monotonic per-mount token. Each mount talks to a backend PTY under a unique id
+// so a previous mount's cleanup (closePty) can never tear down the PTY belonging
+// to a fresh remount that reused the same React-level terminal id.
+let terminalMountSeq = 0;
+
 export function TerminalView({
   id,
   cwd,
@@ -64,6 +69,19 @@ export function TerminalView({
       // host not laid out yet; ResizeObserver will fit shortly.
     }
 
+    // Unique backend PTY id for this mount (see terminalMountSeq).
+    const ptyId = `${id}#${(terminalMountSeq += 1)}`;
+    let disposed = false;
+    // Buffer keystrokes typed before the PTY exists, then flush on ready — so
+    // the first characters a user types into a brand-new terminal aren't dropped
+    // (and don't reject with "no such terminal").
+    let ready = false;
+    const pending: string[] = [];
+    const sendInput = (data: string) => {
+      if (ready) void writePty(ptyId, data);
+      else pending.push(data);
+    };
+
     // Clipboard: copy the selection (Cmd/Ctrl+C with a selection), paste
     // (Cmd/Ctrl+V). Ctrl+C with no selection still reaches the PTY (interrupt).
     // Backspace is sent explicitly because some WebView/browser key events can
@@ -73,7 +91,7 @@ export function TerminalView({
       if (!override) return true;
       switch (override.type) {
         case "send":
-          void writePty(id, override.data);
+          sendInput(override.data);
           break;
         case "copy":
           navigator.clipboard?.writeText(term.getSelection()).catch(() => {});
@@ -82,7 +100,7 @@ export function TerminalView({
           navigator.clipboard
             ?.readText()
             .then((text) => {
-              if (text) void writePty(id, text);
+              if (text) sendInput(text);
             })
             .catch(() => {});
           break;
@@ -90,9 +108,8 @@ export function TerminalView({
       return false;
     });
 
-    const dataDisp = term.onData((data) => void writePty(id, data));
+    const dataDisp = term.onData(sendInput);
 
-    let disposed = false;
     const unlistens: UnlistenLike[] = [];
     const settings = useSettingsStore.getState().settings;
     const resolvedCwd =
@@ -107,8 +124,8 @@ export function TerminalView({
         // Register listeners BEFORE creating the PTY: the Rust reader thread
         // starts emitting output immediately, so attaching after createPty
         // would drop the initial shell prompt/banner.
-        const offData = await onPtyData(id, (bytes) => term.write(bytes));
-        const offExit = await onPtyExit(id, () =>
+        const offData = await onPtyData(ptyId, (bytes) => term.write(bytes));
+        const offExit = await onPtyExit(ptyId, () =>
           term.write("\r\n\x1b[90m[process exited]\x1b[0m\r\n"),
         );
         if (disposed) {
@@ -117,13 +134,23 @@ export function TerminalView({
           return;
         }
         unlistens.push(offData, offExit);
-        await createPty(id, {
+        await createPty(ptyId, {
           shell: settings.shellPath || null,
           cwd: resolvedCwd,
           cols: term.cols,
           rows: term.rows,
         });
-        if (startupCommand) void writePty(id, startupCommand);
+        // The view may have unmounted while the PTY was being created; close the
+        // just-created PTY instead of leaking the shell process.
+        if (disposed) {
+          void closePty(ptyId);
+          return;
+        }
+        // Flush any keystrokes buffered before the PTY existed.
+        ready = true;
+        for (const chunk of pending) void writePty(ptyId, chunk);
+        pending.length = 0;
+        if (startupCommand) void writePty(ptyId, startupCommand);
       } catch (e) {
         term.write(`\r\nfailed to start terminal: ${String(e)}\r\n`);
       }
@@ -140,7 +167,7 @@ export function TerminalView({
         if (term.cols !== lastCols || term.rows !== lastRows) {
           lastCols = term.cols;
           lastRows = term.rows;
-          void resizePty(id, term.cols, term.rows);
+          void resizePty(ptyId, term.cols, term.rows);
         }
       } catch {
         // ignore transient layout errors
@@ -153,7 +180,7 @@ export function TerminalView({
       observer.disconnect();
       dataDisp.dispose();
       unlistens.forEach((off) => off());
-      void closePty(id);
+      void closePty(ptyId);
       term.dispose();
       termRef.current = null;
       fitRef.current = null;

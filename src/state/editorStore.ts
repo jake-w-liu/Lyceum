@@ -8,6 +8,7 @@
 import { create } from "zustand";
 
 import { baseName } from "./workspaceStore";
+import { languageForPath } from "../lib/language";
 
 export type EditorDocKind = "text" | "pdf" | "image";
 
@@ -35,6 +36,17 @@ export function isDirty(doc: EditorDoc): boolean {
 /** True when the tab is backed by an editable Monaco text model. */
 export function isTextDoc(doc: EditorDoc): boolean {
   return doc.kind === "text";
+}
+
+/**
+ * Guard closing a document that has unsaved changes. Returns true when the doc
+ * is clean/absent or when the user confirms discarding; false to cancel the
+ * close. Centralized so the tab bar and Cmd+W keybinding behave identically.
+ */
+export function confirmDiscard(path: string): boolean {
+  const doc = useEditorStore.getState().docs.find((d) => d.path === path);
+  if (!doc || !isDirty(doc)) return true;
+  return confirm(`Discard unsaved changes to ${doc.name}?`);
 }
 
 /** The doc whose path matches activePath, or null when none is active. */
@@ -66,6 +78,23 @@ export interface EditorActions {
 }
 
 export type EditorState = EditorData & EditorActions;
+
+/** A single path move applied by `moveDocPaths`. */
+export type DocPathMove = { from: string; to: string };
+type DocPathMoveListener = (moves: DocPathMove[]) => void;
+const docPathMoveListeners = new Set<DocPathMoveListener>();
+
+/**
+ * Subscribe to document path moves (rename/move). The Monaco host uses this to
+ * re-key its text models in place so a renamed file keeps its undo/redo history
+ * and cursor/scroll position instead of being disposed and recreated.
+ */
+export function subscribeDocPathMoves(fn: DocPathMoveListener): () => void {
+  docPathMoveListeners.add(fn);
+  return () => {
+    docPathMoveListeners.delete(fn);
+  };
+}
 
 export const initialEditorData: EditorData = {
   docs: [],
@@ -125,9 +154,9 @@ export const useEditorStore = create<EditorState>()((set) => ({
       ),
     })),
 
-  moveDocPaths: (moves) =>
+  moveDocPaths: (moves) => {
+    if (moves.length === 0) return;
     set((s) => {
-      if (moves.length === 0) return {};
       const movedPath = (path: string): string => {
         for (const move of moves) {
           if (path === move.from) return move.to;
@@ -141,11 +170,20 @@ export const useEditorStore = create<EditorState>()((set) => ({
       };
       const docs = s.docs.map((doc) => {
         const path = movedPath(doc.path);
-        return path === doc.path ? doc : { ...doc, path, name: baseName(path) };
+        if (path === doc.path) return doc;
+        // A rename can change the extension, so recompute the editor language
+        // for text docs (e.g. notes.txt -> notes.md should switch to markdown).
+        const language =
+          doc.kind === "text" ? languageForPath(path) : doc.language;
+        return { ...doc, path, name: baseName(path), language };
       });
       const activePath = s.activePath ? movedPath(s.activePath) : s.activePath;
       return { docs, activePath };
-    }),
+    });
+    // Notify listeners (Monaco host) so models can be re-keyed in place,
+    // preserving undo history and cursor/scroll across a rename/move.
+    docPathMoveListeners.forEach((fn) => fn(moves));
+  },
 
   setSelection: (text) => set({ selection: text }),
 }));

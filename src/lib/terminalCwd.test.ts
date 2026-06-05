@@ -28,6 +28,12 @@ describe("resolveTerminalCwd", () => {
     ).toBe("C:\\w\\src");
   });
 
+  it("returns the drive root for a file directly at a Windows drive root", () => {
+    expect(resolveTerminalCwd("currentFileDir", "C:\\w", "C:\\a.txt")).toBe(
+      "C:\\",
+    );
+  });
+
   it("returns root for a file at the filesystem root", () => {
     expect(resolveTerminalCwd("currentFileDir", "/w", "/foo.jl")).toBe("/");
   });

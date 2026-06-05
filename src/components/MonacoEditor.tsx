@@ -17,7 +17,7 @@ import JsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
 import CssWorker from "monaco-editor/esm/vs/language/css/css.worker?worker";
 import HtmlWorker from "monaco-editor/esm/vs/language/html/html.worker?worker";
 import TsWorker from "monaco-editor/esm/vs/language/typescript/ts.worker?worker";
-import { isTextDoc, useEditorStore } from "../state/editorStore";
+import { isTextDoc, subscribeDocPathMoves, useEditorStore } from "../state/editorStore";
 import { useWorkspaceStore } from "../state/workspaceStore";
 import { useSettingsStore, type Settings } from "../state/settingsStore";
 import { monacoThemeFor, useThemeStore } from "../state/themeStore";
@@ -179,6 +179,27 @@ export default function MonacoEditor() {
         );
     });
 
+    // Re-key models when a file is renamed/moved so the open tab keeps its
+    // existing model (undo/redo history, cursor, scroll) instead of disposing it
+    // and creating a fresh one for the new path.
+    const unsubMoves = subscribeDocPathMoves((moves) => {
+      const models = modelsRef.current;
+      for (const { from, to } of moves) {
+        const sep = from.includes("\\") ? "\\" : "/";
+        const prefix = from.endsWith(sep) ? from : `${from}${sep}`;
+        for (const [path, model] of [...models]) {
+          let next: string | null = null;
+          if (path === from) next = to;
+          else if (path.startsWith(prefix)) next = `${to}${path.slice(from.length)}`;
+          if (next && next !== path) {
+            models.delete(path);
+            models.set(next, model);
+            if (currentPathRef.current === path) currentPathRef.current = next;
+          }
+        }
+      }
+    });
+
     const models = modelsRef.current;
     const startedLangs = startedLangsRef.current;
     const timers = lspChangeTimers.current;
@@ -186,6 +207,7 @@ export default function MonacoEditor() {
     return () => {
       unsubTheme();
       unsubSettings();
+      unsubMoves();
       changeSub.dispose();
       selSub.dispose();
       setActiveEditor(null);
@@ -256,6 +278,13 @@ export default function MonacoEditor() {
     }
     if (editor.getModel() !== model) editor.setModel(model);
     currentPathRef.current = activePath;
+    // Sync the selection store to the newly-bound model so a stale selection
+    // from the previous tab doesn't linger (run-selection would otherwise act
+    // on text that is no longer visible).
+    const selection = editor.getSelection();
+    useEditorStore
+      .getState()
+      .setSelection(selection ? model.getValueInRange(selection) : "");
   }, [activePath, openPaths, flushLspChange]);
 
   // Dispose models for documents that were closed (runs only when the open set

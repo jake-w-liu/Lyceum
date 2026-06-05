@@ -21,7 +21,11 @@ import {
 } from "./latexBuild";
 import { initialEditorData, useEditorStore } from "../state/editorStore";
 import { initialLayoutData, useLayoutStore } from "../state/layoutStore";
-import { initialOutputData, useOutputStore } from "../state/outputStore";
+import {
+  flushOutputBuffer,
+  initialOutputData,
+  useOutputStore,
+} from "../state/outputStore";
 import { initialSettingsData, useSettingsStore } from "../state/settingsStore";
 import { initialTreeData, useTreeStore } from "../state/treeStore";
 import {
@@ -119,6 +123,8 @@ describe("runLatexBuild", () => {
     handlers.get(outputKey!)!({
       payload: { stream: "stdout", line: "[latex] removed stale /w/main.pdf" },
     });
+    // Streamed output is batched (rAF); flush so we can assert it synchronously.
+    flushOutputBuffer();
     expect(useOutputStore.getState().lines).toContain(
       "[latex] removed stale /w/main.pdf",
     );

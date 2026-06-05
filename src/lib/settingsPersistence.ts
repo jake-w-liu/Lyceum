@@ -121,4 +121,15 @@ export function initSettingsPersistence(): void {
   useWorkspaceStore.subscribe((s, prev) => {
     if (s.rootPath !== prev.rootPath) void saveLastWorkspace(s.rootPath);
   });
+  // Flush a pending debounced save when the window is closing, so a settings
+  // change made within the debounce window isn't lost on quit.
+  if (typeof window !== "undefined") {
+    window.addEventListener("beforeunload", () => {
+      if (saveTimer) {
+        clearTimeout(saveTimer);
+        saveTimer = null;
+        void saveSettings();
+      }
+    });
+  }
 }

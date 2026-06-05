@@ -202,22 +202,37 @@ fn move_paths_to_trash_impl(root: &Path, paths: Vec<String>) -> Result<TrashBatc
     std::fs::create_dir_all(&batch_dir).map_err(|e| format!("{}: {e}", batch_dir.display()))?;
 
     let mut items = Vec::with_capacity(targets.len());
+    // Completed moves (trashed_dest, original_source); on any failure these are
+    // rolled back so a partial multi-file delete cannot silently lose files
+    // into the hidden trash dir with no Undo affordance.
+    let mut done: Vec<(PathBuf, PathBuf)> = Vec::new();
     for target in targets {
-        let rel = target
-            .path
-            .strip_prefix(&root)
-            .map_err(|e| format!("{}: {e}", target.path.display()))?;
+        let rel = match target.path.strip_prefix(&root) {
+            Ok(rel) => rel,
+            Err(e) => {
+                rollback_moves(&done);
+                let _ = std::fs::remove_dir_all(&batch_dir);
+                return Err(format!("{}: {e}", target.path.display()));
+            }
+        };
         let destination = batch_dir.join(rel);
         if let Some(parent) = destination.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                rollback_moves(&done);
+                let _ = std::fs::remove_dir_all(&batch_dir);
+                return Err(format!("{}: {e}", parent.display()));
+            }
         }
-        std::fs::rename(&target.path, &destination).map_err(|e| {
-            format!(
+        if let Err(e) = move_entry(&target.path, &destination) {
+            rollback_moves(&done);
+            let _ = std::fs::remove_dir_all(&batch_dir);
+            return Err(format!(
                 "{} -> {}: {e}",
                 target.path.display(),
                 destination.display()
-            )
-        })?;
+            ));
+        }
+        done.push((destination.clone(), target.path.clone()));
         items.push(TrashItemDto {
             original_path: target.path.to_string_lossy().to_string(),
             trashed_path: destination.to_string_lossy().to_string(),
@@ -275,9 +290,13 @@ fn move_paths_impl(
     }
 
     let mut moved = Vec::with_capacity(planned.len());
+    let mut done: Vec<(PathBuf, PathBuf)> = Vec::new();
     for (from, to, is_dir) in planned {
-        std::fs::rename(&from, &to)
-            .map_err(|e| format!("{} -> {}: {e}", from.display(), to.display()))?;
+        if let Err(e) = move_entry(&from, &to) {
+            rollback_moves(&done);
+            return Err(format!("{} -> {}: {e}", from.display(), to.display()));
+        }
+        done.push((to.clone(), from.clone()));
         moved.push(MovedPathDto {
             from: from.to_string_lossy().to_string(),
             to: to.to_string_lossy().to_string(),
@@ -293,6 +312,12 @@ fn restore_trash_batch_impl(root: &Path, items: Vec<TrashItemDto>) -> Result<(),
         let original = PathBuf::from(&item.original_path);
         let trashed = PathBuf::from(&item.trashed_path);
         validate_restore_pair(&root, &original, &trashed)?;
+        if !path_entry_exists(&trashed) {
+            return Err(format!(
+                "restore source no longer exists: {}",
+                trashed.display()
+            ));
+        }
         if path_entry_exists(&original) {
             return Err(format!(
                 "restore destination already exists: {}",
@@ -300,14 +325,21 @@ fn restore_trash_batch_impl(root: &Path, items: Vec<TrashItemDto>) -> Result<(),
             ));
         }
     }
+    let mut done: Vec<(PathBuf, PathBuf)> = Vec::new();
     for item in &items {
         let original = PathBuf::from(&item.original_path);
         let trashed = PathBuf::from(&item.trashed_path);
         if let Some(parent) = original.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                rollback_moves(&done);
+                return Err(format!("{}: {e}", parent.display()));
+            }
         }
-        std::fs::rename(&trashed, &original)
-            .map_err(|e| format!("{} -> {}: {e}", trashed.display(), original.display()))?;
+        if let Err(e) = move_entry(&trashed, &original) {
+            rollback_moves(&done);
+            return Err(format!("{} -> {}: {e}", trashed.display(), original.display()));
+        }
+        done.push((original.clone(), trashed.clone()));
         cleanup_empty_trash_ancestors(&root, &trashed);
     }
     Ok(())
@@ -332,14 +364,21 @@ fn redo_trash_batch_impl(root: &Path, items: Vec<TrashItemDto>) -> Result<(), St
             ));
         }
     }
+    let mut done: Vec<(PathBuf, PathBuf)> = Vec::new();
     for item in &items {
         let original = PathBuf::from(&item.original_path);
         let trashed = PathBuf::from(&item.trashed_path);
         if let Some(parent) = trashed.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                rollback_moves(&done);
+                return Err(format!("{}: {e}", parent.display()));
+            }
         }
-        std::fs::rename(&original, &trashed)
-            .map_err(|e| format!("{} -> {}: {e}", original.display(), trashed.display()))?;
+        if let Err(e) = move_entry(&original, &trashed) {
+            rollback_moves(&done);
+            return Err(format!("{} -> {}: {e}", original.display(), trashed.display()));
+        }
+        done.push((trashed.clone(), original.clone()));
     }
     Ok(())
 }
@@ -356,6 +395,102 @@ fn canonical_dir(path: &Path) -> Result<PathBuf, String> {
 
 fn path_entry_exists(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok()
+}
+
+/// True when an io error is a cross-filesystem rename (EXDEV on unix,
+/// ERROR_NOT_SAME_DEVICE on Windows). Such renames must fall back to copy+delete.
+fn is_cross_device(e: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        e.raw_os_error() == Some(18)
+    }
+    #[cfg(windows)]
+    {
+        e.raw_os_error() == Some(17)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = e;
+        false
+    }
+}
+
+/// Move `from` to `to`, preferring an atomic rename and falling back to a
+/// recursive copy + delete when the two live on different filesystems (a
+/// workspace that spans a mount point). Symlinks are recreated as symlinks
+/// (the link itself moves, never its target), matching the rename semantics the
+/// rest of the module relies on.
+fn move_entry(from: &Path, to: &Path) -> std::io::Result<()> {
+    match std::fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(e) if is_cross_device(&e) => {
+            copy_recursive(from, to)?;
+            remove_entry(from)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn copy_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
+    let meta = std::fs::symlink_metadata(from)?;
+    let ft = meta.file_type();
+    if ft.is_symlink() {
+        let target = std::fs::read_link(from)?;
+        symlink_to(&target, to)
+    } else if ft.is_dir() {
+        std::fs::create_dir_all(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            copy_recursive(&entry.path(), &to.join(entry.file_name()))?;
+        }
+        Ok(())
+    } else {
+        std::fs::copy(from, to).map(|_| ())
+    }
+}
+
+fn remove_entry(path: &Path) -> std::io::Result<()> {
+    let meta = std::fs::symlink_metadata(path)?;
+    if meta.file_type().is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
+}
+
+#[cfg(unix)]
+fn symlink_to(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn symlink_to(target: &Path, link: &Path) -> std::io::Result<()> {
+    // Pick the right Windows symlink kind from the resolved target.
+    if std::fs::metadata(target).map(|m| m.is_dir()).unwrap_or(false) {
+        std::os::windows::fs::symlink_dir(target, link)
+    } else {
+        std::os::windows::fs::symlink_file(target, link)
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn symlink_to(_target: &Path, _link: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "symlinks unsupported on this platform",
+    ))
+}
+
+/// Reverse a sequence of completed moves `(dest, source)` by moving each
+/// `dest` back to `source` (newest first). Best-effort cleanup used to keep
+/// trash/restore/redo all-or-nothing on a mid-batch failure.
+fn rollback_moves(done: &[(PathBuf, PathBuf)]) {
+    for (dest, source) in done.iter().rev() {
+        if let Some(parent) = source.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = move_entry(dest, source);
+    }
 }
 
 fn normalize_delete_targets(

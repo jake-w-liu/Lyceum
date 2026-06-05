@@ -139,6 +139,10 @@ export function attachMonacoLsp(monaco: typeof Monaco): void {
     });
 
     monaco.languages.registerCompletionItemProvider(lang, {
+      // Providers register once at startup before any session exists, so declare
+      // a sensible default trigger set (member access, symbols/modules, macros)
+      // — otherwise '.'/':' never auto-open the completion widget.
+      triggerCharacters: [".", ":", ">", "@"],
       async provideCompletionItems(model, position) {
         const rpc = rpcWithCap(lang, "completionProvider");
         if (!rpc) return { suggestions: [] };

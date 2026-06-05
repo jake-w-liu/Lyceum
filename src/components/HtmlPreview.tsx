@@ -2,17 +2,35 @@
 // the iframe so ordinary HTML previews can run, but `allow-same-origin` is
 // intentionally omitted so project HTML does not gain app/WebView powers.
 
+import { useEffect, useMemo, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useEditorStore } from "../state/editorStore";
 import { baseName, useWorkspaceStore } from "../state/workspaceStore";
 
 const HTML_PREVIEW_SANDBOX = "allow-scripts allow-forms";
+const RENDER_DEBOUNCE_MS = 150;
 
 export function HtmlPreview({ path }: { path: string }) {
   const content = useEditorStore(
     (s) => s.docs.find((d) => d.path === path)?.content,
   );
   const rootPath = useWorkspaceStore((s) => s.rootPath);
+
+  // Debounce the content + memoize the built document so a burst of typing
+  // doesn't re-parse the HTML and fully reload the iframe on every keystroke.
+  const [debounced, setDebounced] = useState(content);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(content), RENDER_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [content]);
+
+  const srcDoc = useMemo(
+    () =>
+      debounced === undefined
+        ? ""
+        : buildHtmlPreviewDocument(debounced, path, rootPath),
+    [debounced, path, rootPath],
+  );
 
   if (content === undefined) {
     return (
@@ -27,7 +45,7 @@ export function HtmlPreview({ path }: { path: string }) {
       className="html-preview-frame"
       title={`${baseName(path)} preview`}
       sandbox={HTML_PREVIEW_SANDBOX}
-      srcDoc={buildHtmlPreviewDocument(content, path, rootPath)}
+      srcDoc={srcDoc}
     />
   );
 }

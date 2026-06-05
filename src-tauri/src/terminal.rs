@@ -27,6 +27,18 @@ pub struct TerminalManager {
     sessions: Mutex<HashMap<String, Session>>,
 }
 
+impl TerminalManager {
+    /// Kill every running terminal session. Called on app exit so no shell
+    /// subprocess is orphaned when Lyceum quits.
+    pub fn shutdown_all(&self) {
+        if let Ok(mut sessions) = self.sessions.lock() {
+            for (_id, mut session) in sessions.drain() {
+                let _ = session.killer.kill();
+            }
+        }
+    }
+}
+
 /// Resolve the shell to spawn: an explicit override, else `$SHELL`, else a
 /// platform default. Pure (env passed in) so it is unit-testable.
 pub fn resolve_shell(explicit: Option<String>, env_shell: Option<String>) -> String {
@@ -106,9 +118,26 @@ pub fn terminal_create(
     let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     drop(pair.slave);
 
-    let killer = child.clone_killer();
-    let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
-    let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+    // Acquire the killer immediately so any failure between here and inserting
+    // the session can still terminate (and reap) the just-spawned shell instead
+    // of orphaning it.
+    let mut killer = child.clone_killer();
+    let mut reader = match pair.master.try_clone_reader() {
+        Ok(reader) => reader,
+        Err(e) => {
+            let _ = killer.kill();
+            let _ = child.wait();
+            return Err(e.to_string());
+        }
+    };
+    let writer = match pair.master.take_writer() {
+        Ok(writer) => writer,
+        Err(e) => {
+            let _ = killer.kill();
+            let _ = child.wait();
+            return Err(e.to_string());
+        }
+    };
 
     // Reader thread: stream output, then emit an exit event when the shell ends.
     let app_for_thread = app.clone();

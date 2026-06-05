@@ -28,6 +28,33 @@ export interface LspSession {
 
 const sessions = new Map<string, LspSession>();
 
+// Monotonic token making every spawned server's id unique, even across a
+// stop/restart of the same language. Without this, a restarted server reuses the
+// id `lsp-<lang>` and the previous instance's in-flight `lsp:exit:<id>` event
+// would tear down the fresh replacement (and the Rust side would emit a spurious
+// exit on the shared channel). A unique id per spawn isolates both event streams.
+let lspInstanceSeq = 0;
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("timeout")), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /** Diagnostics handler set by the Monaco integration (decouples client<->monaco). */
 let diagnosticsSink:
   | ((uri: string, diagnostics: unknown[]) => void)
@@ -53,7 +80,7 @@ export async function ensureServer(
   const config = serverForLanguage(languageId);
   if (!config) return null;
 
-  const id = `lsp-${languageId}`;
+  const id = `lsp-${languageId}-${(lspInstanceSeq += 1)}`;
   const { cmd, args } = config.build({ juliaPath });
   useLspStatusStore.getState().setStatus(languageId, "starting");
 
@@ -192,13 +219,28 @@ export async function didClose(session: LspSession, uri: string): Promise<void> 
   session.rpc.notify("textDocument/didClose", { textDocument: { uri } });
 }
 
-/** Stop and dispose a language server (used for shutdown/restart). */
+/** Stop and dispose a language server (used for shutdown/restart). Attempts the
+ * LSP shutdown/exit handshake so the server can clean up, then force-kills. */
 export async function stopServer(languageId: string): Promise<void> {
   const session = sessions.get(languageId);
   if (!session) return;
-  session.unlistens.forEach((off) => off());
-  session.rpc.dispose("stopped");
+  // Drop from the registry first so a late exit event can't act on it and a
+  // concurrent ensureServer starts a fresh instance under a new id.
   sessions.delete(languageId);
   useLspStatusStore.getState().setStatus(languageId, "off");
+
+  // Best-effort graceful shutdown per the spec (shutdown request, then exit
+  // notification) before the force-kill. The message listener stays attached
+  // across the round-trip so the shutdown response can be routed.
+  try {
+    await withTimeout(session.rpc.request("shutdown"), 1500);
+    session.rpc.notify("exit");
+    await delay(150);
+  } catch {
+    // Server unready or unresponsive — fall through to the force-kill below.
+  }
+
+  session.unlistens.forEach((off) => off());
+  session.rpc.dispose("stopped");
   await lspStop(session.id);
 }

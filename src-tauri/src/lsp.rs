@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tauri::{AppHandle, Emitter, State};
 
@@ -37,7 +37,20 @@ impl LspDecoder {
     /// Pop the next complete frame's body, or `None` if one is not yet buffered.
     pub fn next_message(&mut self) -> Option<String> {
         let sep = b"\r\n\r\n";
-        let header_end = self.buf.windows(sep.len()).position(|w| w == sep)?;
+        let header_end = match self.buf.windows(sep.len()).position(|w| w == sep) {
+            Some(i) => i,
+            None => {
+                // No header terminator yet. Bound how much we buffer while
+                // scanning so a misbehaving server that never emits a valid
+                // header block cannot grow the buffer without limit. 64 KiB is
+                // far above any legitimate LSP header block.
+                const MAX_HEADER: usize = 64 * 1024;
+                if self.buf.len() > MAX_HEADER {
+                    self.buf.clear();
+                }
+                return None;
+            }
+        };
         let headers = String::from_utf8_lossy(&self.buf[..header_end]);
 
         let content_length = match headers.lines().find_map(|line| {
@@ -80,13 +93,29 @@ impl LspDecoder {
 }
 
 struct LspSession {
-    stdin: Box<dyn Write + Send>,
+    // stdin lives behind its own lock so a write/flush never holds the manager
+    // map lock across blocking I/O (a full stdin pipe would otherwise deadlock
+    // lsp_start/lsp_stop for every server).
+    stdin: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Child,
 }
 
 #[derive(Default)]
 pub struct LspManager {
     servers: Mutex<HashMap<String, LspSession>>,
+}
+
+impl LspManager {
+    /// Kill and reap every running language server. Called on app exit so no
+    /// server subprocess is orphaned when Lyceum quits.
+    pub fn shutdown_all(&self) {
+        if let Ok(mut servers) = self.servers.lock() {
+            for (_id, mut session) in servers.drain() {
+                let _ = session.child.kill();
+                let _ = session.child.wait();
+            }
+        }
+    }
 }
 
 /// Spawn a language server, streaming its framed stdout messages to the frontend.
@@ -136,16 +165,19 @@ pub fn lsp_start(
         let _ = app_for_thread.emit(&exit_event, ());
     });
 
-    // If a server with this id already exists, kill it first so its child
-    // exits and its reader thread reaches EOF (otherwise both would leak).
+    // If a server with this id already exists, kill AND reap it first so its
+    // child exits, its reader thread reaches EOF, and no zombie is left behind.
+    // (The frontend normally uses a unique id per spawn and stops the old one
+    // explicitly; this is a belt-and-suspenders cleanup.)
     if let Some(mut old) = state.servers.lock().unwrap().insert(
         id,
         LspSession {
-            stdin: Box::new(stdin),
+            stdin: Arc::new(Mutex::new(Box::new(stdin))),
             child,
         },
     ) {
         let _ = old.child.kill();
+        let _ = old.child.wait();
     }
     Ok(())
 }
@@ -153,13 +185,19 @@ pub fn lsp_start(
 /// Frame and write a JSON-RPC message to a server's stdin.
 #[tauri::command]
 pub fn lsp_send(state: State<LspManager>, id: String, message: String) -> Result<(), String> {
-    let mut servers = state.servers.lock().unwrap();
-    let session = servers.get_mut(&id).ok_or("no such lsp server")?;
-    session
-        .stdin
+    // Clone out the per-session stdin handle under the map lock, then release
+    // the map lock BEFORE the (potentially blocking) write/flush so a full pipe
+    // on one server can't wedge lsp_start/lsp_stop for all the others.
+    let stdin = {
+        let servers = state.servers.lock().unwrap();
+        let session = servers.get(&id).ok_or("no such lsp server")?;
+        session.stdin.clone()
+    };
+    let mut stdin = stdin.lock().unwrap();
+    stdin
         .write_all(&encode_message(&message))
         .map_err(|e| e.to_string())?;
-    session.stdin.flush().map_err(|e| e.to_string())?;
+    stdin.flush().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -168,6 +206,8 @@ pub fn lsp_send(state: State<LspManager>, id: String, message: String) -> Result
 pub fn lsp_stop(state: State<LspManager>, id: String) -> Result<(), String> {
     if let Some(mut session) = state.servers.lock().unwrap().remove(&id) {
         let _ = session.child.kill();
+        // Reap so the exited server does not linger as a zombie process.
+        let _ = session.child.wait();
     }
     Ok(())
 }
@@ -235,6 +275,16 @@ mod tests {
         assert_eq!(decoder.next_message(), None);
         // The giant pending frame must not be retained (no unbounded growth).
         assert!(decoder.buf.is_empty());
+    }
+
+    #[test]
+    fn decoder_caps_headerless_buffer_growth() {
+        let mut decoder = LspDecoder::default();
+        // A flood of bytes that never contains the "\r\n\r\n" header terminator
+        // must not be buffered without bound.
+        decoder.push(&vec![b'x'; 100 * 1024]);
+        assert_eq!(decoder.next_message(), None);
+        assert!(decoder.buf.is_empty(), "headerless buffer must be capped");
     }
 
     #[test]

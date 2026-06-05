@@ -31,6 +31,15 @@
   --selection: #264f78;
   --selection-fg: #ffffff;
 
+  /* Git decoration colors (Explorer): orange = modified, green = new. */
+  --git-modified: #e2c08d;
+  --git-added: #73c991;
+  --git-untracked: #73c991;
+  --git-deleted: #c74e39;
+  --git-conflict: #e4676b;
+  --git-renamed: #e2c08d;
+  --git-ignored: #8c8c8c;
+
   --ui-font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Helvetica Neue", sans-serif;
   --mono-font: "SF Mono", "JetBrains Mono", "Fira Code", "Cascadia Code", Menlo, Consolas, monospace;
 }
@@ -57,6 +66,15 @@
   --activity-active-border: #ffffff;
   --selection: #add6ff;
   --selection-fg: #000000;
+
+  /* Darker shades for contrast on a light background. */
+  --git-modified: #895503;
+  --git-added: #388a34;
+  --git-untracked: #388a34;
+  --git-deleted: #ad0707;
+  --git-conflict: #ad0707;
+  --git-renamed: #895503;
+  --git-ignored: #8c8c8c;
 }
 
 :root[data-theme="hc"] {
@@ -81,4 +99,13 @@
   --activity-active-border: #f38518;
   --selection: #ffffff;
   --selection-fg: #000000;
+
+  /* High-contrast: bright decoration colors against pure black. */
+  --git-modified: #e2c08d;
+  --git-added: #89d185;
+  --git-untracked: #89d185;
+  --git-deleted: #f48771;
+  --git-conflict: #f48771;
+  --git-renamed: #e2c08d;
+  --git-ignored: #a0a0a0;
 }

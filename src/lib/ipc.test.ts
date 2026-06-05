@@ -33,7 +33,7 @@ describe("getAppInfo", () => {
     invokeMock.mockRejectedValue(new Error("no tauri"));
     expect(await getAppInfo()).toEqual({
       name: "lyceum",
-      version: "0.1.4",
+      version: "0.2.0",
       os: "web",
       arch: "unknown",
     });

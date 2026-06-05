@@ -35,7 +35,7 @@ function Welcome() {
       </div>
       <div className="editor-welcome">
         <h1>Lyceum</h1>
-        <p>A lightweight, VS Code-inspired research IDE.</p>
+        <p>A lightweight research IDE.</p>
         <ul className="welcome-hints">
           <li>
             <kbd>{mod}</kbd> + <kbd>B</kbd> Toggle sidebar
