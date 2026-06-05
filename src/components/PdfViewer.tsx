@@ -146,11 +146,22 @@ export default function PdfViewer({ path }: { path: string }) {
         textLayerElement.style.setProperty("--scale-factor", String(zoom));
         const canvasContext = canvas.getContext("2d");
         if (!canvasContext) return;
-        canvas.width = viewport.width;
-        canvas.height = viewport.height;
-        canvas.style.width = `${viewport.width}px`;
-        canvas.style.height = `${viewport.height}px`;
-        task = pdfPage.render({ canvasContext, viewport });
+        // Render at the device pixel ratio so pages are crisp on HiDPI/Retina
+        // displays. The canvas BITMAP is sized in physical pixels (viewport ×
+        // dpr) while its CSS box stays in layout pixels (viewport), and the draw
+        // is scaled up by `transform`. Without this the canvas is a 1× bitmap the
+        // browser stretches to 2× → blurry until you zoom in (which adds real
+        // pixels). The text-layer overlay tracks the CSS box, so it stays aligned.
+        const outputScale = window.devicePixelRatio || 1;
+        canvas.width = Math.floor(viewport.width * outputScale);
+        canvas.height = Math.floor(viewport.height * outputScale);
+        canvas.style.width = `${Math.floor(viewport.width)}px`;
+        canvas.style.height = `${Math.floor(viewport.height)}px`;
+        const transform =
+          outputScale !== 1
+            ? [outputScale, 0, 0, outputScale, 0, 0]
+            : undefined;
+        task = pdfPage.render({ canvasContext, viewport, transform });
         const textContent = await pdfPage.getTextContent();
         if (cancelled) return;
         textLayer = new pdfjsLib.TextLayer({

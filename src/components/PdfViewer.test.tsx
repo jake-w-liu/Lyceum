@@ -102,4 +102,40 @@ describe("PdfViewer", () => {
     });
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
+
+  it("renders the canvas at the device pixel ratio for crisp HiDPI output", async () => {
+    const originalDpr = Object.getOwnPropertyDescriptor(
+      window,
+      "devicePixelRatio",
+    );
+    Object.defineProperty(window, "devicePixelRatio", {
+      configurable: true,
+      value: 2,
+    });
+    try {
+      mockPdfDocument(1);
+      const { container } = render(<PdfViewer path="/w/hd.pdf" />);
+      await screen.findByText("1 / 1");
+      await waitFor(() => expect(pdfMocks.pageRender).toHaveBeenCalled());
+
+      const canvas = container.querySelector(
+        "canvas.pdf-canvas",
+      ) as HTMLCanvasElement;
+      // viewport at zoom 1 is 180×240; the bitmap is scaled by dpr=2 while the
+      // CSS box stays at the layout size, and the draw is scaled via transform.
+      expect(canvas.width).toBe(360);
+      expect(canvas.height).toBe(480);
+      expect(canvas.style.width).toBe("180px");
+      expect(canvas.style.height).toBe("240px");
+      expect(pdfMocks.pageRender.mock.calls[0][0].transform).toEqual([
+        2, 0, 0, 2, 0, 0,
+      ]);
+    } finally {
+      if (originalDpr) {
+        Object.defineProperty(window, "devicePixelRatio", originalDpr);
+      } else {
+        delete (window as unknown as Record<string, unknown>).devicePixelRatio;
+      }
+    }
+  });
 });
