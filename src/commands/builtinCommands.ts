@@ -216,6 +216,29 @@ export function registerBuiltinCommands(): void {
   });
 
   // --- Explorer ---
+  const revealExplorer = () => {
+    layout().setSidebarVisible(true);
+    layout().setActiveView("explorer");
+  };
+  const startExplorerCreate = (kind: "file" | "folder") => {
+    revealExplorer();
+    // A folder must be open to create into; otherwise the Explorer shows the
+    // "Open Folder" placeholder and there is nowhere to put the new entry.
+    if (!useWorkspaceStore.getState().rootPath) return;
+    useTreeStore.getState().requestCreate(kind);
+  };
+  commandRegistry.register({
+    id: "explorer.newFile",
+    title: "New File",
+    category: "File",
+    run: () => startExplorerCreate("file"),
+  });
+  commandRegistry.register({
+    id: "explorer.newFolder",
+    title: "New Folder",
+    category: "File",
+    run: () => startExplorerCreate("folder"),
+  });
   commandRegistry.register({
     id: "explorer.refresh",
     title: "Refresh Explorer",

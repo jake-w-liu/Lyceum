@@ -18,6 +18,9 @@ pub fn build_app_menu<R: Runtime>(handle: &AppHandle<R>) -> tauri::Result<Menu<R
         .build()?;
 
     let file_menu = SubmenuBuilder::new(handle, "File")
+        .item(&MenuItemBuilder::with_id("explorer.newFile", "New File").build(handle)?)
+        .item(&MenuItemBuilder::with_id("explorer.newFolder", "New Folder").build(handle)?)
+        .separator()
         .item(
             &MenuItemBuilder::with_id("file.openFolder", "Open Folder…")
                 .accelerator("CmdOrCtrl+O")

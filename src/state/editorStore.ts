@@ -55,7 +55,12 @@ export interface EditorActions {
   closeDoc: (path: string) => void;
   setActive: (path: string) => void;
   updateContent: (path: string, content: string) => void;
-  markSaved: (path: string) => void;
+  /**
+   * Mark a doc saved. Pass `savedContent` = the exact bytes written to disk; the
+   * doc stays dirty if its live buffer has since diverged (edits typed during the
+   * async write). Omitting it falls back to the current buffer (legacy behavior).
+   */
+  markSaved: (path: string, savedContent?: string) => void;
   moveDocPaths: (moves: Array<{ from: string; to: string }>) => void;
   setSelection: (text: string) => void;
 }
@@ -111,11 +116,11 @@ export const useEditorStore = create<EditorState>()((set) => ({
       ),
     })),
 
-  markSaved: (path) =>
+  markSaved: (path, savedContent) =>
     set((s) => ({
       docs: s.docs.map((doc) =>
         doc.path === path && doc.kind === "text"
-          ? { ...doc, savedContent: doc.content }
+          ? { ...doc, savedContent: savedContent ?? doc.content }
           : doc,
       ),
     })),

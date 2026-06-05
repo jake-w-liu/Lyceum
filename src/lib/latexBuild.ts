@@ -66,7 +66,9 @@ export async function runLatexBuild(
   if (targetDoc) {
     try {
       await writeFile(targetDoc.path, targetDoc.content);
-      useEditorStore.getState().markSaved(targetDoc.path);
+      // Record the exact bytes written so edits typed during the save keep the
+      // doc dirty rather than being silently marked clean (and lost).
+      useEditorStore.getState().markSaved(targetDoc.path, targetDoc.content);
     } catch (e) {
       out.append(`failed to save ${targetDoc.name}: ${String(e)}`);
       return;

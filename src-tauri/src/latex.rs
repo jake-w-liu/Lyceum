@@ -100,6 +100,8 @@ pub fn run_latex_build(
         .env("PATH", path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Own process group so cancel can kill the whole tree (latexmk -> pdflatex/biber).
+    julia::configure_process_group(&mut command);
     let child = command
         .spawn()
         .map_err(|e| format!("failed to start {}: {e}", plan.program))?;

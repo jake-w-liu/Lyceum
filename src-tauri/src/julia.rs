@@ -220,6 +220,23 @@ fn pump<R: Read>(mut reader: R, app: &AppHandle, event: &str, stream_name: &str)
     }
 }
 
+/// Place a spawned child in its own process group (Unix) so the whole group —
+/// the child plus anything it forks (e.g. `latexmk` -> `pdflatex`/`biber`) — can
+/// be terminated together on cancel. No-op elsewhere (Windows uses `taskkill /T`,
+/// which already walks the process tree).
+pub(crate) fn configure_process_group(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // 0 = put the child in a new process group whose id equals its pid.
+        command.process_group(0);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = command;
+    }
+}
+
 /// Send a terminating signal to a process by pid (best-effort, cross-platform).
 fn kill_pid(pid: u32) {
     #[cfg(windows)]
@@ -230,7 +247,18 @@ fn kill_pid(pid: u32) {
     }
     #[cfg(not(windows))]
     {
-        let _ = Command::new("kill").arg(pid.to_string()).status();
+        // Children are spawned in their own process group (see
+        // `configure_process_group`), so signal the whole group first (negative
+        // pid) to terminate grandchildren too — otherwise cancelling a build
+        // leaves the heavyweight compiler subtree (pdflatex/biber) running
+        // orphaned while the UI reports the run as ended. Then signal the pid
+        // directly as a fallback for any child not in its own group.
+        let _ = Command::new("kill")
+            .args(["-TERM", &format!("-{pid}")])
+            .status();
+        let _ = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status();
     }
 }
 
@@ -263,6 +291,7 @@ pub fn run_julia(
             command.current_dir(dir);
         }
     }
+    configure_process_group(&mut command);
 
     let child = command
         .spawn()
@@ -304,6 +333,12 @@ pub(crate) fn stream_child(
     });
     std::thread::spawn(move || {
         let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
+        // Remove the run from the registry as soon as the child is reaped: its OS
+        // pid is now eligible for reuse, so it must not remain visible to a late
+        // `run_cancel` (which would otherwise signal an unrelated process that
+        // reused the pid). Draining the pumps below can block (e.g. if a grandchild
+        // holds the pipe open), so this must happen before the joins, not after.
+        runs.lock().unwrap().remove(&id);
         // Drain all output before signaling exit so the frontend (which tears
         // down its output listener on exit) never loses trailing lines.
         if let Some(handle) = out_handle {
@@ -312,7 +347,6 @@ pub(crate) fn stream_child(
         if let Some(handle) = err_handle {
             let _ = handle.join();
         }
-        runs.lock().unwrap().remove(&id);
         let _ = app.emit(&exit_event, code);
     });
 }
@@ -348,6 +382,7 @@ pub fn run_build(
             cmd.current_dir(dir);
         }
     }
+    configure_process_group(&mut cmd);
     let child = cmd
         .spawn()
         .map_err(|e| format!("failed to run build: {e}"))?;
@@ -503,6 +538,65 @@ mod tests {
         assert!(
             !status.success(),
             "killed child should not exit successfully"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kill_pid_terminates_whole_process_group() {
+        // A leader spawned in its own process group that forks a background
+        // grandchild (mirrors `latexmk` forking `pdflatex`). Killing the group
+        // must reap the grandchild too, not just the leader — the regression
+        // this guards is "cancel reports done while the compiler keeps running".
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "sleep 30 & echo $!; wait"])
+            .stdout(Stdio::piped());
+        configure_process_group(&mut command);
+        let mut child = command.spawn().expect("spawn group leader");
+        let leader_pid = child.id();
+
+        // Read the backgrounded grandchild's pid (printed by `echo $!`).
+        let mut stdout = child.stdout.take().expect("capture stdout");
+        let mut line = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            match stdout.read(&mut byte) {
+                Ok(0) => break,
+                Ok(_) => {
+                    if byte[0] == b'\n' {
+                        break;
+                    }
+                    line.push(byte[0]);
+                }
+                Err(_) => break,
+            }
+        }
+        let grandchild_pid: i32 = String::from_utf8_lossy(&line)
+            .trim()
+            .parse()
+            .expect("parse grandchild pid");
+
+        kill_pid(leader_pid);
+        let _ = child.wait();
+
+        // The grandchild must be gone (a signal-0 probe fails) within a moment.
+        let mut alive = true;
+        for _ in 0..50 {
+            let reaped = Command::new("kill")
+                .args(["-0", &grandchild_pid.to_string()])
+                .status()
+                .map(|s| !s.success())
+                .unwrap_or(true);
+            if reaped {
+                alive = false;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(40));
+        }
+        assert!(
+            !alive,
+            "backgrounded grandchild {grandchild_pid} survived the group kill"
         );
     }
 }

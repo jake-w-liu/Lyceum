@@ -122,4 +122,17 @@ describe("treeStore", () => {
     get().pushDeleteRedo(batch);
     expect(get().popDeleteRedo()).toEqual(batch);
   });
+
+  it("requestCreate sets a pending create kind that consumeCreateRequest clears", () => {
+    expect(get().createRequest).toBeNull();
+
+    get().requestCreate("file");
+    expect(get().createRequest).toBe("file");
+
+    get().consumeCreateRequest();
+    expect(get().createRequest).toBeNull();
+
+    get().requestCreate("folder");
+    expect(get().createRequest).toBe("folder");
+  });
 });

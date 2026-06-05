@@ -31,26 +31,27 @@ fn find_ci(haystack: &str, needle_lower: &str) -> Option<usize> {
             .windows(needle.len())
             .position(|w| w.eq_ignore_ascii_case(needle));
     }
-    // Unicode fallback: scan char boundaries of the original and compare each
-    // window lowercased, so the returned offset is a valid index into `haystack`.
-    let needle_chars = needle_lower.chars().count();
-    let starts: Vec<usize> = haystack.char_indices().map(|(i, _)| i).collect();
-    let n = starts.len();
-    if n < needle_chars {
-        return None;
-    }
-    for w in 0..=(n - needle_chars) {
-        let begin = starts[w];
-        let end = if w + needle_chars < n {
-            starts[w + needle_chars]
-        } else {
-            haystack.len()
-        };
-        if haystack[begin..end].to_lowercase() == needle_lower {
-            return Some(begin);
+    // Unicode fallback: lowercase the whole haystack once, recording for each
+    // produced char the byte offset of the ORIGINAL char it came from. A fixed
+    // char-count window (the previous approach) is wrong because case folding is
+    // not 1:1 in char count — e.g. 'İ' (U+0130) lowercases to the two chars
+    // "i\u{0307}", so a 1-char window could never equal a 1-char needle and the
+    // match was silently dropped. We search the lowercased copy and map the match
+    // back to a valid char-boundary byte offset in the original via the table.
+    let mut lowered = String::with_capacity(haystack.len());
+    // origin[i] = byte offset in `haystack` of the source char for lowered char i.
+    let mut origin: Vec<usize> = Vec::new();
+    for (byte_idx, ch) in haystack.char_indices() {
+        for lc in ch.to_lowercase() {
+            origin.push(byte_idx);
+            lowered.push(lc);
         }
     }
-    None
+    let match_byte = lowered.find(needle_lower)?;
+    // Convert the byte offset within `lowered` to a char index, then map back to
+    // the original char's byte offset (always a valid char boundary in `haystack`).
+    let char_index = lowered[..match_byte].chars().count();
+    Some(origin[char_index])
 }
 
 /// A single matching line within a workspace file. Line and column are 1-based;
@@ -82,10 +83,16 @@ pub fn search_in_dir(root: &Path, query: &str, max: usize) -> Result<Vec<SearchM
             break;
         }
 
-        let read = std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        // Best-effort: an unreadable subdirectory (permission denied, removed
+        // mid-walk) must not abort the whole search and blank the results panel.
+        let Ok(read) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in read {
-            let entry = entry.map_err(|e| e.to_string())?;
-            let file_type = entry.file_type().map_err(|e| e.to_string())?;
+            let Ok(entry) = entry else { continue };
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
             if file_type.is_dir() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if SKIP_DIRS.contains(&name.as_str()) {
@@ -100,11 +107,16 @@ pub fn search_in_dir(root: &Path, query: &str, max: usize) -> Result<Vec<SearchM
             }
 
             let path = entry.path();
-            // Skip files too large to read into memory safely.
-            if let Ok(meta) = entry.metadata() {
-                if meta.len() > MAX_FILE_SIZE {
-                    continue;
-                }
+            // Skip files too large to read into memory safely. Stat the RESOLVED
+            // target (`fs::metadata` follows symlinks) rather than `entry.metadata()`
+            // (which reports the symlink's own tiny size) — otherwise a symlink to a
+            // multi-GB file would pass the cap and then be slurped by read_to_string,
+            // which DOES follow the link. Skip outright if the target can't be stat'd.
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            if meta.len() > MAX_FILE_SIZE {
+                continue;
             }
             let contents = match std::fs::read_to_string(&path) {
                 Ok(c) => c,
@@ -247,6 +259,47 @@ mod tests {
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].column, 4); // chars: A(1) ẞ(2) B(3) x(4)
         assert_eq!(matches[0].text, "AẞBxy");
+    }
+
+    #[test]
+    fn unicode_length_changing_case_fold_is_matched() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        // 'İ' (U+0130) lowercases to the 2-char sequence "i\u{0307}"; searching the
+        // natural lowercase 'i' must still match it. The previous fixed char-count
+        // window dropped this match. Column is the 1-based char position.
+        fs::write(root.join("t.txt"), "aİb\n".as_bytes()).unwrap();
+
+        let matches = search_in_dir(root, "i", 1000).expect("search");
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].column, 2); // chars: a(1) İ(2)
+        assert_eq!(matches[0].text, "aİb");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_to_oversized_file_is_skipped() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        fs::write(root.join("small.txt"), b"needle here\n").unwrap();
+        // An oversized target reached via a symlink whose OWN metadata reports a
+        // tiny size. The size cap must follow the link and skip it, not slurp the
+        // multi-GB target into memory.
+        let big_target = root.join("big_target.dat");
+        let mut big = vec![b'x'; (MAX_FILE_SIZE as usize) + 16];
+        big.extend_from_slice(b"\nneedle\n");
+        fs::write(&big_target, &big).unwrap();
+        symlink(&big_target, root.join("link.txt")).unwrap();
+
+        let matches = search_in_dir(root, "needle", 1000).expect("search");
+
+        // Only the small real file matches; both the oversized file and the
+        // symlink that resolves to it are skipped by the cap.
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].path.ends_with("small.txt"));
     }
 
     #[test]

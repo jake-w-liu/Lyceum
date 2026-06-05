@@ -87,7 +87,9 @@ export async function runActiveJulia(): Promise<void> {
   try {
     if (invocation.file) {
       await writeFile(doc.path, doc.content);
-      useEditorStore.getState().markSaved(doc.path);
+      // Record the exact bytes written so edits typed during the save keep the
+      // doc dirty rather than being silently marked clean (and lost).
+      useEditorStore.getState().markSaved(doc.path, doc.content);
     }
     await invoke("run_julia", {
       id,

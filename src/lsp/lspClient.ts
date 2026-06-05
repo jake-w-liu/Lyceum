@@ -91,7 +91,27 @@ export async function ensureServer(
           }
         }),
       );
+      // A concurrent stopServer (e.g. the editor unmounting during a cold-start
+      // handshake) may have removed this session while we were awaiting the
+      // listener registrations above. Its `unlistens` was empty when it ran, so
+      // nothing got torn down — detect that here and self-clean instead of leaking
+      // the listeners AND spawning a server the user already asked to stop.
+      if (sessions.get(languageId) !== session) {
+        unlistens.forEach((off) => off());
+        rpc.dispose("stopped during startup");
+        return;
+      }
       await lspStart(id, cmd, args, rootPath);
+      // Stopped during the start IPC: the server we just spawned would be a zombie
+      // (stop's lspStop ran before it existed). Kill it — but only if no newer
+      // session now owns this language id, since a replacement's lspStart already
+      // superseded ours in the Rust manager.
+      if (sessions.get(languageId) !== session) {
+        unlistens.forEach((off) => off());
+        rpc.dispose("stopped during startup");
+        if (!sessions.has(languageId)) void lspStop(id);
+        return;
+      }
       const initResult = await rpc.request<{
         capabilities?: Record<string, unknown>;
       }>("initialize", buildInitializeParams(rootPath));
@@ -148,6 +168,13 @@ export async function didChange(
   } catch {
     return;
   }
+  // Only send a change for a doc the server was told is open. Without this, a
+  // debounced flush that lost a race with didClose (tab closed mid-debounce)
+  // would send didChange AFTER didClose, and a change that resumed before its
+  // didOpen would send didChange BEFORE didOpen — both LSP protocol violations.
+  // Dropping it is safe: each didChange carries the full text, so the next one
+  // after a (re)didOpen is complete.
+  if (!session.openDocs.has(uri)) return;
   session.rpc.notify("textDocument/didChange", {
     textDocument: { uri, version },
     contentChanges: [{ text }],

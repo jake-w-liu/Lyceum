@@ -14,7 +14,9 @@ export async function saveActiveDoc(): Promise<void> {
   if (!doc || !isTextDoc(doc)) return;
   try {
     await writeFile(doc.path, doc.content);
-    useEditorStore.getState().markSaved(doc.path);
+    // Pass the exact content written: if the user kept typing during the async
+    // write, the live buffer diverges and the doc must stay dirty (not be cleared).
+    useEditorStore.getState().markSaved(doc.path, doc.content);
   } catch (e) {
     // Surfaced via the problems/output panel in a later milestone.
     console.error("Failed to save", doc.path, e);

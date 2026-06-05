@@ -374,6 +374,12 @@ function CreateInput({
         <input
           ref={inputRef}
           className="tree-rename-input"
+          // File names are literal: stop the WebView from auto-capitalizing the
+          // first letter or autocorrecting/spell-checking the typed name.
+          autoCapitalize="off"
+          autoCorrect="off"
+          autoComplete="off"
+          spellCheck={false}
           aria-label={creating.kind === "folder" ? "New folder name" : "New file name"}
           placeholder={creating.kind === "folder" ? "folder name" : "file name"}
           onBlur={(e) => onCommit(e.target.value)}
@@ -405,6 +411,11 @@ function RenameInput({
     <input
       className="tree-rename-input"
       aria-label="New name"
+      // File names are literal: no auto-capitalization / autocorrect / spellcheck.
+      autoCapitalize="off"
+      autoCorrect="off"
+      autoComplete="off"
+      spellCheck={false}
       autoFocus
       value={value}
       onClick={(e) => e.stopPropagation()}
@@ -431,6 +442,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
   const selectedPaths = useTreeStore((s) => s.selectedPaths);
   const deleteUndoStack = useTreeStore((s) => s.deleteUndoStack);
   const deleteRedoStack = useTreeStore((s) => s.deleteRedoStack);
+  const createRequest = useTreeStore((s) => s.createRequest);
   const [creating, setCreating] = useState<CreatingState | null>(null);
   const [draggingEntries, setDraggingEntries] = useState<DirEntry[]>([]);
   const [dropTargetPath, setDropTargetPath] = useState<string | null>(null);
@@ -455,6 +467,17 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
   useEffect(() => {
     if (rootChildren === undefined) loadInto(rootPath, refreshNonce);
   }, [rootPath, rootChildren, refreshNonce]);
+
+  // Start the inline create flow when a global command (New File / New Folder /
+  // Cmd+Ctrl+N) requests it, then clear the request so it fires exactly once.
+  useEffect(() => {
+    if (!createRequest) return;
+    startCreate(createRequest);
+    useTreeStore.getState().consumeCreateRequest();
+    // startCreate is recreated each render but reads live state; the request is
+    // consumed immediately so this can't double-fire.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [createRequest]);
 
   function createParentPath(): string {
     if (selectedEntries.length !== 1) return rootPath;
@@ -527,6 +550,8 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
       useTreeStore.getState().refresh();
     } catch (err) {
       console.error("delete failed", err);
+      // Re-sync after a possible partial trash move so the tree reflects disk.
+      useTreeStore.getState().refresh();
       alert(`Delete failed: ${String(err)}`);
     }
   }
@@ -589,6 +614,10 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
       useTreeStore.getState().refresh();
     } catch (err) {
       console.error("move failed", err);
+      // A move can fail partway (some entries already renamed on disk). Refresh
+      // so the tree re-reads the real filesystem state instead of showing stale
+      // paths for items that did move.
+      useTreeStore.getState().refresh();
       alert(`Move failed: ${String(err)}`);
     }
   }

@@ -266,8 +266,18 @@ export default function MonacoEditor() {
     );
     for (const [path, model] of modelsRef.current) {
       if (!open.has(path)) {
+        const uri = model.uri.toString();
+        // Drop any pending debounced change for this doc so its timer can't fire
+        // after didClose (a no-op now that didChange is gated on openDocs, but we
+        // also avoid leaking the timer/payload until the whole editor unmounts).
+        const timer = lspChangeTimers.current.get(uri);
+        if (timer) {
+          clearTimeout(timer);
+          lspChangeTimers.current.delete(uri);
+        }
+        pendingLspChanges.current.delete(uri);
         const session = getSession(model.getLanguageId());
-        if (session) void didClose(session, model.uri.toString());
+        if (session) void didClose(session, uri);
         model.dispose();
         modelsRef.current.delete(path);
       }

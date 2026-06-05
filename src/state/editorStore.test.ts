@@ -58,6 +58,22 @@ describe("editorStore", () => {
     expect(isDirty(doc)).toBe(false);
   });
 
+  it("markSaved(path, written) keeps the doc dirty if the buffer diverged during the save", () => {
+    const store = useEditorStore.getState();
+    store.openDoc({ path: "/a.ts", content: "A", language: "typescript" });
+
+    // Simulate: a save wrote snapshot "A", then the user typed "AB" before the
+    // async write resolved. markSaved must record what was WRITTEN ("A"), so the
+    // newer edit stays dirty and is not silently treated as saved.
+    store.updateContent("/a.ts", "AB");
+    store.markSaved("/a.ts", "A");
+
+    const doc = useEditorStore.getState().docs[0];
+    expect(doc.savedContent).toBe("A");
+    expect(doc.content).toBe("AB");
+    expect(isDirty(doc)).toBe(true);
+  });
+
   it("opens viewer tabs without dirty tracking or text mutation", () => {
     const store = useEditorStore.getState();
     store.openDoc({

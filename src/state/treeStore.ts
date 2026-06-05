@@ -22,6 +22,11 @@ export interface TreeData {
   focusedPath: string | null;
   deleteUndoStack: TrashBatch[];
   deleteRedoStack: TrashBatch[];
+  /**
+   * A pending request (from the New File / New Folder commands or Cmd/Ctrl+N) to
+   * begin the Explorer's inline create flow. The Explorer consumes and clears it.
+   */
+  createRequest: "file" | "folder" | null;
 }
 
 export interface TreeActions {
@@ -54,6 +59,10 @@ export interface TreeActions {
   popDeleteUndo: () => TrashBatch | null;
   /** Pop the latest redoable delete batch. */
   popDeleteRedo: () => TrashBatch | null;
+  /** Ask the Explorer to start an inline create (file or folder). */
+  requestCreate: (kind: "file" | "folder") => void;
+  /** Clear a create request once the Explorer has started it. */
+  consumeCreateRequest: () => void;
   /** Restore the store to its initial state. */
   reset: () => void;
 }
@@ -69,6 +78,7 @@ export const initialTreeData: TreeData = {
   focusedPath: null,
   deleteUndoStack: [],
   deleteRedoStack: [],
+  createRequest: null,
 };
 
 export const useTreeStore = create<TreeState>()((set, get) => ({
@@ -160,6 +170,8 @@ export const useTreeStore = create<TreeState>()((set, get) => ({
     if (batch) set({ deleteRedoStack: stack.slice(0, -1) });
     return batch;
   },
+  requestCreate: (kind) => set({ createRequest: kind }),
+  consumeCreateRequest: () => set({ createRequest: null }),
   reset: () => set(initialTreeData, false),
 }));
 

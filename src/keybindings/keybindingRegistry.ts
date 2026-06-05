@@ -12,6 +12,8 @@ export type KeyContext = Record<string, boolean>;
 export const DEFAULT_KEYMAP: Keybinding[] = [
   { key: "mod+p", command: "quickOpen.show" },
   { key: "mod+shift+p", command: "commandPalette.show" },
+  { key: "mod+n", command: "explorer.newFile" },
+  { key: "mod+shift+n", command: "explorer.newFolder" },
   { key: "mod+b", command: "workbench.toggleSidebar" },
   { key: "ctrl+backquote", command: "terminal.toggle" },
   { key: "ctrl+shift+backquote", command: "terminal.new" },
