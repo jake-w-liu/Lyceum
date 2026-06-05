@@ -69,8 +69,10 @@ export function TerminalView({
       // host not laid out yet; ResizeObserver will fit shortly.
     }
 
-    // Unique backend PTY id for this mount (see terminalMountSeq).
-    const ptyId = `${id}#${(terminalMountSeq += 1)}`;
+    // Unique backend PTY id for this mount (see terminalMountSeq). Uses `_` as
+    // the separator because the id is interpolated into Tauri event names
+    // (`terminal:data:<ptyId>`), which only allow alphanumerics, `-/:_`.
+    const ptyId = `${id}_${(terminalMountSeq += 1)}`;
     let disposed = false;
     // Buffer keystrokes typed before the PTY exists, then flush on ready — so
     // the first characters a user types into a brand-new terminal aren't dropped
