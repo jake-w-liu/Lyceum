@@ -59,19 +59,6 @@ fn get_launch_dir(state: tauri::State<'_, LaunchDir>) -> Option<String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        // Must be the first plugin: a second `lyceum <dir>` launch forwards its
-        // argv here instead of starting a duplicate app. We focus the existing
-        // window and emit the folder so the frontend switches workspace —
-        // matching `code .` reusing its single window.
-        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            if let Some(dir) = first_dir_arg(argv.into_iter().skip(1)) {
-                let _ = app.emit("open-launch-dir", dir);
-            }
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.set_focus();
-            }
-        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(LaunchDir(launch_dir_from_args()))

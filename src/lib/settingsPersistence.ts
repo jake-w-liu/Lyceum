@@ -116,34 +116,6 @@ export async function openLaunchDir(): Promise<void> {
   }
 }
 
-/**
- * When the app is already running, a second `lyceum /path` is intercepted by the
- * single-instance plugin, which focuses this window and emits `open-launch-dir`.
- * Subscribe so that folder becomes the workspace. Returns an unsubscribe fn.
- */
-export function listenLaunchDir(): () => void {
-  let active = true;
-  let unlisten: (() => void) | null = null;
-  void (async () => {
-    try {
-      const { listen } = await import("@tauri-apps/api/event");
-      const un = await listen<string>("open-launch-dir", (event) => {
-        if (typeof event.payload === "string" && event.payload.length > 0) {
-          useWorkspaceStore.getState().openWorkspace(event.payload);
-        }
-      });
-      if (active) unlisten = un;
-      else un(); // unmounted before listen resolved
-    } catch {
-      // not in Tauri
-    }
-  })();
-  return () => {
-    active = false;
-    unlisten?.();
-  };
-}
-
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let persistenceInitialized = false;
 

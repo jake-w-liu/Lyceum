@@ -16,7 +16,6 @@ import { useLayoutStore } from "./state/layoutStore";
 import { applyThemeAttribute, useThemeStore } from "./state/themeStore";
 import {
   initSettingsPersistence,
-  listenLaunchDir,
   loadKeybindings,
   loadSettings,
   openLaunchDir,
@@ -48,9 +47,6 @@ export default function App() {
       await openLaunchDir();
     })();
   }, []);
-
-  // While running, a second `lyceum /path` (single-instance) switches workspace.
-  useEffect(() => listenLaunchDir(), []);
 
   const sidebarVisible = useLayoutStore((s) => s.sidebarVisible);
   const bottomPanelVisible = useLayoutStore((s) => s.bottomPanelVisible);
