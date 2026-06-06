@@ -21,6 +21,7 @@ import {
   openLaunchDir,
   restoreWorkspace,
 } from "./lib/settingsPersistence";
+import { initZoom } from "./lib/zoom";
 import "./commands/builtinCommands";
 
 export default function App() {
@@ -36,6 +37,8 @@ export default function App() {
     void (async () => {
       await loadSettings();
       await loadKeybindings();
+      // Apply the persisted window zoom and keep it synced to the setting.
+      initZoom();
       await restoreWorkspace();
       initSettingsPersistence();
       // A launch-dir (`lyceum /path`) overrides the restored workspace; runs

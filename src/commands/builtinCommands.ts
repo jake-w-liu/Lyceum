@@ -22,7 +22,12 @@ import { stopActiveRun } from "../lib/run";
 import { saveSettings, settingsFilePath } from "../lib/settingsPersistence";
 import { runEditorAction } from "../lib/editorBridge";
 import { useTreeStore } from "../state/treeStore";
-import { DEFAULT_SETTINGS, useSettingsStore } from "../state/settingsStore";
+import {
+  DEFAULT_SETTINGS,
+  ZOOM_LEVEL_MAX,
+  ZOOM_LEVEL_MIN,
+  useSettingsStore,
+} from "../state/settingsStore";
 import { writePty } from "../lib/terminal";
 import { isInlinePreviewPath, isTexSourcePath } from "../lib/fileTypes";
 
@@ -170,37 +175,37 @@ export function registerBuiltinCommands(): void {
     run: () => useThemeStore.getState().cycleTheme(),
   });
 
-  // --- Editor font zoom (Cmd/Ctrl + = / - / 0). Monaco live-applies fontSize
-  // from settings, so adjusting it enlarges the editor text immediately, and
-  // the change is persisted by the settings store subscription. ---
-  const FONT_SIZE_MIN = 8;
-  const FONT_SIZE_MAX = 40;
-  const adjustFontSize = (delta: number) => {
+  // --- Window zoom (Cmd/Ctrl + = / - / 0), VS Code-style: scales the WHOLE UI
+  // (explorer, tabs, terminal, editor) via the native webview zoom. The level is
+  // persisted in settings; lib/zoom applies it to the webview when it changes. ---
+  const adjustZoom = (delta: number) => {
     const { settings, setSetting } = useSettingsStore.getState();
     const next = Math.min(
-      FONT_SIZE_MAX,
-      Math.max(FONT_SIZE_MIN, settings.fontSize + delta),
+      ZOOM_LEVEL_MAX,
+      Math.max(ZOOM_LEVEL_MIN, settings.zoomLevel + delta),
     );
-    if (next !== settings.fontSize) setSetting("fontSize", next);
+    if (next !== settings.zoomLevel) setSetting("zoomLevel", next);
   };
   commandRegistry.register({
     id: "view.zoomIn",
-    title: "Increase Editor Font Size",
+    title: "Zoom In",
     category: "View",
-    run: () => adjustFontSize(1),
+    run: () => adjustZoom(1),
   });
   commandRegistry.register({
     id: "view.zoomOut",
-    title: "Decrease Editor Font Size",
+    title: "Zoom Out",
     category: "View",
-    run: () => adjustFontSize(-1),
+    run: () => adjustZoom(-1),
   });
   commandRegistry.register({
     id: "view.resetZoom",
-    title: "Reset Editor Font Size",
+    title: "Reset Zoom",
     category: "View",
     run: () =>
-      useSettingsStore.getState().setSetting("fontSize", DEFAULT_SETTINGS.fontSize),
+      useSettingsStore
+        .getState()
+        .setSetting("zoomLevel", DEFAULT_SETTINGS.zoomLevel),
   });
   for (const t of THEME_ORDER) {
     commandRegistry.register({

@@ -22,7 +22,13 @@ export interface Settings {
   restoreWorkspaceOnStartup: boolean;
   minimap: boolean;
   lineNumbers: boolean;
+  /** Window zoom in VS Code-style steps (each step ≈ 20%); 0 = 100%. */
+  zoomLevel: number;
 }
+
+// Window zoom level bounds (each step is a 1.2× factor; see lib/zoom).
+export const ZOOM_LEVEL_MIN = -5;
+export const ZOOM_LEVEL_MAX = 10;
 
 export const DEFAULT_SETTINGS: Settings = {
   version: 1,
@@ -40,6 +46,7 @@ export const DEFAULT_SETTINGS: Settings = {
   restoreWorkspaceOnStartup: true,
   minimap: false,
   lineNumbers: true,
+  zoomLevel: 0,
 };
 
 const THEMES: ThemeId[] = ["dark", "light", "hc"];
@@ -115,10 +122,14 @@ export function mergeSettings(partial: unknown): Settings {
   if (typeof p.lineNumbers === "boolean") {
     out.lineNumbers = p.lineNumbers;
   }
+  if (typeof p.zoomLevel === "number") {
+    out.zoomLevel = p.zoomLevel;
+  }
 
   out.fontSize = clamp(out.fontSize, 8, 40);
   out.tabSize = clamp(out.tabSize, 1, 8);
   out.lineHeight = normalizeLineHeight(out.lineHeight, out.fontSize);
+  out.zoomLevel = clamp(Math.round(out.zoomLevel), ZOOM_LEVEL_MIN, ZOOM_LEVEL_MAX);
   out.version = DEFAULT_SETTINGS.version;
   return out;
 }

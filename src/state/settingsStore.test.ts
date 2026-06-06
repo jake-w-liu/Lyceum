@@ -31,6 +31,12 @@ describe("mergeSettings", () => {
     expect("junk" in result).toBe(false);
   });
 
+  it("rounds and clamps zoomLevel to its bounds", () => {
+    expect(mergeSettings({ zoomLevel: 99 }).zoomLevel).toBe(10);
+    expect(mergeSettings({ zoomLevel: -99 }).zoomLevel).toBe(-5);
+    expect(mergeSettings({ zoomLevel: 2.7 }).zoomLevel).toBe(3);
+  });
+
   it("normalizes line-height multipliers to Monaco pixel values", () => {
     expect(mergeSettings({ fontSize: 16, lineHeight: 1.5 }).lineHeight).toBe(24);
     expect(mergeSettings({ lineHeight: -1 }).lineHeight).toBe(0);
