@@ -164,6 +164,11 @@ export function TerminalView({
     let lastCols = term.cols;
     let lastRows = term.rows;
     const observer = new ResizeObserver(() => {
+      // Skip while hidden (display:none on this host or an ancestor panel/tab →
+      // 0 size). Fitting here would collapse the grid to xterm's 2x1 minimum and
+      // resize the PTY to match, squeezing all output. The observer fires again
+      // with real dimensions when the panel/tab becomes visible.
+      if (host.clientWidth === 0 || host.clientHeight === 0) return;
       try {
         fit.fit();
         if (term.cols !== lastCols || term.rows !== lastRows) {
@@ -190,9 +195,12 @@ export function TerminalView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, cwd]);
 
-  // Re-fit and focus when this terminal becomes the active tab.
+  // Re-fit and focus when this terminal becomes the active tab. Guard against a
+  // hidden host (0 size) so we never fit to the collapsed 2x1 minimum.
   useEffect(() => {
     if (!active) return;
+    const host = hostRef.current;
+    if (!host || host.clientWidth === 0 || host.clientHeight === 0) return;
     try {
       fitRef.current?.fit();
     } catch {
