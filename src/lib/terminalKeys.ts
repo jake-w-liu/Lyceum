@@ -22,7 +22,7 @@ export function terminalKeyOverride(
   if (event.type !== "keydown") return null;
 
   if (isBackspace(event)) {
-    const erase = "\b";
+    const erase = "\x7f";
     return { type: "send", data: event.altKey ? `\x1b${erase}` : erase };
   }
 

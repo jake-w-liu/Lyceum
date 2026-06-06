@@ -14,27 +14,27 @@ const ev = (init: Partial<KeyboardEvent>) =>
   }) as KeyboardEvent;
 
 describe("terminalKeyOverride", () => {
-  it("sends Ctrl-H for plain Backspace before xterm can mis-map it", () => {
+  it("sends DEL for plain Backspace before xterm can mis-map it", () => {
     expect(terminalKeyOverride(ev({ key: "Backspace" }), true, false)).toEqual({
       type: "send",
-      data: "\b",
+      data: "\x7f",
     });
   });
 
   it("recognizes WebView Backspace variants", () => {
     expect(terminalKeyOverride(ev({ code: "Backspace" }), true, false)).toEqual({
       type: "send",
-      data: "\b",
+      data: "\x7f",
     });
     expect(
       terminalKeyOverride(ev({ keyCode: 8 } as Partial<KeyboardEvent>), true, false),
-    ).toEqual({ type: "send", data: "\b" });
+    ).toEqual({ type: "send", data: "\x7f" });
   });
 
   it("prefixes Alt+Backspace with ESC", () => {
     expect(
       terminalKeyOverride(ev({ key: "Backspace", altKey: true }), false, false),
-    ).toEqual({ type: "send", data: "\x1b\b" });
+    ).toEqual({ type: "send", data: "\x1b\x7f" });
   });
 
   it("keeps copy/paste on the platform modifier", () => {

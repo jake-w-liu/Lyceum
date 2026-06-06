@@ -13,9 +13,6 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use tauri::{AppHandle, Emitter, State};
 
-const TERMINAL_ERASE_BYTE: u8 = b'\x08';
-const TERMINAL_DELETE_BYTE: u8 = b'\x7f';
-
 struct Session {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
@@ -59,13 +56,18 @@ pub fn resolve_shell(explicit: Option<String>, env_shell: Option<String>) -> Str
     }
 }
 
-fn terminal_command(shell: &str) -> CommandBuilder {
+fn terminal_command(shell: Option<&str>, env_shell: Option<String>) -> CommandBuilder {
     let mut cmd = if cfg!(unix) {
-        let mut c = CommandBuilder::new("/bin/sh");
-        c.args(["-lc", "stty erase '^H' 2>/dev/null; exec \"$LYCEUM_SHELL\""]);
-        c.env("LYCEUM_SHELL", shell);
+        let mut c = CommandBuilder::new_default_prog();
+        if let Some(shell) = shell
+            .filter(|shell| !shell.is_empty())
+            .or(env_shell.as_deref().filter(|shell| !shell.is_empty()))
+        {
+            c.env("SHELL", shell);
+        }
         c
     } else {
+        let shell = resolve_shell(shell.map(ToOwned::to_owned), env_shell);
         CommandBuilder::new(shell)
     };
     cmd.env("TERM", "xterm-256color");
@@ -74,16 +76,7 @@ fn terminal_command(shell: &str) -> CommandBuilder {
 }
 
 fn normalize_terminal_input(data: &str) -> Vec<u8> {
-    data.as_bytes()
-        .iter()
-        .map(|&b| {
-            if b == TERMINAL_DELETE_BYTE {
-                TERMINAL_ERASE_BYTE
-            } else {
-                b
-            }
-        })
-        .collect()
+    data.as_bytes().to_vec()
 }
 
 /// Spawn a new PTY session running a shell, streaming its output to the frontend.
@@ -107,8 +100,7 @@ pub fn terminal_create(
         })
         .map_err(|e| e.to_string())?;
 
-    let shell = resolve_shell(shell, std::env::var("SHELL").ok());
-    let mut cmd = terminal_command(&shell);
+    let mut cmd = terminal_command(shell.as_deref(), std::env::var("SHELL").ok());
     if let Some(dir) = cwd {
         if !dir.is_empty() {
             cmd.cwd(dir);
@@ -243,31 +235,94 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_del_to_ctrl_h_for_backspace() {
-        assert_eq!(normalize_terminal_input("abc\x7fd"), b"abc\x08d");
+    fn preserves_terminal_input_bytes() {
+        assert_eq!(normalize_terminal_input("abc\x7fd"), b"abc\x7fd");
         assert_eq!("λ".as_bytes(), normalize_terminal_input("λ"));
     }
 
     #[cfg(unix)]
     #[test]
-    fn terminal_command_wraps_shell_with_ctrl_h_erase() {
-        let cmd = terminal_command("/bin/zsh");
-        let argv: Vec<String> = cmd
-            .get_argv()
-            .iter()
-            .map(|a| a.to_string_lossy().to_string())
-            .collect();
-        assert_eq!(argv[0], "/bin/sh");
-        assert_eq!(argv[1], "-lc");
-        assert!(argv[2].contains("stty erase '^H'"));
+    fn terminal_command_starts_login_shell() {
+        let cmd = terminal_command(Some("/bin/zsh"), None);
+        assert!(cmd.is_default_prog());
         assert_eq!(
-            cmd.get_env("LYCEUM_SHELL")
+            cmd.get_env("SHELL")
                 .map(|v| v.to_string_lossy().to_string()),
             Some("/bin/zsh".to_string())
         );
         assert_eq!(
             cmd.get_env("TERM").map(|v| v.to_string_lossy().to_string()),
             Some("xterm-256color".to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_command_uses_env_shell_for_login_shell() {
+        let cmd = terminal_command(None, Some("/bin/bash".to_string()));
+        assert!(cmd.is_default_prog());
+        assert_eq!(
+            cmd.get_env("SHELL")
+                .map(|v| v.to_string_lossy().to_string()),
+            Some("/bin/bash".to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn login_zsh_reads_zprofile_before_zshrc() {
+        use std::{fs, path::Path};
+
+        if !Path::new("/bin/zsh").exists() {
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(".zprofile"),
+            "export LYCEUM_LOGIN_SHELL_TEST=from_zprofile\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join(".zshrc"),
+            "printf 'LYCEUM_LOGIN:%s\\n' \"$LYCEUM_LOGIN_SHELL_TEST\"; exit\n",
+        )
+        .unwrap();
+
+        let pty_system = native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut cmd = terminal_command(Some("/bin/zsh"), None);
+        cmd.env("HOME", dir.path());
+        cmd.env("ZDOTDIR", dir.path());
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut out = String::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    out.push_str(&String::from_utf8_lossy(&buf[..n]));
+                    if out.contains("LYCEUM_LOGIN:from_zprofile") {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = child.wait();
+        assert!(
+            out.contains("LYCEUM_LOGIN:from_zprofile"),
+            "pty output was: {out:?}"
         );
     }
 
@@ -309,7 +364,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn ctrl_h_erases_character_in_canonical_pty_input() {
+    fn del_erases_character_in_canonical_pty_input() {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -322,7 +377,7 @@ mod tests {
         let mut cmd = CommandBuilder::new("/bin/sh");
         cmd.args([
             "-c",
-            "stty erase '^H'; printf 'READY\\n'; IFS= read -r value; printf '<%s>' \"$value\"",
+            "printf 'READY\\n'; IFS= read -r value; printf '<%s>' \"$value\"",
         ]);
         let mut child = pair.slave.spawn_command(cmd).unwrap();
         drop(pair.slave);
@@ -344,7 +399,7 @@ mod tests {
         }
 
         let mut writer = pair.master.take_writer().unwrap();
-        writer.write_all(b"abc\x08d\r").unwrap();
+        writer.write_all(b"abc\x7fd\r").unwrap();
         writer.flush().unwrap();
         drop(writer);
 
