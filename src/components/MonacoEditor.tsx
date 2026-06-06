@@ -92,6 +92,12 @@ export default function MonacoEditor() {
       .map((d) => d.path)
       .join("\n"),
   );
+  const reloadVersions = useEditorStore((s) =>
+    s.docs
+      .filter(isTextDoc)
+      .map((d) => `${d.path}:${d.reloadVersion}`)
+      .join("\n"),
+  );
   // Per-document (keyed by model URI) debounce + pending payload, so a change in
   // one document never cancels another document's pending didChange on a fast
   // tab switch (a single shared timer would drop the outgoing doc's last edit).
@@ -286,6 +292,26 @@ export default function MonacoEditor() {
       .getState()
       .setSelection(selection ? model.getValueInRange(selection) : "");
   }, [activePath, openPaths, flushLspChange]);
+
+  // When a clean open text file changes on disk, the watcher updates the store.
+  // Existing Monaco models do not subscribe to content, so explicitly sync only
+  // on reloadVersion changes to avoid re-running this effect on every keystroke.
+  useEffect(() => {
+    for (const doc of useEditorStore.getState().docs.filter(isTextDoc)) {
+      const model = modelsRef.current.get(doc.path);
+      if (!model || model.getValue() === doc.content) continue;
+      const uri = model.uri.toString();
+      const isActiveModel = editorRef.current?.getModel() === model;
+      flushLspChange(uri);
+      model.setValue(doc.content);
+      if (!isActiveModel) {
+        const session = getSession(model.getLanguageId());
+        if (session) {
+          void didChange(session, uri, (lspChangeVersion += 1), doc.content);
+        }
+      }
+    }
+  }, [reloadVersions, flushLspChange]);
 
   // Dispose models for documents that were closed (runs only when the open set
   // changes, not on every keystroke).

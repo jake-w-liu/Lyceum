@@ -28,6 +28,7 @@ describe("editorStore", () => {
     expect(state.docs[0].name).toBe("main.ts");
     expect(state.docs[0].savedContent).toBe("hello");
     expect(state.docs[0].kind).toBe("text");
+    expect(state.docs[0].reloadVersion).toBe(0);
   });
 
   it("openDoc with an existing path does not duplicate, just activates", () => {
@@ -74,6 +75,34 @@ describe("editorStore", () => {
     expect(isDirty(doc)).toBe(true);
   });
 
+  it("replaceCleanContentFromDisk updates clean text docs and bumps reloadVersion", () => {
+    const store = useEditorStore.getState();
+    store.openDoc({ path: "/w/notes.txt", content: "old", language: "plaintext" });
+
+    store.replaceCleanContentFromDisk("/w/notes.txt", "# new");
+
+    const doc = useEditorStore.getState().docs[0];
+    expect(doc.content).toBe("# new");
+    expect(doc.savedContent).toBe("# new");
+    expect(doc.language).toBe("plaintext");
+    expect(doc.reloadVersion).toBe(1);
+    expect(isDirty(doc)).toBe(false);
+  });
+
+  it("replaceCleanContentFromDisk does not overwrite dirty text docs", () => {
+    const store = useEditorStore.getState();
+    store.openDoc({ path: "/w/a.ts", content: "local", language: "typescript" });
+    store.updateContent("/w/a.ts", "unsaved");
+
+    store.replaceCleanContentFromDisk("/w/a.ts", "external");
+
+    const doc = useEditorStore.getState().docs[0];
+    expect(doc.content).toBe("unsaved");
+    expect(doc.savedContent).toBe("local");
+    expect(doc.reloadVersion).toBe(0);
+    expect(isDirty(doc)).toBe(true);
+  });
+
   it("opens viewer tabs without dirty tracking or text mutation", () => {
     const store = useEditorStore.getState();
     store.openDoc({
@@ -93,6 +122,10 @@ describe("editorStore", () => {
     doc = useEditorStore.getState().docs[0];
     expect(doc.savedContent).toBe("");
     expect(isDirty(doc)).toBe(false);
+
+    store.bumpReloadVersion("/w/paper.pdf");
+    doc = useEditorStore.getState().docs[0];
+    expect(doc.reloadVersion).toBe(1);
   });
 
   it("closeDoc reassigns, nulls, or keeps activePath appropriately", () => {

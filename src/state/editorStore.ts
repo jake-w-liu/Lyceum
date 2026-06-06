@@ -19,6 +19,7 @@ export interface EditorDoc {
   savedContent: string;
   language: string;
   kind: EditorDocKind;
+  reloadVersion: number;
 }
 
 export interface EditorData {
@@ -67,6 +68,14 @@ export interface EditorActions {
   closeDoc: (path: string) => void;
   setActive: (path: string) => void;
   updateContent: (path: string, content: string) => void;
+  /**
+   * Replace a clean text document with disk content observed through the
+   * workspace watcher. Dirty buffers are rechecked inside the action so an async
+   * file read can never overwrite edits typed while the read was in flight.
+   */
+  replaceCleanContentFromDisk: (path: string, content: string) => void;
+  /** Force a remount/re-read of a binary viewer tab for the same path. */
+  bumpReloadVersion: (path: string) => void;
   /**
    * Mark a doc saved. Pass `savedContent` = the exact bytes written to disk; the
    * doc stays dirty if its live buffer has since diverged (edits typed during the
@@ -117,6 +126,7 @@ export const useEditorStore = create<EditorState>()((set) => ({
         savedContent: input.content,
         language: input.language,
         kind: input.kind ?? "text",
+        reloadVersion: 0,
       };
       return { docs: [...s.docs, doc], activePath: input.path };
     }),
@@ -142,6 +152,34 @@ export const useEditorStore = create<EditorState>()((set) => ({
     set((s) => ({
       docs: s.docs.map((doc) =>
         doc.path === path && doc.kind === "text" ? { ...doc, content } : doc,
+      ),
+    })),
+
+  replaceCleanContentFromDisk: (path, content) =>
+    set((s) => ({
+      docs: s.docs.map((doc) => {
+        if (doc.path !== path || doc.kind !== "text" || isDirty(doc)) {
+          return doc;
+        }
+        if (doc.content === content && doc.savedContent === content) {
+          return doc;
+        }
+        return {
+          ...doc,
+          content,
+          savedContent: content,
+          language: languageForPath(path),
+          reloadVersion: doc.reloadVersion + 1,
+        };
+      }),
+    })),
+
+  bumpReloadVersion: (path) =>
+    set((s) => ({
+      docs: s.docs.map((doc) =>
+        doc.path === path
+          ? { ...doc, reloadVersion: doc.reloadVersion + 1 }
+          : doc,
       ),
     })),
 

@@ -1,10 +1,12 @@
 import { useEffect } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { Event } from "@tauri-apps/api/event";
 import {
   unwatchWorkspace,
   watchWorkspace,
   type WorkspaceFsEvent,
 } from "../lib/ipc";
+import { reloadOpenEditorPaths } from "../lib/editorReload";
 import { useTreeStore } from "../state/treeStore";
 import { useWorkspaceStore } from "../state/workspaceStore";
 
@@ -22,6 +24,7 @@ export function useWorkspaceFileWatcher(): void {
     let disposed = false;
     let unlisten: UnlistenFn | undefined;
     let refreshTimer = 0;
+    const pendingPaths = new Set<string>();
 
     const clearRefreshTimer = () => {
       if (refreshTimer) {
@@ -30,12 +33,16 @@ export function useWorkspaceFileWatcher(): void {
       }
     };
 
-    const scheduleRefresh = () => {
+    const scheduleRefresh = (event: Event<WorkspaceFsEvent>) => {
+      for (const path of event.payload.paths) pendingPaths.add(path);
       clearRefreshTimer();
       refreshTimer = window.setTimeout(() => {
         refreshTimer = 0;
+        const paths = Array.from(pendingPaths);
+        pendingPaths.clear();
         if (!useWorkspaceStore.getState().rootPath) return;
         useTreeStore.getState().refresh();
+        void reloadOpenEditorPaths(paths);
       }, REFRESH_DEBOUNCE_MS);
     };
 

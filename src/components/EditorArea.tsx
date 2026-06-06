@@ -58,6 +58,10 @@ export function EditorArea() {
   const activeKind = useEditorStore(
     (s) => s.docs.find((doc) => doc.path === s.activePath)?.kind ?? null,
   );
+  const activeReloadVersion = useEditorStore(
+    (s) =>
+      s.docs.find((doc) => doc.path === s.activePath)?.reloadVersion ?? 0,
+  );
   const hasTextDocs = useEditorStore((s) => s.docs.some(isTextDoc));
   const editorPreview = useLayoutStore((s) => s.editorPreview);
   // Preview replaces the editor view in place for supported text preview types.
@@ -104,7 +108,10 @@ export function EditorArea() {
                 <Suspense
                   fallback={<div className="editor-loading">Loading PDF…</div>}
                 >
-                  <PdfViewer key={activePath} path={activePath} />
+                  <PdfViewer
+                    key={`${activePath}:${activeReloadVersion}`}
+                    path={activePath}
+                  />
                 </Suspense>
               </div>
             )}
@@ -113,7 +120,10 @@ export function EditorArea() {
                 <Suspense
                   fallback={<div className="editor-loading">Loading image…</div>}
                 >
-                  <ImageViewer key={activePath} path={activePath} />
+                  <ImageViewer
+                    key={`${activePath}:${activeReloadVersion}`}
+                    path={activePath}
+                  />
                 </Suspense>
               </div>
             )}

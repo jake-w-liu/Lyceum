@@ -30,6 +30,7 @@ const doc = (path: string): EditorDoc => ({
   savedContent: "println(1)",
   language: "julia",
   kind: "text",
+  reloadVersion: 0,
 });
 
 describe("runInvocation", () => {
