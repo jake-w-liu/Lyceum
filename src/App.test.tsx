@@ -26,6 +26,8 @@ vi.mock("./lib/ipc", () => ({
     throw new Error("no test file");
   }),
   readFileBytes: vi.fn(async () => new Uint8Array([1, 2, 3])),
+  unwatchWorkspace: vi.fn(async () => {}),
+  watchWorkspace: vi.fn(async () => {}),
   writeFile: vi.fn(async () => {}),
 }));
 

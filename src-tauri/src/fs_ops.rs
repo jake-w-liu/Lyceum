@@ -337,7 +337,11 @@ fn restore_trash_batch_impl(root: &Path, items: Vec<TrashItemDto>) -> Result<(),
         }
         if let Err(e) = move_entry(&trashed, &original) {
             rollback_moves(&done);
-            return Err(format!("{} -> {}: {e}", trashed.display(), original.display()));
+            return Err(format!(
+                "{} -> {}: {e}",
+                trashed.display(),
+                original.display()
+            ));
         }
         done.push((original.clone(), trashed.clone()));
         cleanup_empty_trash_ancestors(&root, &trashed);
@@ -376,7 +380,11 @@ fn redo_trash_batch_impl(root: &Path, items: Vec<TrashItemDto>) -> Result<(), St
         }
         if let Err(e) = move_entry(&original, &trashed) {
             rollback_moves(&done);
-            return Err(format!("{} -> {}: {e}", original.display(), trashed.display()));
+            return Err(format!(
+                "{} -> {}: {e}",
+                original.display(),
+                trashed.display()
+            ));
         }
         done.push((trashed.clone(), original.clone()));
     }
@@ -466,7 +474,10 @@ fn symlink_to(target: &Path, link: &Path) -> std::io::Result<()> {
 #[cfg(windows)]
 fn symlink_to(target: &Path, link: &Path) -> std::io::Result<()> {
     // Pick the right Windows symlink kind from the resolved target.
-    if std::fs::metadata(target).map(|m| m.is_dir()).unwrap_or(false) {
+    if std::fs::metadata(target)
+        .map(|m| m.is_dir())
+        .unwrap_or(false)
+    {
         std::os::windows::fs::symlink_dir(target, link)
     } else {
         std::os::windows::fs::symlink_file(target, link)

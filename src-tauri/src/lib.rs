@@ -16,6 +16,7 @@ mod menu;
 mod search;
 mod terminal;
 mod walk;
+mod workspace_watch;
 
 use app_info::AppInfo;
 use tauri::{Emitter, Manager, RunEvent};
@@ -77,6 +78,7 @@ pub fn run() {
         .manage(terminal::TerminalManager::default())
         .manage(lsp::LspManager::default())
         .manage(julia::RunManager::default())
+        .manage(workspace_watch::WorkspaceWatchManager::default())
         .setup(|app| {
             let menu = menu::build_app_menu(app.handle())?;
             app.set_menu(menu)?;
@@ -114,6 +116,8 @@ pub fn run() {
             julia::run_cancel,
             latex::resolve_latex_tools,
             latex::run_latex_build,
+            workspace_watch::watch_workspace,
+            workspace_watch::unwatch_workspace,
             lsp::lsp_start,
             lsp::lsp_send,
             lsp::lsp_stop

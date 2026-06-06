@@ -1,0 +1,75 @@
+import { useEffect } from "react";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import {
+  unwatchWorkspace,
+  watchWorkspace,
+  type WorkspaceFsEvent,
+} from "../lib/ipc";
+import { useTreeStore } from "../state/treeStore";
+import { useWorkspaceStore } from "../state/workspaceStore";
+
+const REFRESH_DEBOUNCE_MS = 150;
+
+export function useWorkspaceFileWatcher(): void {
+  const rootPath = useWorkspaceStore((s) => s.rootPath);
+
+  useEffect(() => {
+    if (!rootPath) {
+      void unwatchWorkspace().catch(() => {});
+      return;
+    }
+
+    let disposed = false;
+    let unlisten: UnlistenFn | undefined;
+    let refreshTimer = 0;
+
+    const clearRefreshTimer = () => {
+      if (refreshTimer) {
+        window.clearTimeout(refreshTimer);
+        refreshTimer = 0;
+      }
+    };
+
+    const scheduleRefresh = () => {
+      clearRefreshTimer();
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = 0;
+        if (!useWorkspaceStore.getState().rootPath) return;
+        useTreeStore.getState().refresh();
+      }, REFRESH_DEBOUNCE_MS);
+    };
+
+    void (async () => {
+      try {
+        const fn = await listen<WorkspaceFsEvent>(
+          "workspace:fs-change",
+          scheduleRefresh,
+        );
+        if (disposed) {
+          fn();
+          return;
+        }
+        unlisten = fn;
+      } catch {
+        /* not running inside Tauri */
+        return;
+      }
+
+      try {
+        await watchWorkspace(rootPath);
+        if (disposed) {
+          void unwatchWorkspace(rootPath).catch(() => {});
+        }
+      } catch {
+        /* not running inside Tauri or watcher unavailable */
+      }
+    })();
+
+    return () => {
+      disposed = true;
+      clearRefreshTimer();
+      unlisten?.();
+      void unwatchWorkspace(rootPath).catch(() => {});
+    };
+  }, [rootPath]);
+}

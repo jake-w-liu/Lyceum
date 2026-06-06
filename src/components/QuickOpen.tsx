@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useUiStore } from "../state/uiStore";
 import { baseName, useWorkspaceStore } from "../state/workspaceStore";
+import { useTreeStore } from "../state/treeStore";
 import { listWorkspaceFiles } from "../lib/ipc";
 import { fuzzyFilter } from "../lib/fuzzy";
 
@@ -13,6 +14,7 @@ export function QuickOpen() {
   const activeModal = useUiStore((s) => s.activeModal);
   const closeModal = useUiStore((s) => s.closeModal);
   const rootPath = useWorkspaceStore((s) => s.rootPath);
+  const refreshNonce = useTreeStore((s) => s.refreshNonce);
 
   const [files, setFiles] = useState<string[]>([]);
   const [query, setQuery] = useState("");
@@ -24,6 +26,12 @@ export function QuickOpen() {
     }
     setQuery("");
     setSelected(0);
+  }, [activeModal]);
+
+  useEffect(() => {
+    if (activeModal !== "quickOpen") {
+      return;
+    }
     if (!rootPath) {
       setFiles([]);
       return;
@@ -43,7 +51,7 @@ export function QuickOpen() {
     return () => {
       cancelled = true;
     };
-  }, [activeModal, rootPath]);
+  }, [activeModal, rootPath, refreshNonce]);
 
   // Memoized + capped so it doesn't re-filter all paths on hover/selection
   // re-renders, and never runs while the modal is closed.

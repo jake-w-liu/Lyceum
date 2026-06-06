@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const ipcMocks = vi.hoisted(() => ({
@@ -8,9 +8,13 @@ const ipcMocks = vi.hoisted(() => ({
 const pdfMocks = vi.hoisted(() => ({
   destroy: vi.fn(),
   getDocument: vi.fn(),
+  getAnnotations: vi.fn(),
+  getDestination: vi.fn(),
   getPage: vi.fn(),
+  getPageIndex: vi.fn(),
   getTextContent: vi.fn(),
   getViewport: vi.fn(),
+  annotationLayerRender: vi.fn(),
   pageCleanup: vi.fn(),
   pageRender: vi.fn(),
   taskCancel: vi.fn(),
@@ -29,6 +33,9 @@ vi.mock("pdfjs-dist/build/pdf.worker.min.mjs?url", () => ({
 vi.mock("pdfjs-dist", () => ({
   GlobalWorkerOptions: {},
   getDocument: pdfMocks.getDocument,
+  AnnotationLayer: vi.fn().mockImplementation(({ div }) => ({
+    render: (params: unknown) => pdfMocks.annotationLayerRender(params, div),
+  })),
   TextLayer: vi.fn().mockImplementation(() => ({
     cancel: pdfMocks.textLayerCancel,
     render: pdfMocks.textLayerRender,
@@ -43,6 +50,7 @@ const originalGetContext = HTMLCanvasElement.prototype.getContext;
 function mockPdfDocument(numPages: number) {
   const pageProxy = {
     cleanup: pdfMocks.pageCleanup,
+    getAnnotations: pdfMocks.getAnnotations,
     getTextContent: pdfMocks.getTextContent,
     getViewport: pdfMocks.getViewport,
     render: pdfMocks.pageRender,
@@ -50,8 +58,11 @@ function mockPdfDocument(numPages: number) {
   pdfMocks.getPage.mockResolvedValue(pageProxy);
   pdfMocks.getDocument.mockReturnValue({
     promise: Promise.resolve({
+      annotationStorage: {},
       destroy: pdfMocks.destroy,
+      getDestination: pdfMocks.getDestination,
       getPage: pdfMocks.getPage,
+      getPageIndex: pdfMocks.getPageIndex,
       numPages,
     }),
   });
@@ -62,11 +73,30 @@ beforeEach(() => {
   Object.values(pdfMocks).forEach((mock) => mock.mockReset());
   ipcMocks.readFileBytes.mockReset();
   ipcMocks.readFileBytes.mockResolvedValue(new Uint8Array([1, 2, 3]));
+  pdfMocks.getAnnotations.mockResolvedValue([]);
+  pdfMocks.getDestination.mockResolvedValue(null);
+  pdfMocks.getPageIndex.mockResolvedValue(0);
   pdfMocks.getTextContent.mockResolvedValue({ items: [], styles: {} });
-  pdfMocks.getViewport.mockImplementation(({ scale }: { scale: number }) => ({
-    height: 240 * scale,
-    width: 180 * scale,
-  }));
+  pdfMocks.getViewport.mockImplementation(({ scale }: { scale: number }) => {
+    const viewport = {
+      height: 240 * scale,
+      width: 180 * scale,
+      clone: vi.fn(
+        ({ scale: nextScale }: { scale?: number; dontFlip?: boolean } = {}) =>
+          pdfMocks.getViewport({ scale: nextScale ?? scale }),
+      ),
+      convertToViewportPoint: vi.fn((x: number, y: number) => [
+        x * scale,
+        (240 - y) * scale,
+      ]),
+    };
+    return viewport;
+  });
+  pdfMocks.annotationLayerRender.mockImplementation(
+    async (_params: unknown, div: HTMLDivElement) => {
+      div.replaceChildren();
+    },
+  );
   pdfMocks.pageRender.mockReturnValue({
     cancel: pdfMocks.taskCancel,
     promise: Promise.resolve(),
@@ -104,6 +134,19 @@ describe("PdfViewer", () => {
       zoom: 1,
     });
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("keeps the restored page instead of deriving current page from the render cache", async () => {
+    usePreviewStore
+      .getState()
+      .setViewState("/w/page-two.pdf", { page: 2, zoom: 1 });
+    mockPdfDocument(3);
+
+    render(<PdfViewer path="/w/page-two.pdf" />);
+
+    expect(await screen.findByText("2 / 3")).toBeInTheDocument();
+    await waitFor(() => expect(pdfMocks.getPage).toHaveBeenCalledWith(2));
+    expect(screen.getByText("2 / 3")).toBeInTheDocument();
   });
 
   it("restores the saved zoom on reopen", async () => {
@@ -154,5 +197,58 @@ describe("PdfViewer", () => {
         delete (window as unknown as Record<string, unknown>).devicePixelRatio;
       }
     }
+  });
+
+  it("renders PDF annotation links and jumps to internal destinations", async () => {
+    const destinationRef = { num: 5, gen: 0 };
+    pdfMocks.getAnnotations.mockResolvedValue([{ id: "link-1", dest: "sec" }]);
+    pdfMocks.getDestination.mockResolvedValue([
+      destinationRef,
+      { name: "XYZ" },
+      0,
+      240,
+      null,
+    ]);
+    pdfMocks.getPageIndex.mockResolvedValue(2);
+    pdfMocks.annotationLayerRender.mockImplementation(
+      async (
+        params: {
+          annotations: Array<{ dest?: string }>;
+          linkService: {
+            getDestinationHash: (dest: string) => string;
+            goToDestination: (dest: string) => Promise<void>;
+          };
+        },
+        div: HTMLDivElement,
+      ) => {
+        div.replaceChildren();
+        for (const annotation of params.annotations) {
+          if (!annotation.dest) continue;
+          const section = document.createElement("section");
+          section.className = "linkAnnotation";
+          const link = document.createElement("a");
+          link.href = params.linkService.getDestinationHash(annotation.dest);
+          link.onclick = () => {
+            void params.linkService.goToDestination(annotation.dest!);
+            return false;
+          };
+          section.append(link);
+          div.append(section);
+        }
+      },
+    );
+    mockPdfDocument(3);
+
+    const { container } = render(<PdfViewer path="/w/links.pdf" />);
+
+    expect(await screen.findByText("1 / 3")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(container.querySelector(".pdf-annotation-layer a")).not.toBeNull(),
+    );
+    fireEvent.click(container.querySelector(".pdf-annotation-layer a")!);
+
+    await waitFor(() => expect(screen.getByText("3 / 3")).toBeInTheDocument());
+    expect(pdfMocks.getDestination).toHaveBeenCalledWith("sec");
+    expect(pdfMocks.getPageIndex).toHaveBeenCalledWith(destinationRef);
   });
 });

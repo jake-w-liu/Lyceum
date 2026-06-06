@@ -11,6 +11,7 @@ import { useEffect } from "react";
 import { useCommandKeybindings } from "./hooks/useCommandKeybindings";
 import { useMenuCommands } from "./hooks/useMenuCommands";
 import { useOpenFileBridge } from "./hooks/useOpenFileBridge";
+import { useWorkspaceFileWatcher } from "./hooks/useWorkspaceFileWatcher";
 import { useLayoutStore } from "./state/layoutStore";
 import { applyThemeAttribute, useThemeStore } from "./state/themeStore";
 import {
@@ -28,6 +29,7 @@ export default function App() {
   useCommandKeybindings();
   useMenuCommands();
   useOpenFileBridge();
+  useWorkspaceFileWatcher();
 
   const theme = useThemeStore((s) => s.theme);
   useEffect(() => applyThemeAttribute(theme), [theme]);

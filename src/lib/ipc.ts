@@ -44,6 +44,12 @@ export interface LatexToolInfo {
   source: "path" | string;
 }
 
+export interface WorkspaceFsEvent {
+  root: string;
+  paths: string[];
+  kind: string;
+}
+
 const FALLBACK_APP_INFO: AppInfo = {
   name: "lyceum",
   version: "0.2.0",
@@ -66,6 +72,16 @@ export async function getAppInfo(): Promise<AppInfo> {
 /** List the immediate children of a directory (file explorer, M2). */
 export async function readDirectory(path: string): Promise<DirEntry[]> {
   return invoke<DirEntry[]>("read_directory", { path });
+}
+
+/** Start recursively watching the current workspace for filesystem changes. */
+export async function watchWorkspace(root: string): Promise<void> {
+  await invoke("watch_workspace", { root });
+}
+
+/** Stop the active workspace filesystem watcher, if any. */
+export async function unwatchWorkspace(root?: string): Promise<void> {
+  await invoke("unwatch_workspace", { root: root ?? null });
 }
 
 /** List the immediate children of a directory (file explorer, M2). */
