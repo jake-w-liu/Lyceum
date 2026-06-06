@@ -71,6 +71,42 @@ describe("matchKeybinding mod resolution", () => {
   });
 });
 
+describe("matchKeybinding editor font zoom", () => {
+  it("mac meta+= (Equal, no shift) => view.zoomIn", () => {
+    const e = new KeyboardEvent("keydown", { code: "Equal", metaKey: true });
+    expect(matchKeybinding(e, {}, true)).toBe("view.zoomIn");
+  });
+
+  it("mac meta+shift+= (the + key) => view.zoomIn", () => {
+    const e = new KeyboardEvent("keydown", {
+      code: "Equal",
+      metaKey: true,
+      shiftKey: true,
+    });
+    expect(matchKeybinding(e, {}, true)).toBe("view.zoomIn");
+  });
+
+  it("mac meta+- (Minus) => view.zoomOut", () => {
+    const e = new KeyboardEvent("keydown", { code: "Minus", metaKey: true });
+    expect(matchKeybinding(e, {}, true)).toBe("view.zoomOut");
+  });
+
+  it("mac meta+0 (Digit0) => view.resetZoom", () => {
+    const e = new KeyboardEvent("keydown", { code: "Digit0", metaKey: true });
+    expect(matchKeybinding(e, {}, true)).toBe("view.resetZoom");
+  });
+
+  it("win ctrl+= (Equal) => view.zoomIn", () => {
+    const e = new KeyboardEvent("keydown", { code: "Equal", ctrlKey: true });
+    expect(matchKeybinding(e, {}, false)).toBe("view.zoomIn");
+  });
+
+  it("plain = (no mod) => null", () => {
+    const e = new KeyboardEvent("keydown", { code: "Equal" });
+    expect(matchKeybinding(e, {}, true)).toBeNull();
+  });
+});
+
 describe("evaluateWhen", () => {
   it("'a || b' with {b:true} => true", () => {
     expect(evaluateWhen("a || b", { b: true })).toBe(true);

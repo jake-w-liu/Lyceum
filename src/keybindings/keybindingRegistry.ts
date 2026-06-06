@@ -25,6 +25,13 @@ export const DEFAULT_KEYMAP: Keybinding[] = [
   { key: "mod+shift+v", command: "preview.open" },
   { key: "mod+shift+f", command: "workbench.searchWorkspace" },
   { key: "mod+enter", command: "editor.run" },
+  // Editor font zoom (VS Code-style). Both with and without Shift on the Equal
+  // key so Cmd+= and Cmd++ both enlarge; Cmd+- shrinks; Cmd+0 resets.
+  { key: "mod+equal", command: "view.zoomIn" },
+  { key: "mod+shift+equal", command: "view.zoomIn" },
+  { key: "mod+minus", command: "view.zoomOut" },
+  { key: "mod+shift+minus", command: "view.zoomOut" },
+  { key: "mod+digit0", command: "view.resetZoom" },
   { key: "escape", command: "workbench.dismiss", when: "paletteOpen || quickOpenOpen || modalOpen" },
 ];
 
@@ -118,6 +125,14 @@ function matchMainKey(token: string, e: KeyboardEvent): boolean {
   switch (token) {
     case "backquote":
       return e.code === "Backquote";
+    // Match the physical key by `code` so the binding is layout-independent and
+    // unaffected by Shift turning "=" into "+" or "-" into "_".
+    case "equal":
+      return e.code === "Equal";
+    case "minus":
+      return e.code === "Minus";
+    case "digit0":
+      return e.code === "Digit0";
     case "tab":
       return e.key === "Tab";
     case "enter":

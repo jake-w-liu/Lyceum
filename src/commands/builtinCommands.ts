@@ -22,7 +22,7 @@ import { stopActiveRun } from "../lib/run";
 import { saveSettings, settingsFilePath } from "../lib/settingsPersistence";
 import { runEditorAction } from "../lib/editorBridge";
 import { useTreeStore } from "../state/treeStore";
-import { useSettingsStore } from "../state/settingsStore";
+import { DEFAULT_SETTINGS, useSettingsStore } from "../state/settingsStore";
 import { writePty } from "../lib/terminal";
 import { isInlinePreviewPath, isTexSourcePath } from "../lib/fileTypes";
 
@@ -168,6 +168,39 @@ export function registerBuiltinCommands(): void {
     title: "Cycle Color Theme",
     category: "View",
     run: () => useThemeStore.getState().cycleTheme(),
+  });
+
+  // --- Editor font zoom (Cmd/Ctrl + = / - / 0). Monaco live-applies fontSize
+  // from settings, so adjusting it enlarges the editor text immediately, and
+  // the change is persisted by the settings store subscription. ---
+  const FONT_SIZE_MIN = 8;
+  const FONT_SIZE_MAX = 40;
+  const adjustFontSize = (delta: number) => {
+    const { settings, setSetting } = useSettingsStore.getState();
+    const next = Math.min(
+      FONT_SIZE_MAX,
+      Math.max(FONT_SIZE_MIN, settings.fontSize + delta),
+    );
+    if (next !== settings.fontSize) setSetting("fontSize", next);
+  };
+  commandRegistry.register({
+    id: "view.zoomIn",
+    title: "Increase Editor Font Size",
+    category: "View",
+    run: () => adjustFontSize(1),
+  });
+  commandRegistry.register({
+    id: "view.zoomOut",
+    title: "Decrease Editor Font Size",
+    category: "View",
+    run: () => adjustFontSize(-1),
+  });
+  commandRegistry.register({
+    id: "view.resetZoom",
+    title: "Reset Editor Font Size",
+    category: "View",
+    run: () =>
+      useSettingsStore.getState().setSetting("fontSize", DEFAULT_SETTINGS.fontSize),
   });
   for (const t of THEME_ORDER) {
     commandRegistry.register({
