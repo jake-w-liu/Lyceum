@@ -682,10 +682,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
         destinationDir,
       );
       if (moved.length > 0) {
-        const localMoves = movable.map((entry) => ({
-          from: entry.path,
-          to: joinPath(destinationDir, entry.name),
-        }));
+        const localMoves = moved.map(({ from, to }) => ({ from, to }));
         useEditorStore.getState().moveDocPaths(localMoves);
         useTreeStore.getState().remapExpanded(localMoves);
         useTreeStore.getState().setSelection(localMoves.map((item) => item.to));

@@ -246,6 +246,36 @@ describe("Explorer", () => {
     expect(useEditorStore.getState().docs[0].path).toBe("/ws/src/README.md");
   });
 
+  it("uses backend-reported move paths to remap open editor tabs", async () => {
+    vi.mocked(movePaths).mockResolvedValue([
+      { from: "/ws/README.md", to: "/canonical/src/README.md", isDir: false },
+    ]);
+    useEditorStore.getState().openDoc({
+      path: "/ws/README.md",
+      content: "# readme",
+      language: "markdown",
+    });
+    render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await screen.findByText("README.md");
+    const readmeRow = screen.getByText("README.md").closest(".tree-row")!;
+    const srcRow = screen.getByText("src").closest(".tree-row")!;
+    const dataTransfer = {
+      effectAllowed: "",
+      dropEffect: "",
+      setData: vi.fn(),
+      getData: vi.fn(),
+    };
+
+    fireEvent.dragStart(readmeRow, { dataTransfer });
+    fireEvent.dragOver(srcRow, { dataTransfer });
+    fireEvent.drop(srcRow, { dataTransfer });
+
+    await waitFor(() => expect(movePaths).toHaveBeenCalled());
+    expect(useEditorStore.getState().docs[0].path).toBe(
+      "/canonical/src/README.md",
+    );
+  });
+
   it("moves a selected batch when dragging one selected row", async () => {
     vi.mocked(readDirectory).mockImplementation(async (p: string) => {
       if (p === ROOT) return [dir("src"), dir("assets"), file("README.md")];
