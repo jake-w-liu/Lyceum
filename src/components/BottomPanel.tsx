@@ -1,8 +1,8 @@
 // Bottom panel hosting the Terminal / Problems / Output tabs.
 //
 // The live terminal (M5) is lazy-loaded and stays mounted once first opened
-// (hidden on other tabs) so switching to Problems/Output does not kill running
-// shells. Closing the whole panel unmounts it (and closes its PTYs).
+// (hidden on other tabs or when the panel is closed) so switching views or
+// hiding the panel does not kill running shells.
 
 import { Suspense, lazy, useEffect, useState } from "react";
 import { useLayoutStore } from "../state/layoutStore";
@@ -20,7 +20,7 @@ const tabs: { id: BottomTab; label: string }[] = [
   { id: "output", label: "Output" },
 ];
 
-export function BottomPanel() {
+export function BottomPanel({ visible }: { visible: boolean }) {
   const bottomPanelHeight = useLayoutStore((s) => s.bottomPanelHeight);
   const activeBottomTab = useLayoutStore((s) => s.activeBottomTab);
   const setActiveBottomTab = useLayoutStore((s) => s.setActiveBottomTab);
@@ -28,16 +28,17 @@ export function BottomPanel() {
 
   // Mount the terminal lazily, the first time its tab is shown, then keep it.
   const [terminalMounted, setTerminalMounted] = useState(
-    activeBottomTab === "terminal",
+    visible && activeBottomTab === "terminal",
   );
   useEffect(() => {
-    if (activeBottomTab === "terminal") setTerminalMounted(true);
-  }, [activeBottomTab]);
+    if (visible && activeBottomTab === "terminal") setTerminalMounted(true);
+  }, [activeBottomTab, visible]);
 
   return (
     <section
       className="bottom-panel"
       aria-label="Panel"
+      hidden={!visible}
       style={{ height: bottomPanelHeight }}
     >
       <div className="panel-header">

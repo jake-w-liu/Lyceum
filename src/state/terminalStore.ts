@@ -8,6 +8,8 @@ export interface TerminalSession {
   id: string;
   title: string;
   cwd: string | null;
+  /** Current backend PTY id for the mounted view, null while not ready. */
+  backendPtyId: string | null;
   /** Optional command written to the PTY once it starts (e.g. a Julia REPL). */
   startupCommand?: string;
 }
@@ -29,6 +31,8 @@ export interface TerminalActions {
   closeTerminal: (id: string) => void;
   setActive: (id: string) => void;
   renameTerminal: (id: string, title: string) => void;
+  setBackendPtyId: (id: string, backendPtyId: string) => void;
+  clearBackendPtyId: (id: string, backendPtyId?: string) => void;
 }
 
 export type TerminalState = TerminalData & TerminalActions;
@@ -52,6 +56,7 @@ export const useTerminalStore = create<TerminalState>()((set, get) => ({
           id,
           title: opts?.title ?? `Terminal ${seq}`,
           cwd,
+          backendPtyId: null,
           startupCommand: opts?.startupCommand,
         },
       ],
@@ -76,5 +81,23 @@ export const useTerminalStore = create<TerminalState>()((set, get) => ({
   renameTerminal: (id, title) =>
     set((s) => ({
       terminals: s.terminals.map((t) => (t.id === id ? { ...t, title } : t)),
+    })),
+
+  setBackendPtyId: (id, backendPtyId) =>
+    set((s) => ({
+      terminals: s.terminals.map((t) =>
+        t.id === id ? { ...t, backendPtyId } : t,
+      ),
+    })),
+
+  clearBackendPtyId: (id, backendPtyId) =>
+    set((s) => ({
+      terminals: s.terminals.map((t) => {
+        if (t.id !== id) return t;
+        if (backendPtyId !== undefined && t.backendPtyId !== backendPtyId) {
+          return t;
+        }
+        return { ...t, backendPtyId: null };
+      }),
     })),
 }));

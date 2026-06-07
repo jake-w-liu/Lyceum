@@ -45,4 +45,16 @@ describe("terminalStore", () => {
     get().renameTerminal("term-1", "build");
     expect(get().terminals[0].title).toBe("build");
   });
+
+  it("tracks the mounted backend PTY id without stale cleanup", () => {
+    get().createTerminal();
+    get().setBackendPtyId("term-1", "term-1_1");
+    expect(get().terminals[0].backendPtyId).toBe("term-1_1");
+
+    get().clearBackendPtyId("term-1", "term-1_old");
+    expect(get().terminals[0].backendPtyId).toBe("term-1_1");
+
+    get().clearBackendPtyId("term-1", "term-1_1");
+    expect(get().terminals[0].backendPtyId).toBeNull();
+  });
 });

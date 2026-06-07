@@ -20,6 +20,7 @@ import {
 import { useSettingsStore } from "../state/settingsStore";
 import { useWorkspaceStore } from "../state/workspaceStore";
 import { getActiveDoc, useEditorStore } from "../state/editorStore";
+import { useTerminalStore } from "../state/terminalStore";
 import { resolveTerminalCwd } from "../lib/terminalCwd";
 import { terminalKeyOverride } from "../lib/terminalKeys";
 import { isMac } from "../hooks/useLayoutKeybindings";
@@ -148,12 +149,14 @@ export function TerminalView({
           void closePty(ptyId);
           return;
         }
+        useTerminalStore.getState().setBackendPtyId(id, ptyId);
         // Flush any keystrokes buffered before the PTY existed.
         ready = true;
         for (const chunk of pending) void writePty(ptyId, chunk);
         pending.length = 0;
         if (startupCommand) void writePty(ptyId, startupCommand);
       } catch (e) {
+        useTerminalStore.getState().clearBackendPtyId(id, ptyId);
         term.write(`\r\nfailed to start terminal: ${String(e)}\r\n`);
       }
     })();
@@ -187,6 +190,7 @@ export function TerminalView({
       observer.disconnect();
       dataDisp.dispose();
       unlistens.forEach((off) => off());
+      useTerminalStore.getState().clearBackendPtyId(id, ptyId);
       void closePty(ptyId);
       term.dispose();
       termRef.current = null;

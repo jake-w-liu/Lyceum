@@ -9,8 +9,12 @@ import { initialEditorData, useEditorStore } from "../state/editorStore";
 import { initialPreviewData, usePreviewStore } from "../state/previewStore";
 
 const runLatexBuildMock = vi.hoisted(() => vi.fn());
+const writePtyMock = vi.hoisted(() => vi.fn());
 vi.mock("../lib/latexBuild", () => ({
   runLatexBuild: (...args: unknown[]) => runLatexBuildMock(...args),
+}));
+vi.mock("../lib/terminal", () => ({
+  writePty: (...args: unknown[]) => writePtyMock(...args),
 }));
 
 beforeEach(() => {
@@ -21,6 +25,7 @@ beforeEach(() => {
   useEditorStore.setState(initialEditorData, false);
   usePreviewStore.setState(initialPreviewData, false);
   runLatexBuildMock.mockClear();
+  writePtyMock.mockClear();
 });
 
 describe("builtinCommands", () => {
@@ -102,6 +107,25 @@ describe("builtinCommands", () => {
     await commandRegistry.execute("latex.build");
 
     expect(runLatexBuildMock).toHaveBeenCalledWith({ openOnSuccess: false });
+  });
+
+  it("terminal.runSelection writes to the live backend PTY id", async () => {
+    const id = useTerminalStore.getState().createTerminal();
+    useTerminalStore.getState().setBackendPtyId(id, "term-1_9");
+    useEditorStore.getState().setSelection("x = 1");
+
+    await commandRegistry.execute("terminal.runSelection");
+
+    expect(writePtyMock).toHaveBeenCalledWith("term-1_9", "x = 1\n");
+  });
+
+  it("terminal.runSelection no-ops while the terminal PTY is not mounted", async () => {
+    useTerminalStore.getState().createTerminal();
+    useEditorStore.getState().setSelection("x = 1");
+
+    await commandRegistry.execute("terminal.runSelection");
+
+    expect(writePtyMock).not.toHaveBeenCalled();
   });
 
   it("preview.open is a no-op for unsupported active files", async () => {

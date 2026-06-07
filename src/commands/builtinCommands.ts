@@ -333,9 +333,15 @@ export function registerBuiltinCommands(): void {
     category: "Run",
     run: () => {
       const selection = useEditorStore.getState().selection;
-      const id = useTerminalStore.getState().activeId;
-      if (id && selection.trim()) {
-        void writePty(id, selection.endsWith("\n") ? selection : `${selection}\n`);
+      const { activeId, terminals } = useTerminalStore.getState();
+      const backendPtyId =
+        terminals.find((terminal) => terminal.id === activeId)?.backendPtyId ??
+        null;
+      if (backendPtyId && selection.trim()) {
+        void writePty(
+          backendPtyId,
+          selection.endsWith("\n") ? selection : `${selection}\n`,
+        );
       }
     },
   });

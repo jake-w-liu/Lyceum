@@ -1,7 +1,7 @@
 // Terminal panel (M5): tab strip for multiple terminals plus the active
 // terminal view. Auto-creates a terminal on first mount. Each session's
 // TerminalView stays mounted (hidden when inactive) so switching tabs does not
-// kill its shell; closing a tab or the panel closes its PTY.
+// kill its shell; closing a terminal tab closes that tab's PTY.
 
 import { useEffect, useState } from "react";
 import { useTerminalStore } from "../state/terminalStore";

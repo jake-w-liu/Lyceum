@@ -84,12 +84,12 @@ describe("App shell", () => {
   it("opens the bottom panel with the primary modifier + J", async () => {
     render(<App />);
     await screen.findByTestId("status-platform");
-    expect(screen.queryByLabelText("Panel")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Panel")).toHaveAttribute("hidden");
     await act(async () => {
       fireEvent.keyDown(document, { key: "j", ctrlKey: true });
       await vi.dynamicImportSettled();
     });
-    expect(screen.getByLabelText("Panel")).toBeInTheDocument();
+    expect(screen.getByLabelText("Panel")).not.toHaveAttribute("hidden");
   });
 
   it("does not open a side preview panel with modifier + Shift + V and no previewable tab", async () => {

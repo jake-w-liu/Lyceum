@@ -76,20 +76,18 @@ export default function App() {
           <EditorArea />
 
           {bottomPanelVisible && (
-            <>
-              <Resizer
-                orientation="horizontal"
-                ariaLabel="Resize panel"
-                onDelta={(_dx, dy) => {
-                  const { bottomPanelHeight, setBottomPanelHeight } =
-                    useLayoutStore.getState();
-                  // Dragging up (dy < 0) makes the panel taller.
-                  setBottomPanelHeight(bottomPanelHeight - dy);
-                }}
-              />
-              <BottomPanel />
-            </>
+            <Resizer
+              orientation="horizontal"
+              ariaLabel="Resize panel"
+              onDelta={(_dx, dy) => {
+                const { bottomPanelHeight, setBottomPanelHeight } =
+                  useLayoutStore.getState();
+                // Dragging up (dy < 0) makes the panel taller.
+                setBottomPanelHeight(bottomPanelHeight - dy);
+              }}
+            />
           )}
+          <BottomPanel visible={bottomPanelVisible} />
         </div>
 
         {pdfPanelVisible && (

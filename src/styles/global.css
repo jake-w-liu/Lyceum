@@ -695,6 +695,10 @@ kbd {
   min-height: 0;
 }
 
+.bottom-panel[hidden] {
+  display: none;
+}
+
 .panel-header {
   flex: 0 0 35px;
   display: flex;
