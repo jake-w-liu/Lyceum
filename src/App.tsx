@@ -12,6 +12,7 @@ import { useCommandKeybindings } from "./hooks/useCommandKeybindings";
 import { useMenuCommands } from "./hooks/useMenuCommands";
 import { useOpenFileBridge } from "./hooks/useOpenFileBridge";
 import { useWorkspaceFileWatcher } from "./hooks/useWorkspaceFileWatcher";
+import { useWorkspaceLifecycle } from "./hooks/useWorkspaceLifecycle";
 import { useLayoutStore } from "./state/layoutStore";
 import { applyThemeAttribute, useThemeStore } from "./state/themeStore";
 import {
@@ -28,6 +29,7 @@ export default function App() {
   useCommandKeybindings();
   useMenuCommands();
   useOpenFileBridge();
+  useWorkspaceLifecycle();
   useWorkspaceFileWatcher();
 
   const theme = useThemeStore((s) => s.theme);

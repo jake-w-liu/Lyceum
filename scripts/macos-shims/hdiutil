@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -u
+
+real_hdiutil="/usr/bin/hdiutil"
+
+if [[ "${1:-}" == "detach" && "$#" -ge 2 ]]; then
+  output="$("$real_hdiutil" "$@" 2>&1)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    [[ -n "$output" ]] && printf '%s\n' "$output"
+    exit 0
+  fi
+
+  [[ -n "$output" ]] && printf '%s\n' "$output" >&2
+
+  if [[ $status -eq 2 || $status -eq 16 ]]; then
+    device="${@: -1}"
+    for delay in 1 2 4; do
+      sleep "$delay"
+      "$real_hdiutil" detach "$device" && exit 0
+    done
+    "$real_hdiutil" detach -force "$device" && exit 0
+  fi
+
+  exit "$status"
+fi
+
+exec "$real_hdiutil" "$@"
