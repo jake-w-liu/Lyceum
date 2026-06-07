@@ -135,6 +135,47 @@ describe("useWorkspaceFileWatcher", () => {
     expect(readFileMock).not.toHaveBeenCalled();
   });
 
+  it("ignores filesystem events from a stale workspace root", async () => {
+    useEditorStore.getState().openDoc({
+      path: "/w/main.ts",
+      content: "old",
+      language: "typescript",
+    });
+    renderHook(() => useWorkspaceFileWatcher());
+    await Promise.resolve();
+
+    act(() => {
+      getListener()?.({
+        event: "workspace:fs-change",
+        id: 1,
+        payload: { root: "/old", paths: ["/w/main.ts"], kind: "Modify(Data)" },
+      });
+      vi.advanceTimersByTime(150);
+    });
+    await flushPromises();
+
+    expect(useTreeStore.getState().refreshNonce).toBe(0);
+    expect(readFileMock).not.toHaveBeenCalled();
+  });
+
+  it("drops a debounced refresh when the workspace changes first", async () => {
+    renderHook(() => useWorkspaceFileWatcher());
+    await Promise.resolve();
+
+    act(() => {
+      getListener()?.({
+        event: "workspace:fs-change",
+        id: 1,
+        payload: { root: "/w", paths: ["/w/main.ts"], kind: "Modify(Data)" },
+      });
+      useWorkspaceStore.setState({ rootPath: "/next", pendingOpenPath: null });
+      vi.advanceTimersByTime(150);
+    });
+
+    expect(useTreeStore.getState().refreshNonce).toBe(0);
+    expect(readFileMock).not.toHaveBeenCalled();
+  });
+
   it("reloads clean open text files from disk", async () => {
     readFileMock.mockResolvedValueOnce("external edit");
     useEditorStore.getState().openDoc({

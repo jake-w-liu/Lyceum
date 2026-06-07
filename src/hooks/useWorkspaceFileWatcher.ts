@@ -12,6 +12,13 @@ import { useWorkspaceStore } from "../state/workspaceStore";
 
 const REFRESH_DEBOUNCE_MS = 150;
 
+function normalizedRoot(path: string | null): string {
+  if (!path) return "";
+  const normalized = path.replace(/\\/g, "/");
+  if (normalized === "/") return normalized;
+  return normalized.replace(/\/+$/, "") || normalized;
+}
+
 export function useWorkspaceFileWatcher(): void {
   const rootPath = useWorkspaceStore((s) => s.rootPath);
 
@@ -34,13 +41,19 @@ export function useWorkspaceFileWatcher(): void {
     };
 
     const scheduleRefresh = (event: Event<WorkspaceFsEvent>) => {
+      if (normalizedRoot(event.payload.root) !== normalizedRoot(rootPath)) return;
       for (const path of event.payload.paths) pendingPaths.add(path);
       clearRefreshTimer();
       refreshTimer = window.setTimeout(() => {
         refreshTimer = 0;
         const paths = Array.from(pendingPaths);
         pendingPaths.clear();
-        if (!useWorkspaceStore.getState().rootPath) return;
+        if (
+          normalizedRoot(useWorkspaceStore.getState().rootPath) !==
+          normalizedRoot(rootPath)
+        ) {
+          return;
+        }
         useTreeStore.getState().refresh();
         void reloadOpenEditorPaths(paths);
       }, REFRESH_DEBOUNCE_MS);

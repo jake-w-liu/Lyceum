@@ -44,14 +44,16 @@ pub fn watch_workspace(
         return Ok(());
     }
 
-    let event_root = root_path.to_string_lossy().to_string();
+    let event_root = root.clone();
+    let watched_root = root_path.clone();
+    let requested_root = PathBuf::from(&root);
     let app_for_events = app.clone();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         let Ok(event) = event else { return };
         let paths = event
             .paths
             .iter()
-            .map(|path| path.to_string_lossy().to_string())
+            .map(|path| event_path_for_requested_root(&watched_root, &requested_root, path))
             .collect();
         let payload = WorkspaceFsEvent {
             root: event_root.clone(),
@@ -108,4 +110,43 @@ fn canonical_dir(path: &str) -> Result<PathBuf, String> {
         return Err(format!("not a directory: {}", root.display()));
     }
     Ok(root)
+}
+
+fn event_path_for_requested_root(
+    canonical_root: &Path,
+    requested_root: &Path,
+    path: &Path,
+) -> String {
+    match path.strip_prefix(canonical_root) {
+        Ok(relative) => requested_root.join(relative).to_string_lossy().to_string(),
+        Err(_) => path.to_string_lossy().to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::event_path_for_requested_root;
+    use std::path::Path;
+
+    #[test]
+    fn event_path_is_reported_under_requested_workspace_root() {
+        let mapped = event_path_for_requested_root(
+            Path::new("/real/project"),
+            Path::new("/link/project"),
+            Path::new("/real/project/src/main.tex"),
+        );
+
+        assert_eq!(mapped, "/link/project/src/main.tex");
+    }
+
+    #[test]
+    fn event_path_outside_watched_root_is_left_unchanged() {
+        let mapped = event_path_for_requested_root(
+            Path::new("/real/project"),
+            Path::new("/link/project"),
+            Path::new("/tmp/other.tex"),
+        );
+
+        assert_eq!(mapped, "/tmp/other.tex");
+    }
 }

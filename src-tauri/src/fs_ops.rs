@@ -248,6 +248,7 @@ fn move_paths_impl(
     paths: Vec<String>,
     destination_dir: &Path,
 ) -> Result<Vec<MovedPathDto>, String> {
+    let requested_root = root.to_path_buf();
     let root = canonical_dir(root)?;
     let destination = destination_dir
         .canonicalize()
@@ -298,8 +299,8 @@ fn move_paths_impl(
         }
         done.push((to.clone(), from.clone()));
         moved.push(MovedPathDto {
-            from: from.to_string_lossy().to_string(),
-            to: to.to_string_lossy().to_string(),
+            from: path_for_requested_root(&root, &requested_root, &from),
+            to: path_for_requested_root(&root, &requested_root, &to),
             is_dir,
         });
     }
@@ -712,6 +713,13 @@ fn path_starts_with_trash(root: &Path, path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+fn path_for_requested_root(canonical_root: &Path, requested_root: &Path, path: &Path) -> String {
+    match path.strip_prefix(canonical_root) {
+        Ok(relative) => requested_root.join(relative).to_string_lossy().to_string(),
+        Err(_) => path.to_string_lossy().to_string(),
+    }
+}
+
 fn unique_trash_batch_id() -> String {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1077,13 +1085,8 @@ mod tests {
         let dst = root.join("folder");
         fs::write(&src, b"note").unwrap();
         fs::create_dir(&dst).unwrap();
-        let expected_from = src.canonicalize().unwrap().to_string_lossy().to_string();
-        let expected_to = dst
-            .canonicalize()
-            .unwrap()
-            .join("note.txt")
-            .to_string_lossy()
-            .to_string();
+        let expected_from = src.to_string_lossy().to_string();
+        let expected_to = dst.join("note.txt").to_string_lossy().to_string();
 
         let moved = move_paths_impl(root, vec![src.to_string_lossy().to_string()], &dst)
             .expect("move file");
@@ -1093,6 +1096,34 @@ mod tests {
         assert_eq!(moved[0].to, expected_to);
         assert!(!src.exists());
         assert_eq!(fs::read(dst.join("note.txt")).unwrap(), b"note");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn move_paths_reports_requested_symlink_workspace_paths() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let real_root = tmp.path().join("real");
+        let linked_root = tmp.path().join("linked");
+        fs::create_dir(&real_root).unwrap();
+        symlink(&real_root, &linked_root).unwrap();
+        fs::write(real_root.join("note.txt"), b"note").unwrap();
+        fs::create_dir(real_root.join("folder")).unwrap();
+
+        let src = linked_root.join("note.txt");
+        let dst = linked_root.join("folder");
+        let moved = move_paths_impl(&linked_root, vec![src.to_string_lossy().to_string()], &dst)
+            .expect("move through linked root");
+
+        assert_eq!(moved.len(), 1);
+        assert_eq!(moved[0].from, src.to_string_lossy().to_string());
+        assert_eq!(
+            moved[0].to,
+            dst.join("note.txt").to_string_lossy().to_string()
+        );
+        assert!(!src.exists());
+        assert_eq!(fs::read(real_root.join("folder/note.txt")).unwrap(), b"note");
     }
 
     #[cfg(unix)]
@@ -1108,18 +1139,8 @@ mod tests {
         fs::write(&target, b"target").unwrap();
         fs::create_dir(&dst).unwrap();
         symlink(&target, &link).unwrap();
-        let expected_from = root
-            .canonicalize()
-            .unwrap()
-            .join("shortcut.txt")
-            .to_string_lossy()
-            .to_string();
-        let expected_to = dst
-            .canonicalize()
-            .unwrap()
-            .join("shortcut.txt")
-            .to_string_lossy()
-            .to_string();
+        let expected_from = link.to_string_lossy().to_string();
+        let expected_to = dst.join("shortcut.txt").to_string_lossy().to_string();
 
         let moved = move_paths_impl(root, vec![link.to_string_lossy().to_string()], &dst)
             .expect("move symlink entry");
@@ -1148,7 +1169,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(&leaf, b"leaf").unwrap();
         fs::write(&already_there, b"same parent").unwrap();
-        let expected_from = dir.canonicalize().unwrap().to_string_lossy().to_string();
+        let expected_from = dir.to_string_lossy().to_string();
 
         let moved = move_paths_impl(
             root,

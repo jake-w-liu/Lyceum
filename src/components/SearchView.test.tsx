@@ -130,4 +130,31 @@ describe("SearchView", () => {
     expect(useSearchStore.getState().results).toEqual([]);
     expect(useSearchStore.getState().searching).toBe(false);
   });
+
+  it("invalidates an in-flight search immediately when the workspace changes", async () => {
+    useWorkspaceStore.setState({ rootPath: ROOT });
+    const deferreds: Array<(v: SearchMatch[]) => void> = [];
+    vi.mocked(searchWorkspace).mockImplementation(
+      () => new Promise<SearchMatch[]>((resolve) => deferreds.push(resolve)),
+    );
+    const wait = (ms: number) =>
+      act(() => new Promise((r) => setTimeout(r, ms)));
+    render(<SearchView />);
+
+    fireEvent.change(screen.getByLabelText("Search workspace"), {
+      target: { value: "ab" },
+    });
+    await wait(300);
+    expect(deferreds).toHaveLength(1);
+
+    act(() => {
+      useWorkspaceStore.setState({ rootPath: "/other", pendingOpenPath: null });
+    });
+    await act(async () => {
+      deferreds[0]([match("/ws/ab.jl", 1, "stale result")]);
+      await Promise.resolve();
+    });
+
+    expect(useSearchStore.getState().results).toEqual([]);
+  });
 });

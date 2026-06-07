@@ -267,18 +267,29 @@ export default function MonacoEditor() {
       // Start the language server for this language (if any) and open the doc.
       if (serverForLanguage(doc.language)) {
         startedLangsRef.current.add(doc.language);
+        const openedPath = doc.path;
         const rootPath = useWorkspaceStore.getState().rootPath;
         const juliaPath =
           useSettingsStore.getState().settings.juliaPath || null;
         void ensureServer(doc.language, rootPath, juliaPath).then((session) => {
-          if (session) {
-            void didOpen(
-              session,
-              created.uri.toString(),
-              doc.language,
-              doc.content,
-            );
+          if (!session) return;
+          const liveDoc = useEditorStore
+            .getState()
+            .docs.find((candidate) => candidate.path === openedPath);
+          if (
+            !liveDoc ||
+            !isTextDoc(liveDoc) ||
+            created.isDisposed() ||
+            modelsRef.current.get(openedPath) !== created
+          ) {
+            return;
           }
+          void didOpen(
+            session,
+            created.uri.toString(),
+            liveDoc.language,
+            created.getValue(),
+          );
         });
       }
     }

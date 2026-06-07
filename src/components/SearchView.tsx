@@ -22,15 +22,16 @@ export function SearchView() {
   useEffect(() => {
     if (timer.current) clearTimeout(timer.current);
     const trimmed = query.trim();
+    const seq = ++seqRef.current;
     if (!rootPath || trimmed.length < 2) {
       // Invalidate any in-flight search so it can't later overwrite the cleared list.
-      seqRef.current++;
       useSearchStore.getState().setResults([]);
       useSearchStore.getState().setSearching(false);
       return;
     }
+    useSearchStore.getState().setSearching(false);
     timer.current = setTimeout(() => {
-      const seq = ++seqRef.current;
+      if (seq !== seqRef.current) return;
       useSearchStore.getState().setSearching(true);
       searchWorkspace(rootPath, trimmed)
         .then((r) => {
