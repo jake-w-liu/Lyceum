@@ -14,6 +14,14 @@ vi.mock("../lib/ipc", () => ({
   listWorkspaceFiles: vi.fn(async () => ["/w/src/main.ts", "/w/README.md"]),
 }));
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 describe("QuickOpen", () => {
   beforeEach(() => {
     vi.mocked(listWorkspaceFiles).mockReset();
@@ -71,5 +79,23 @@ describe("QuickOpen", () => {
 
     expect(await screen.findByText("new-file.ts")).toBeInTheDocument();
     expect(screen.getByLabelText("File search")).toHaveValue("new");
+  });
+
+  it("clears old file results while a new workspace listing is loading", async () => {
+    const first = deferred<string[]>();
+    const second = deferred<string[]>();
+    vi.mocked(listWorkspaceFiles)
+      .mockImplementationOnce(async () => first.promise)
+      .mockImplementationOnce(async () => second.promise);
+
+    render(<QuickOpen />);
+    act(() => first.resolve(["/w/old.ts"]));
+    expect(await screen.findByText("old.ts")).toBeInTheDocument();
+
+    act(() => useWorkspaceStore.getState().openWorkspace("/next"));
+
+    expect(screen.queryByText("old.ts")).not.toBeInTheDocument();
+    act(() => second.resolve(["/next/new.ts"]));
+    expect(await screen.findByText("new.ts")).toBeInTheDocument();
   });
 });

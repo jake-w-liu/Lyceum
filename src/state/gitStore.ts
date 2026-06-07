@@ -85,12 +85,14 @@ export const useGitStore = create<GitState>()((set) => ({
     }
     try {
       const res = await gitStatus(root);
+      if (useWorkspaceStore.getState().rootPath !== root) return;
       set({
         isRepo: res.isRepo,
         files: res.files,
         folders: computeFolders(res.files),
       });
     } catch {
+      if (useWorkspaceStore.getState().rootPath !== root) return;
       // No Tauri backend (web/dev) or git error: show no decorations.
       set(initialGitData);
     }

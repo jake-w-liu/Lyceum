@@ -29,6 +29,7 @@ export function SearchView() {
       useSearchStore.getState().setSearching(false);
       return;
     }
+    useSearchStore.getState().setResults([]);
     useSearchStore.getState().setSearching(false);
     timer.current = setTimeout(() => {
       if (seq !== seqRef.current) return;
@@ -46,6 +47,8 @@ export function SearchView() {
     }, SEARCH_DEBOUNCE_MS);
     return () => {
       if (timer.current) clearTimeout(timer.current);
+      seqRef.current += 1;
+      useSearchStore.getState().setSearching(false);
     };
   }, [query, rootPath]);
 

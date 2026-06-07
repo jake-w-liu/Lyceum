@@ -1,6 +1,22 @@
-import { describe, expect, it } from "vitest";
-import { computeFolders, parentOf } from "./gitStore";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { computeFolders, initialGitData, parentOf, useGitStore } from "./gitStore";
 import type { GitFileStatus } from "../lib/ipc";
+import {
+  initialWorkspaceData,
+  useWorkspaceStore,
+} from "./workspaceStore";
+
+const gitStatusMock = vi.hoisted(() => vi.fn());
+
+vi.mock("../lib/ipc", () => ({
+  gitStatus: (...args: unknown[]) => gitStatusMock(...args),
+}));
+
+beforeEach(() => {
+  useGitStore.setState(initialGitData, false);
+  useWorkspaceStore.setState(initialWorkspaceData, false);
+  gitStatusMock.mockReset();
+});
 
 describe("parentOf", () => {
   it("returns the parent directory for nested unix paths", () => {
@@ -59,5 +75,49 @@ describe("computeFolders", () => {
   it("ignores 'ignored' entries entirely", () => {
     const files: Record<string, GitFileStatus> = { "/repo/build/out.js": "ignored" };
     expect(computeFolders(files)).toEqual({});
+  });
+});
+
+describe("gitStore", () => {
+  it("ignores stale git status responses after the workspace changes", async () => {
+    let resolveOld!: (value: {
+      isRepo: boolean;
+      files: Record<string, GitFileStatus>;
+    }) => void;
+    let resolveNew!: (value: {
+      isRepo: boolean;
+      files: Record<string, GitFileStatus>;
+    }) => void;
+    gitStatusMock
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveOld = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveNew = resolve;
+          }),
+      );
+
+    useWorkspaceStore.getState().openWorkspace("/old");
+    const oldRefresh = useGitStore.getState().refresh();
+    useWorkspaceStore.getState().openWorkspace("/new");
+    const newRefresh = useGitStore.getState().refresh();
+
+    resolveNew({ isRepo: true, files: { "/new/a.ts": "modified" } });
+    await newRefresh;
+    expect(useGitStore.getState().files).toEqual({
+      "/new/a.ts": "modified",
+    });
+
+    resolveOld({ isRepo: true, files: { "/old/stale.ts": "deleted" } });
+    await oldRefresh;
+
+    expect(useGitStore.getState().files).toEqual({
+      "/new/a.ts": "modified",
+    });
   });
 });

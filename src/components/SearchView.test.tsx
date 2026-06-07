@@ -157,4 +157,42 @@ describe("SearchView", () => {
 
     expect(useSearchStore.getState().results).toEqual([]);
   });
+
+  it("clears old results immediately when starting a new valid search", async () => {
+    useWorkspaceStore.setState({ rootPath: ROOT });
+    useSearchStore.getState().setQuery("old");
+    useSearchStore
+      .getState()
+      .setResults([match("/ws/old.jl", 1, "old result")]);
+
+    render(<SearchView />);
+
+    expect(useSearchStore.getState().results).toEqual([]);
+  });
+
+  it("does not write stale results after the search view unmounts", async () => {
+    useWorkspaceStore.setState({ rootPath: ROOT });
+    const deferreds: Array<(v: SearchMatch[]) => void> = [];
+    vi.mocked(searchWorkspace).mockImplementation(
+      () => new Promise<SearchMatch[]>((resolve) => deferreds.push(resolve)),
+    );
+    const wait = (ms: number) =>
+      act(() => new Promise((r) => setTimeout(r, ms)));
+    const { unmount } = render(<SearchView />);
+
+    fireEvent.change(screen.getByLabelText("Search workspace"), {
+      target: { value: "ab" },
+    });
+    await wait(300);
+    expect(deferreds).toHaveLength(1);
+
+    unmount();
+    await act(async () => {
+      deferreds[0]([match("/ws/stale.jl", 1, "stale result")]);
+      await Promise.resolve();
+    });
+
+    expect(useSearchStore.getState().results).toEqual([]);
+    expect(useSearchStore.getState().searching).toBe(false);
+  });
 });

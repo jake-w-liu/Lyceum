@@ -37,6 +37,7 @@ export function QuickOpen() {
       return;
     }
     let cancelled = false;
+    setFiles([]);
     listWorkspaceFiles(rootPath)
       .then((paths) => {
         if (!cancelled) {
