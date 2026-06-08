@@ -16,6 +16,7 @@ import { THEME_LABELS, THEME_ORDER, useThemeStore } from "../state/themeStore";
 import { useTerminalStore } from "../state/terminalStore";
 import { getActiveDoc, useEditorStore } from "../state/editorStore";
 import { usePreviewStore } from "../state/previewStore";
+import { newWindow } from "../lib/ipc";
 import { runActiveJulia } from "../lib/julia";
 import { runLatexBuild } from "../lib/latexBuild";
 import { stopActiveRun } from "../lib/run";
@@ -41,6 +42,12 @@ export function registerBuiltinCommands(): void {
   const layout = () => useLayoutStore.getState();
   const ui = () => useUiStore.getState();
 
+  commandRegistry.register({
+    id: "app.newWindow",
+    title: "New Window",
+    category: "Window",
+    run: () => newWindow(),
+  });
   commandRegistry.register({
     id: "quickOpen.show",
     title: "Go to File…",

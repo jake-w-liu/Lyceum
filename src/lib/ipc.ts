@@ -69,6 +69,11 @@ export async function getAppInfo(): Promise<AppInfo> {
   }
 }
 
+/** Open another Lyceum application window. */
+export async function newWindow(): Promise<void> {
+  await invoke("new_window");
+}
+
 /** List the immediate children of a directory (file explorer, M2). */
 export async function readDirectory(path: string): Promise<DirEntry[]> {
   return invoke<DirEntry[]>("read_directory", { path });

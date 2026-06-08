@@ -1,23 +1,33 @@
 // Native application menu (macOS menu bar / Windows-Linux window menu).
 //
-// Menu item ids ARE command ids from the frontend command registry. Clicking an
-// item emits a `menu` Tauri event carrying that id; the frontend executes the
-// command (see src/hooks/useMenuCommands.ts). Items that already have a frontend
-// keybinding are intentionally left without an accelerator so the existing
-// (tested) keyboard handling stays the single source for those chords — only
-// `Open Folder…` gets a new accelerator (Cmd/Ctrl+O), which is otherwise unbound.
+// Menu item ids ARE command ids from the frontend command registry. Clicking
+// most items emits a `menu` Tauri event carrying that id; the frontend executes
+// the command (see src/hooks/useMenuCommands.ts). Window lifecycle commands are
+// handled natively in Rust because they must work without a live webview. Items
+// that already have a frontend keybinding are intentionally left without an
+// accelerator so the existing (tested) keyboard handling stays the single source
+// for those chords — only `Open Folder…` gets a new accelerator (Cmd/Ctrl+O),
+// which is otherwise unbound.
 
 use tauri::menu::{AboutMetadata, Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Runtime};
 
 pub fn build_app_menu<R: Runtime>(handle: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let app_menu = SubmenuBuilder::new(handle, "Lyceum")
+        .item(&MenuItemBuilder::with_id("app.newWindow", "New Window").build(handle)?)
+        .separator()
         .about(Some(AboutMetadata::default()))
         .separator()
         .quit()
         .build()?;
 
     let file_menu = SubmenuBuilder::new(handle, "File")
+        .item(
+            &MenuItemBuilder::with_id("app.newWindow", "New Window")
+                .accelerator("CmdOrCtrl+N")
+                .build(handle)?,
+        )
+        .separator()
         .item(&MenuItemBuilder::with_id("explorer.newFile", "New File").build(handle)?)
         .item(&MenuItemBuilder::with_id("explorer.newFolder", "New Folder").build(handle)?)
         .separator()
@@ -85,6 +95,8 @@ pub fn build_app_menu<R: Runtime>(handle: &AppHandle<R>) -> tauri::Result<Menu<R
         .build()?;
 
     let window_menu = SubmenuBuilder::new(handle, "Window")
+        .item(&MenuItemBuilder::with_id("app.newWindow", "New Window").build(handle)?)
+        .separator()
         .minimize()
         .separator()
         .close_window()

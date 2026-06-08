@@ -191,6 +191,7 @@ pub fn redo_trash_batch(root: String, items: Vec<TrashItemDto>) -> Result<(), St
 }
 
 fn move_paths_to_trash_impl(root: &Path, paths: Vec<String>) -> Result<TrashBatchDto, String> {
+    let requested_root = root.to_path_buf();
     let root = canonical_dir(root)?;
     let targets = normalize_delete_targets(&root, paths)?;
     if targets.is_empty() {
@@ -234,8 +235,8 @@ fn move_paths_to_trash_impl(root: &Path, paths: Vec<String>) -> Result<TrashBatc
         }
         done.push((destination.clone(), target.path.clone()));
         items.push(TrashItemDto {
-            original_path: target.path.to_string_lossy().to_string(),
-            trashed_path: destination.to_string_lossy().to_string(),
+            original_path: path_for_requested_root(&root, &requested_root, &target.path),
+            trashed_path: path_for_requested_root(&root, &requested_root, &destination),
             is_dir: target.is_dir,
         });
     }
@@ -308,10 +309,19 @@ fn move_paths_impl(
 }
 
 fn restore_trash_batch_impl(root: &Path, items: Vec<TrashItemDto>) -> Result<(), String> {
+    let requested_root = root.to_path_buf();
     let root = canonical_dir(root)?;
     for item in &items {
-        let original = PathBuf::from(&item.original_path);
-        let trashed = PathBuf::from(&item.trashed_path);
+        let original = workspace_path_for_canonical_root(
+            &root,
+            &requested_root,
+            Path::new(&item.original_path),
+        );
+        let trashed = workspace_path_for_canonical_root(
+            &root,
+            &requested_root,
+            Path::new(&item.trashed_path),
+        );
         validate_restore_pair(&root, &original, &trashed)?;
         if !path_entry_exists(&trashed) {
             return Err(format!(
@@ -328,8 +338,16 @@ fn restore_trash_batch_impl(root: &Path, items: Vec<TrashItemDto>) -> Result<(),
     }
     let mut done: Vec<(PathBuf, PathBuf)> = Vec::new();
     for item in &items {
-        let original = PathBuf::from(&item.original_path);
-        let trashed = PathBuf::from(&item.trashed_path);
+        let original = workspace_path_for_canonical_root(
+            &root,
+            &requested_root,
+            Path::new(&item.original_path),
+        );
+        let trashed = workspace_path_for_canonical_root(
+            &root,
+            &requested_root,
+            Path::new(&item.trashed_path),
+        );
         if let Some(parent) = original.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
                 rollback_moves(&done);
@@ -351,10 +369,19 @@ fn restore_trash_batch_impl(root: &Path, items: Vec<TrashItemDto>) -> Result<(),
 }
 
 fn redo_trash_batch_impl(root: &Path, items: Vec<TrashItemDto>) -> Result<(), String> {
+    let requested_root = root.to_path_buf();
     let root = canonical_dir(root)?;
     for item in &items {
-        let original = PathBuf::from(&item.original_path);
-        let trashed = PathBuf::from(&item.trashed_path);
+        let original = workspace_path_for_canonical_root(
+            &root,
+            &requested_root,
+            Path::new(&item.original_path),
+        );
+        let trashed = workspace_path_for_canonical_root(
+            &root,
+            &requested_root,
+            Path::new(&item.trashed_path),
+        );
         validate_restore_pair(&root, &original, &trashed)?;
         if !path_entry_exists(&original) {
             return Err(format!(
@@ -371,8 +398,16 @@ fn redo_trash_batch_impl(root: &Path, items: Vec<TrashItemDto>) -> Result<(), St
     }
     let mut done: Vec<(PathBuf, PathBuf)> = Vec::new();
     for item in &items {
-        let original = PathBuf::from(&item.original_path);
-        let trashed = PathBuf::from(&item.trashed_path);
+        let original = workspace_path_for_canonical_root(
+            &root,
+            &requested_root,
+            Path::new(&item.original_path),
+        );
+        let trashed = workspace_path_for_canonical_root(
+            &root,
+            &requested_root,
+            Path::new(&item.trashed_path),
+        );
         if let Some(parent) = trashed.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
                 rollback_moves(&done);
@@ -720,6 +755,20 @@ fn path_for_requested_root(canonical_root: &Path, requested_root: &Path, path: &
     }
 }
 
+fn workspace_path_for_canonical_root(
+    canonical_root: &Path,
+    requested_root: &Path,
+    path: &Path,
+) -> PathBuf {
+    if let Ok(relative) = path.strip_prefix(canonical_root) {
+        return canonical_root.join(relative);
+    }
+    if let Ok(relative) = path.strip_prefix(requested_root) {
+        return canonical_root.join(relative);
+    }
+    path.to_path_buf()
+}
+
 fn unique_trash_batch_id() -> String {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -991,7 +1040,6 @@ mod tests {
         let leaf = dir.join("leaf.txt");
         fs::create_dir_all(&dir).unwrap();
         fs::write(&leaf, b"leaf").unwrap();
-        let canonical_dir = dir.canonicalize().unwrap();
 
         let batch = move_paths_to_trash_impl(
             root,
@@ -1003,10 +1051,7 @@ mod tests {
         .expect("move to trash");
 
         assert_eq!(batch.items.len(), 1);
-        assert_eq!(
-            Path::new(&batch.items[0].original_path),
-            canonical_dir.as_path()
-        );
+        assert_eq!(Path::new(&batch.items[0].original_path), dir.as_path());
     }
 
     #[test]
@@ -1034,7 +1079,7 @@ mod tests {
         let link = root.join("shortcut.txt");
         fs::write(&target, b"target").unwrap();
         symlink(&target, &link).unwrap();
-        let expected_original = root.canonicalize().unwrap().join("shortcut.txt");
+        let expected_original = root.join("shortcut.txt");
 
         let batch = move_paths_to_trash_impl(root, vec![link.to_string_lossy().to_string()])
             .expect("trash symlink entry");
@@ -1123,7 +1168,41 @@ mod tests {
             dst.join("note.txt").to_string_lossy().to_string()
         );
         assert!(!src.exists());
-        assert_eq!(fs::read(real_root.join("folder/note.txt")).unwrap(), b"note");
+        assert_eq!(
+            fs::read(real_root.join("folder/note.txt")).unwrap(),
+            b"note"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trash_batch_reports_requested_symlink_workspace_paths_and_restores() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let real_root = tmp.path().join("real");
+        let linked_root = tmp.path().join("linked");
+        fs::create_dir(&real_root).unwrap();
+        symlink(&real_root, &linked_root).unwrap();
+        fs::write(real_root.join("note.txt"), b"note").unwrap();
+
+        let src = linked_root.join("note.txt");
+        let batch = move_paths_to_trash_impl(&linked_root, vec![src.to_string_lossy().to_string()])
+            .expect("trash through linked root");
+
+        assert_eq!(batch.items.len(), 1);
+        assert_eq!(batch.items[0].original_path, src.to_string_lossy());
+        assert!(batch.items[0]
+            .trashed_path
+            .starts_with(&linked_root.to_string_lossy().to_string()));
+        assert!(!src.exists());
+
+        restore_trash_batch_impl(&linked_root, batch.items.clone())
+            .expect("restore through linked root");
+        assert_eq!(fs::read(real_root.join("note.txt")).unwrap(), b"note");
+
+        redo_trash_batch_impl(&linked_root, batch.items).expect("redo through linked root");
+        assert!(!src.exists());
     }
 
     #[cfg(unix)]

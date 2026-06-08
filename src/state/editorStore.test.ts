@@ -191,4 +191,20 @@ describe("editorStore", () => {
     expect(state.docs[0].content).toBe("main");
     expect(state.activePath).toBe("/w/docs/README.md");
   });
+
+  it("moveDocPaths recomputes text language when the extension changes", () => {
+    const store = useEditorStore.getState();
+    store.openDoc({
+      path: "/w/notes.txt",
+      content: "# Notes",
+      language: "plaintext",
+    });
+
+    store.moveDocPaths([{ from: "/w/notes.txt", to: "/w/notes.md" }]);
+
+    const doc = useEditorStore.getState().docs[0];
+    expect(doc.path).toBe("/w/notes.md");
+    expect(doc.language).toBe("markdown");
+    expect(doc.content).toBe("# Notes");
+  });
 });

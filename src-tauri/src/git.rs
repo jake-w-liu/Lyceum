@@ -107,6 +107,7 @@ fn run_git(program: &OsString, cwd: &Path, args: &[&str]) -> Option<String> {
     let output = Command::new(program)
         .args(args)
         .current_dir(cwd)
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()

@@ -88,23 +88,6 @@ export interface EditorActions {
 
 export type EditorState = EditorData & EditorActions;
 
-/** A single path move applied by `moveDocPaths`. */
-export type DocPathMove = { from: string; to: string };
-type DocPathMoveListener = (moves: DocPathMove[]) => void;
-const docPathMoveListeners = new Set<DocPathMoveListener>();
-
-/**
- * Subscribe to document path moves (rename/move). The Monaco host uses this to
- * re-key its text models in place so a renamed file keeps its undo/redo history
- * and cursor/scroll position instead of being disposed and recreated.
- */
-export function subscribeDocPathMoves(fn: DocPathMoveListener): () => void {
-  docPathMoveListeners.add(fn);
-  return () => {
-    docPathMoveListeners.delete(fn);
-  };
-}
-
 export const initialEditorData: EditorData = {
   docs: [],
   activePath: null,
@@ -218,9 +201,6 @@ export const useEditorStore = create<EditorState>()((set) => ({
       const activePath = s.activePath ? movedPath(s.activePath) : s.activePath;
       return { docs, activePath };
     });
-    // Notify listeners (Monaco host) so models can be re-keyed in place,
-    // preserving undo history and cursor/scroll across a rename/move.
-    docPathMoveListeners.forEach((fn) => fn(moves));
   },
 
   setSelection: (text) => set({ selection: text }),

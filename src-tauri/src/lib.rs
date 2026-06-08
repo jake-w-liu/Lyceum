@@ -16,6 +16,7 @@ mod menu;
 mod search;
 mod terminal;
 mod walk;
+mod window_ops;
 mod workspace_watch;
 
 use app_info::AppInfo;
@@ -71,8 +72,15 @@ pub fn run() {
             app.set_menu(menu)?;
             Ok(())
         })
-        // Native menu items carry frontend command ids; forward clicks to the UI.
+        // Native menu items carry frontend command ids; window lifecycle
+        // commands must run in the backend so they work without a live webview.
         .on_menu_event(|app, event| {
+            if event.id().0.as_str() == "app.newWindow" {
+                if let Err(err) = window_ops::open_new_window(app) {
+                    eprintln!("failed to open new window: {err}");
+                }
+                return;
+            }
             let _ = app.emit("menu", event.id().0.as_str());
         })
         .invoke_handler(tauri::generate_handler![
@@ -105,6 +113,7 @@ pub fn run() {
             latex::run_latex_build,
             workspace_watch::watch_workspace,
             workspace_watch::unwatch_workspace,
+            window_ops::new_window,
             lsp::lsp_start,
             lsp::lsp_send,
             lsp::lsp_stop
@@ -112,12 +121,29 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
-            // On quit, tear down every child process we manage so language
-            // servers, shells, and Julia runs are never orphaned.
-            if let RunEvent::ExitRequested { .. } = event {
-                app.state::<terminal::TerminalManager>().shutdown_all();
-                app.state::<lsp::LspManager>().shutdown_all();
-                app.state::<julia::RunManager>().shutdown_all();
+            match event {
+                // On quit, tear down every child process we manage so language
+                // servers, shells, and Julia runs are never orphaned.
+                RunEvent::ExitRequested { .. } => {
+                    app.state::<terminal::TerminalManager>().shutdown_all();
+                    app.state::<lsp::LspManager>().shutdown_all();
+                    app.state::<julia::RunManager>().shutdown_all();
+                }
+                #[cfg(target_os = "macos")]
+                RunEvent::Reopen {
+                    has_visible_windows,
+                    ..
+                } => {
+                    let result = if has_visible_windows {
+                        window_ops::focus_or_open_window(app)
+                    } else {
+                        window_ops::open_new_window(app).map(|_| ())
+                    };
+                    if let Err(err) = result {
+                        eprintln!("failed to handle app reopen: {err}");
+                    }
+                }
+                _ => {}
             }
         });
 }
