@@ -1005,7 +1005,12 @@ kbd {
   overflow: auto;
   display: flex;
   flex-direction: column;
-  align-items: center;
+  /* Pages are centered via `margin-inline: auto` on .pdf-page-layer, NOT
+     `align-items: center`. With align-items centering, a page zoomed wider than
+     the pane overflows equally on both sides and the left part can never be
+     scrolled into view (a scroll container can't scroll before its start edge).
+     Auto margins collapse to 0 when the page overflows, so it pins to the start
+     and the full width becomes reachable by horizontal scroll. */
   gap: 12px;
   padding: 12px;
   background: #525659;
@@ -1015,6 +1020,7 @@ kbd {
 .pdf-page-layer {
   position: relative;
   flex: 0 0 auto;
+  margin-inline: auto;
   background: #ffffff;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
 }
