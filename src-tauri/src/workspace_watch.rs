@@ -13,6 +13,17 @@ pub struct WorkspaceWatchManager {
     active: Mutex<Option<ActiveWatcher>>,
 }
 
+impl WorkspaceWatchManager {
+    /// Drop the active watcher (called on app exit). Dropping the
+    /// `RecommendedWatcher` stops its notify worker threads, mirroring the other
+    /// managers' `shutdown_all()` so nothing emits during teardown.
+    pub fn shutdown_all(&self) {
+        if let Ok(mut active) = self.active.lock() {
+            *active = None;
+        }
+    }
+}
+
 struct ActiveWatcher {
     root: PathBuf,
     requested_root: String,

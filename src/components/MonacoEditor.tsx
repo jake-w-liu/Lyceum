@@ -119,7 +119,15 @@ export default function MonacoEditor() {
     const pending = pendingLspChanges.current.get(uri);
     if (pending) {
       pendingLspChanges.current.delete(uri);
-      void didChange(pending.session, uri, (lspChangeVersion += 1), pending.text);
+      // Re-resolve the session by language: the one captured when the edit was
+      // queued may have been stopped/restarted during the debounce window, in
+      // which case `pending.session` is now disposed. Sending to the current
+      // session (or dropping it if none) avoids a notify on a dead session;
+      // didChange is gated on openDocs, so a fresh session safely ignores it.
+      const session = getSession(pending.session.languageId);
+      if (session) {
+        void didChange(session, uri, (lspChangeVersion += 1), pending.text);
+      }
     }
   }, []);
 

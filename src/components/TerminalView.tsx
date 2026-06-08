@@ -117,12 +117,18 @@ export function TerminalView({
       ) ?? cwd;
 
     void (async () => {
+      // Held here until handed to `unlistens` so a failure partway through
+      // registration (e.g. onPtyExit rejects after onPtyData resolved) can still
+      // unlisten what was attached — otherwise that listener would leak, since
+      // the cleanup function only tears down what made it into `unlistens`.
+      let offData: UnlistenLike | undefined;
+      let offExit: UnlistenLike | undefined;
       try {
         // Register listeners BEFORE creating the PTY: the Rust reader thread
         // starts emitting output immediately, so attaching after createPty
         // would drop the initial shell prompt/banner.
-        const offData = await onPtyData(ptyId, (bytes) => term.write(bytes));
-        const offExit = await onPtyExit(ptyId, () =>
+        offData = await onPtyData(ptyId, (bytes) => term.write(bytes));
+        offExit = await onPtyExit(ptyId, () =>
           term.write("\r\n\x1b[90m[process exited]\x1b[0m\r\n"),
         );
         if (disposed) {
@@ -131,6 +137,10 @@ export function TerminalView({
           return;
         }
         unlistens.push(offData, offExit);
+        // Ownership transferred to `unlistens` (torn down on unmount); the catch
+        // must not unlisten them again.
+        offData = undefined;
+        offExit = undefined;
         await createPty(ptyId, {
           shell: settings.shellPath || null,
           cwd: resolvedCwd,
@@ -150,6 +160,9 @@ export function TerminalView({
         pending.length = 0;
         if (startupCommand) void writePty(ptyId, startupCommand);
       } catch (e) {
+        // Unlisten anything that registered but never reached `unlistens`.
+        offData?.();
+        offExit?.();
         useTerminalStore.getState().clearBackendPtyId(id, ptyId);
         term.write(`\r\nfailed to start terminal: ${String(e)}\r\n`);
       }

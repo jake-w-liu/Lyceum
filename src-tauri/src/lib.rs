@@ -19,20 +19,24 @@ mod walk;
 mod window_ops;
 mod workspace_watch;
 
-use std::collections::VecDeque;
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use app_info::AppInfo;
 use tauri::{Emitter, Manager, RunEvent};
 
 /// Folders Lyceum was asked to open, e.g. via `lyceum .` which runs
-/// `open -na Lyceum --args /abs/path`. Seeded from this process's argv at
-/// startup, then appended to whenever the single-instance plugin forwards a
-/// second launch. Each new window's frontend pops one entry on mount and opens
-/// it as the workspace, taking precedence over the restored workspace. A queue
-/// (not a single value) so a forwarded launch routes its folder to the window
-/// opened for it rather than every window re-opening the startup folder.
-struct LaunchDir(Mutex<VecDeque<String>>);
+/// `open -na Lyceum --args /abs/path`, keyed by the window label that should
+/// open them. Seeded in `setup` with the cold-start folder for the initial
+/// window, then extended whenever the single-instance plugin forwards a second
+/// launch (keyed to the window opened for it). Each window's frontend reads its
+/// own entry once on mount, taking precedence over the restored workspace.
+///
+/// Keying by window label (not a FIFO queue) avoids a race: webviews load
+/// asynchronously, so a later-created window can call `get_launch_dir` before an
+/// earlier one — a queue would then hand it the wrong folder. The lookup is by
+/// the *calling* window's label, so each window always gets its own folder.
+struct LaunchDir(Mutex<HashMap<String, String>>);
 
 /// First argv entry that is an existing directory, canonicalized to an absolute
 /// path. Filtering on `is_dir` skips the program name and macOS-injected flags
@@ -57,11 +61,12 @@ fn get_app_info() -> AppInfo {
     app_info::app_info()
 }
 
-/// Pops the next folder a launch asked to open (or `null`). Consumed once per
-/// window on mount, so a window only opens the folder its launch requested.
+/// The folder this window was launched to open (or `null`). `window` is the
+/// calling webview, injected by Tauri; we look its label up and consume the
+/// entry so the folder opens exactly once for the window it was meant for.
 #[tauri::command]
-fn get_launch_dir(state: tauri::State<'_, LaunchDir>) -> Option<String> {
-    state.0.lock().ok()?.pop_front()
+fn get_launch_dir(window: tauri::Window, state: tauri::State<'_, LaunchDir>) -> Option<String> {
+    state.0.lock().ok()?.remove(window.label())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -69,24 +74,27 @@ pub fn run() {
     tauri::Builder::default()
         // Must be the first plugin: a second launch (double-click or `lyceum .`)
         // hands its argv to the already-running process and exits, so macOS keeps
-        // one dock icon. We queue any folder it carried and open a window for it.
+        // one dock icon. We open a window for it and record any folder it carried.
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            if let Some(dir) = first_dir_arg(argv) {
-                if let Some(state) = app.try_state::<LaunchDir>() {
-                    if let Ok(mut queue) = state.0.lock() {
-                        queue.push_back(dir);
+            // Open the window first so we know its label, then record the folder
+            // (if any) against that exact window — never a different one.
+            let dir = first_dir_arg(argv);
+            match window_ops::open_new_window(app) {
+                Ok(window) => {
+                    if let Some(dir) = dir {
+                        if let Some(state) = app.try_state::<LaunchDir>() {
+                            if let Ok(mut map) = state.0.lock() {
+                                map.insert(window.label().to_string(), dir);
+                            }
+                        }
                     }
                 }
-            }
-            if let Err(err) = window_ops::open_new_window(app) {
-                eprintln!("failed to open window for second instance: {err}");
+                Err(err) => eprintln!("failed to open window for second instance: {err}"),
             }
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .manage(LaunchDir(Mutex::new(
-            launch_dir_from_args().into_iter().collect(),
-        )))
+        .manage(LaunchDir(Mutex::new(HashMap::new())))
         .manage(terminal::TerminalManager::default())
         .manage(lsp::LspManager::default())
         .manage(julia::RunManager::default())
@@ -94,6 +102,15 @@ pub fn run() {
         .setup(|app| {
             let menu = menu::build_app_menu(app.handle())?;
             app.set_menu(menu)?;
+            // Route the cold-start folder (`lyceum .`) to the initial window by
+            // its label, so its frontend — and no other window — opens it.
+            if let Some(dir) = launch_dir_from_args() {
+                if let Some(window) = app.webview_windows().into_values().next() {
+                    if let Ok(mut map) = app.state::<LaunchDir>().0.lock() {
+                        map.insert(window.label().to_string(), dir);
+                    }
+                }
+            }
             Ok(())
         })
         // Native menu items carry frontend command ids; window lifecycle
@@ -152,6 +169,11 @@ pub fn run() {
                     app.state::<terminal::TerminalManager>().shutdown_all();
                     app.state::<lsp::LspManager>().shutdown_all();
                     app.state::<julia::RunManager>().shutdown_all();
+                    // Drop the filesystem watcher too, so its notify worker
+                    // threads stop before teardown instead of emitting onto a
+                    // closing app handle.
+                    app.state::<workspace_watch::WorkspaceWatchManager>()
+                        .shutdown_all();
                 }
                 #[cfg(target_os = "macos")]
                 RunEvent::Reopen {
