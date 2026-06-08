@@ -1,4 +1,10 @@
-# Lyceum
+<p align="center">
+  <img src="src-tauri/icons/128x128@2x.png" alt="Lyceum logo" width="128" height="128" />
+</p>
+
+<h1 align="center">Lyceum</h1>
+
+<p align="center"><em>A lightweight, VS Code-inspired research IDE built with Tauri — Julia-first.</em></p>
 
 A lightweight, VS Code-inspired **research IDE** built with Tauri, with a Julia-first workflow. It pairs a focused, familiar editor layout (activity bar, sidebar, editor area, bottom panel, status bar) with a Monaco-based code editor, integrated terminal, syntax highlighting, Markdown/HTML/PDF/image preview, and a generic LSP client. It is deliberately **not** a 1:1 VS Code clone — just a fast, focused editor for research work. All code is original and all dependencies are permissive open source; no VS Code source is copied.
 
