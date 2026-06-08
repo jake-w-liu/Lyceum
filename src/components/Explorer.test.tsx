@@ -130,6 +130,33 @@ describe("Explorer", () => {
     expect(onOpenFile).toHaveBeenCalledWith("/ws/README.md");
   });
 
+  it("opens inline rename when F2 is pressed on a file row", async () => {
+    render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    const label = await screen.findByText("README.md");
+    fireEvent.keyDown(label.closest("button") as HTMLButtonElement, {
+      key: "F2",
+    });
+    expect(await screen.findByLabelText("New name")).toBeInTheDocument();
+  });
+
+  it("opens inline rename on a slow second click of a selected file", async () => {
+    render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    const label = await screen.findByText("README.md");
+    await userEvent.click(label); // first click: select + open
+    await userEvent.click(label); // second click on the selected file: rename
+    expect(await screen.findByLabelText("New name")).toBeInTheDocument();
+  });
+
+  it("double-click opens the file and does not start a rename", async () => {
+    const onOpenFile = vi.fn();
+    render(<Explorer rootPath={ROOT} onOpenFile={onOpenFile} />);
+    await userEvent.dblClick(await screen.findByText("README.md"));
+    // Wait past the slow-click rename delay to prove it was cancelled.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(screen.queryByLabelText("New name")).not.toBeInTheDocument();
+    expect(onOpenFile).toHaveBeenCalledWith("/ws/README.md");
+  });
+
   it("creates a new file via the toolbar", async () => {
     render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
     await screen.findByText("src");

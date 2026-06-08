@@ -306,7 +306,8 @@ say **Ctrl**.
 | Shift+Alt/Option+Up/Down | Duplicate line |
 | Cmd/Ctrl+Enter | Run current file or selected code |
 | Cmd/Ctrl+Shift+V | Preview Markdown/HTML/LaTeX |
-| Esc | Close command palette / quick open / find box / modal panel |
+| F2 | Rename selected file/folder (Explorer) |
+| Esc | Close command palette / quick open / find box / modal panel / rename |
 
 See [docs/KEYBINDINGS.md](docs/KEYBINDINGS.md) for the full reference.
 
@@ -316,8 +317,11 @@ See [docs/KEYBINDINGS.md](docs/KEYBINDINGS.md) for the full reference.
   select and open/toggle it. Cmd/Ctrl-click toggles individual rows, and
   Shift-click selects a contiguous visible range. **New File** / **New Folder**
   create inside the selected folder, beside a selected file, or at the workspace
-  root when there is no single selected target. Drag selected files/folders onto
-  another folder to move them. **Delete Selected** moves items into a
+  root when there is no single selected target. **Rename** by pressing **F2** on
+  a selected item, by clicking the name of an already-selected file (a slow
+  second click, as in VS Code), or via the inline rename button; **Esc** cancels.
+  Drag selected files/folders onto another folder to move them. **Delete
+  Selected** moves items into a
   workspace-local `.lyceum-trash/` folder hidden from the Explorer; with the
   Explorer focused, Cmd/Ctrl+Z restores the last delete and Cmd/Ctrl+Shift+Z or
   Ctrl+Y redoes it.

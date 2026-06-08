@@ -19,6 +19,10 @@ import { useEditorStore } from "../state/editorStore";
 import { useGitStore } from "../state/gitStore";
 import { Icon } from "./Icon";
 
+// Delay before a click on an already-selected file opens its inline rename.
+// Long enough that a double-click (which opens the file) cancels it first.
+const RENAME_CLICK_DELAY_MS = 400;
+
 // VS Code-style single-letter badge for a changed file; folders show a dot.
 function gitBadgeChar(status: string, isDir: boolean): string {
   if (isDir) return "●";
@@ -192,6 +196,15 @@ function TreeNode({
   );
   const [renaming, setRenaming] = useState(false);
   const selected = selectedPaths.includes(entry.path);
+  // Pending VS Code-style "slow click" rename: a second click on an
+  // already-selected file starts a timer; a double-click (open) cancels it.
+  const renameClickTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearRenameClickTimer = () => {
+    if (renameClickTimer.current) {
+      clearTimeout(renameClickTimer.current);
+      renameClickTimer.current = null;
+    }
+  };
 
   // (Re)load children when an expanded directory has no cached entries.
   useEffect(() => {
@@ -200,19 +213,51 @@ function TreeNode({
     }
   }, [entry.isDir, entry.path, expanded, children, refreshNonce]);
 
+  // Cancel a pending slow-click rename if this row stops being the sole
+  // selection (e.g. the user clicked elsewhere before the timer fired), and on
+  // unmount so the timer can't fire into a gone component.
+  useEffect(() => {
+    if (!selected) clearRenameClickTimer();
+    return clearRenameClickTimer;
+  }, [selected]);
+
   function onActivate(e: React.MouseEvent) {
     const tree = useTreeStore.getState();
     if (e.shiftKey) {
+      clearRenameClickTimer();
       tree.selectRange(visiblePaths, entry.path);
       return;
     }
     if (e.metaKey || e.ctrlKey) {
+      clearRenameClickTimer();
       tree.toggleSelected(entry.path);
       return;
     }
+    const wasSoleSelection =
+      selected && selectedPaths.length === 1 && !entry.isDir;
     tree.selectSingle(entry.path);
-    if (entry.isDir) useTreeStore.getState().toggleExpanded(entry.path);
-    else onOpenFile(entry.path);
+    if (entry.isDir) {
+      useTreeStore.getState().toggleExpanded(entry.path);
+    } else if (wasSoleSelection) {
+      // Click on an already-selected file → begin inline rename (like VS Code),
+      // unless a double-click arrives first (handled in onDoubleClick → open).
+      clearRenameClickTimer();
+      renameClickTimer.current = setTimeout(() => {
+        renameClickTimer.current = null;
+        setRenaming(true);
+      }, RENAME_CLICK_DELAY_MS);
+    } else {
+      onOpenFile(entry.path);
+    }
+  }
+
+  function onRowKeyDown(e: React.KeyboardEvent) {
+    // F2 renames the focused item (files and folders), matching VS Code.
+    if (e.key === "F2") {
+      e.preventDefault();
+      clearRenameClickTimer();
+      setRenaming(true);
+    }
   }
 
   function entriesForDelete(): DirEntry[] {
@@ -311,6 +356,12 @@ function TreeNode({
               : entry.name
           }
           onClick={onActivate}
+          onDoubleClick={() => {
+            // A double-click opens the file; cancel any pending slow-click rename.
+            clearRenameClickTimer();
+            if (!entry.isDir) onOpenFile(entry.path);
+          }}
+          onKeyDown={onRowKeyDown}
         >
           <span
             className={"tree-twisty" + (entry.isDir && expanded ? " expanded" : "")}
@@ -463,13 +514,25 @@ function RenameInput({
 }) {
   const [value, setValue] = useState(initial);
   const committedRef = useRef(false);
+  const inputRef = useRef<HTMLInputElement>(null);
   function commit(next: string) {
     if (committedRef.current) return;
     committedRef.current = true;
     onCommit(next);
   }
+  // Focus and pre-select the base name (everything before the extension), like
+  // VS Code — so typing replaces the name but keeps the extension by default.
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.focus();
+    const dot = initial.lastIndexOf(".");
+    if (dot > 0) el.setSelectionRange(0, dot);
+    else el.select();
+  }, [initial]);
   return (
     <input
+      ref={inputRef}
       className="tree-rename-input"
       aria-label="New name"
       // File names are literal: no auto-capitalization / autocorrect / spellcheck.
@@ -477,7 +540,6 @@ function RenameInput({
       autoCorrect="off"
       autoComplete="off"
       spellCheck={false}
-      autoFocus
       value={value}
       onClick={(e) => e.stopPropagation()}
       onChange={(e) => setValue(e.target.value)}
