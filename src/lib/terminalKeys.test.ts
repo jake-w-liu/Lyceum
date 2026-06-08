@@ -37,12 +37,14 @@ describe("terminalKeyOverride", () => {
     ).toEqual({ type: "send", data: "\x1b\x7f" });
   });
 
-  it("keeps copy/paste on the platform modifier", () => {
+  it("copies the selection on the platform modifier", () => {
     expect(terminalKeyOverride(ev({ key: "c", metaKey: true }), true, true)).toEqual({
       type: "copy",
     });
-    expect(terminalKeyOverride(ev({ key: "v", ctrlKey: true }), false, false)).toEqual({
-      type: "paste",
-    });
+  });
+
+  it("does not override paste (xterm pastes natively, avoiding double-paste)", () => {
+    expect(terminalKeyOverride(ev({ key: "v", metaKey: true }), true, false)).toBeNull();
+    expect(terminalKeyOverride(ev({ key: "v", ctrlKey: true }), false, false)).toBeNull();
   });
 });

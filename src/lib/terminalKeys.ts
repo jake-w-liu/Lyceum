@@ -3,8 +3,7 @@
 
 export type TerminalKeyOverride =
   | { type: "send"; data: string }
-  | { type: "copy" }
-  | { type: "paste" };
+  | { type: "copy" };
 
 type KeyLike = Pick<
   KeyboardEvent,
@@ -31,7 +30,10 @@ export function terminalKeyOverride(
 
   const key = event.key.toLowerCase();
   if (key === "c" && hasSelection) return { type: "copy" };
-  if (key === "v") return { type: "paste" };
+  // Paste is intentionally NOT overridden: xterm pastes natively from the
+  // browser `paste` event (Cmd/Ctrl+V on the focused textarea). Reading the
+  // clipboard ourselves here both double-pasted (our send + xterm's native
+  // paste) and triggered the macOS clipboard-permission "Paste" prompt.
   return null;
 }
 

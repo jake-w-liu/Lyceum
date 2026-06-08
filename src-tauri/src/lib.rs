@@ -19,14 +19,20 @@ mod walk;
 mod window_ops;
 mod workspace_watch;
 
+use std::collections::VecDeque;
+use std::sync::Mutex;
+
 use app_info::AppInfo;
 use tauri::{Emitter, Manager, RunEvent};
 
-/// The folder Lyceum was asked to open on launch, e.g. via `lyceum .` which
-/// runs `open -na Lyceum --args /abs/path`. Resolved once from argv at startup;
-/// `None` for a plain double-click launch. The frontend reads this on mount and
-/// opens it as the workspace, taking precedence over the restored workspace.
-struct LaunchDir(Option<String>);
+/// Folders Lyceum was asked to open, e.g. via `lyceum .` which runs
+/// `open -na Lyceum --args /abs/path`. Seeded from this process's argv at
+/// startup, then appended to whenever the single-instance plugin forwards a
+/// second launch. Each new window's frontend pops one entry on mount and opens
+/// it as the workspace, taking precedence over the restored workspace. A queue
+/// (not a single value) so a forwarded launch routes its folder to the window
+/// opened for it rather than every window re-opening the startup folder.
+struct LaunchDir(Mutex<VecDeque<String>>);
 
 /// First argv entry that is an existing directory, canonicalized to an absolute
 /// path. Filtering on `is_dir` skips the program name and macOS-injected flags
@@ -51,18 +57,36 @@ fn get_app_info() -> AppInfo {
     app_info::app_info()
 }
 
-/// The folder passed on the command line at launch (or `null`).
+/// Pops the next folder a launch asked to open (or `null`). Consumed once per
+/// window on mount, so a window only opens the folder its launch requested.
 #[tauri::command]
 fn get_launch_dir(state: tauri::State<'_, LaunchDir>) -> Option<String> {
-    state.0.clone()
+    state.0.lock().ok()?.pop_front()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Must be the first plugin: a second launch (double-click or `lyceum .`)
+        // hands its argv to the already-running process and exits, so macOS keeps
+        // one dock icon. We queue any folder it carried and open a window for it.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if let Some(dir) = first_dir_arg(argv) {
+                if let Some(state) = app.try_state::<LaunchDir>() {
+                    if let Ok(mut queue) = state.0.lock() {
+                        queue.push_back(dir);
+                    }
+                }
+            }
+            if let Err(err) = window_ops::open_new_window(app) {
+                eprintln!("failed to open window for second instance: {err}");
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .manage(LaunchDir(launch_dir_from_args()))
+        .manage(LaunchDir(Mutex::new(
+            launch_dir_from_args().into_iter().collect(),
+        )))
         .manage(terminal::TerminalManager::default())
         .manage(lsp::LspManager::default())
         .manage(julia::RunManager::default())

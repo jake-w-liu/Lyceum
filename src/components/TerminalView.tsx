@@ -85,10 +85,12 @@ export function TerminalView({
       else pending.push(data);
     };
 
-    // Clipboard: copy the selection (Cmd/Ctrl+C with a selection), paste
-    // (Cmd/Ctrl+V). Ctrl+C with no selection still reaches the PTY (interrupt).
-    // Backspace is sent explicitly because some WebView/browser key events can
-    // be mis-mapped before xterm turns them into terminal bytes.
+    // Clipboard: copy the selection (Cmd/Ctrl+C with a selection). Paste is left
+    // to xterm's native `paste` event so Cmd/Ctrl+V inserts exactly once and does
+    // not trip the macOS clipboard-permission prompt. Ctrl+C with no selection
+    // still reaches the PTY (interrupt). Backspace is sent explicitly because
+    // some WebView/browser key events can be mis-mapped before xterm turns them
+    // into terminal bytes.
     term.attachCustomKeyEventHandler((e) => {
       const override = terminalKeyOverride(e, isMac(), term.hasSelection());
       if (!override) return true;
@@ -98,14 +100,6 @@ export function TerminalView({
           break;
         case "copy":
           navigator.clipboard?.writeText(term.getSelection()).catch(() => {});
-          break;
-        case "paste":
-          navigator.clipboard
-            ?.readText()
-            .then((text) => {
-              if (text) sendInput(text);
-            })
-            .catch(() => {});
           break;
       }
       return false;
