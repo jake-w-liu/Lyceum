@@ -116,13 +116,31 @@ pub fn run() {
         // Native menu items carry frontend command ids; window lifecycle
         // commands must run in the backend so they work without a live webview.
         .on_menu_event(|app, event| {
-            if event.id().0.as_str() == "app.newWindow" {
+            let id = event.id().0.as_str();
+            if id == "app.newWindow" {
                 if let Err(err) = window_ops::open_new_window(app) {
                     eprintln!("failed to open new window: {err}");
                 }
                 return;
             }
-            let _ = app.emit("menu", event.id().0.as_str());
+            // The macOS menu bar is app-global, so deliver the command to the
+            // focused window ONLY. Broadcasting with app.emit ran it in every
+            // window at once — e.g. Open Folder fired in the first window even
+            // when clicked from the second. Fall back to a broadcast if no
+            // window reports focus (rare; e.g. all minimized).
+            let focused_label = app
+                .webview_windows()
+                .into_iter()
+                .find(|(_, win)| win.is_focused().unwrap_or(false))
+                .map(|(label, _)| label);
+            match focused_label {
+                Some(label) => {
+                    let _ = app.emit_to(label.as_str(), "menu", id);
+                }
+                None => {
+                    let _ = app.emit("menu", id);
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             get_app_info,
