@@ -12,6 +12,7 @@ import {
   closeActiveTab,
   focusAdjacentTab,
   saveActiveDoc,
+  saveAllDocs,
 } from "./useEditorKeybindings";
 
 const get = () => useEditorStore.getState();
@@ -48,6 +49,35 @@ describe("saveActiveDoc", () => {
 
     await saveActiveDoc();
 
+    expect(writeFile).not.toHaveBeenCalled();
+  });
+});
+
+describe("saveAllDocs", () => {
+  it("writes every dirty text doc and clears their dirty state", async () => {
+    get().openDoc({ path: "/w/a.ts", content: "a", language: "typescript" });
+    get().openDoc({ path: "/w/b.ts", content: "b", language: "typescript" });
+    get().openDoc({ path: "/w/clean.ts", content: "c", language: "typescript" });
+    get().updateContent("/w/a.ts", "a!");
+    get().updateContent("/w/b.ts", "b!");
+
+    await saveAllDocs();
+
+    expect(writeFile).toHaveBeenCalledTimes(2);
+    expect(writeFile).toHaveBeenCalledWith("/w/a.ts", "a!");
+    expect(writeFile).toHaveBeenCalledWith("/w/b.ts", "b!");
+    expect(get().docs.filter((d) => isDirty(d))).toHaveLength(0);
+  });
+
+  it("is a no-op when no docs are dirty", async () => {
+    get().openDoc({ path: "/w/a.ts", content: "a", language: "typescript" });
+    await saveAllDocs();
+    expect(writeFile).not.toHaveBeenCalled();
+  });
+
+  it("ignores viewer (pdf/image) tabs", async () => {
+    get().openDoc({ path: "/w/p.pdf", content: "", language: "pdf", kind: "pdf" });
+    await saveAllDocs();
     expect(writeFile).not.toHaveBeenCalled();
   });
 });

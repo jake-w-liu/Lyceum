@@ -1,7 +1,22 @@
 // Tests for the keybinding matcher and when-clause evaluator.
 
 import { describe, expect, it } from "vitest";
-import { evaluateWhen, matchKeybinding } from "./keybindingRegistry";
+import { evaluateWhen, formatChord, matchKeybinding } from "./keybindingRegistry";
+
+describe("formatChord", () => {
+  it("uses symbol glyphs on macOS", () => {
+    expect(formatChord("mod+shift+p", true)).toBe("⇧⌘P");
+    expect(formatChord("mod+s", true)).toBe("⌘S");
+    expect(formatChord("mod+alt+s", true)).toBe("⌥⌘S");
+    expect(formatChord("ctrl+backquote", true)).toBe("⌃`");
+  });
+
+  it("uses words joined by + on other platforms", () => {
+    expect(formatChord("mod+shift+p", false)).toBe("Ctrl+Shift+P");
+    expect(formatChord("mod+s", false)).toBe("Ctrl+S");
+    expect(formatChord("mod+equal", false)).toBe("Ctrl+=");
+  });
+});
 
 describe("matchKeybinding (isMacOs=false, ctx={})", () => {
   const ctx = {};

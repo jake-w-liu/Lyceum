@@ -5,6 +5,8 @@ import { useEffect, useState } from "react";
 import { getAppInfo, type AppInfo } from "../lib/ipc";
 import { getActiveDoc, useEditorStore } from "../state/editorStore";
 import { useLspStatusStore, type LspStatus } from "../state/lspStatusStore";
+import { useOutputStore } from "../state/outputStore";
+import { useLayoutStore } from "../state/layoutStore";
 import { serverForLanguage } from "../lsp/servers";
 
 const LSP_LABEL: Record<LspStatus, string> = {
@@ -34,12 +36,25 @@ export function StatusBar() {
   const lspStatus = serverForLanguage(language)
     ? (lspByLanguage[language] ?? "off")
     : null;
+  const running = useOutputStore((s) => s.running);
 
   return (
     <footer className="status-bar" aria-label="Status Bar">
       <div className="status-bar-left">
         <span className="status-item">Lyceum</span>
         <span className="status-item">No folder opened</span>
+        {running && (
+          <button
+            type="button"
+            className="status-item status-item-button"
+            data-testid="status-running"
+            title="A task is running — show Output"
+            onClick={() => useLayoutStore.getState().showBottomTab("output")}
+          >
+            <span className="status-spinner" aria-hidden="true" />
+            Running…
+          </button>
+        )}
       </div>
       <div className="status-bar-right">
         {lspStatus && (

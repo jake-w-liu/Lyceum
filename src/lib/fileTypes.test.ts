@@ -10,6 +10,7 @@ import {
   isMarkdownPath,
   isPdfPath,
   isTexSourcePath,
+  relativePath,
 } from "./fileTypes";
 
 describe("file type helpers", () => {
@@ -45,5 +46,28 @@ describe("file type helpers", () => {
     expect(isImagePath("/w/icon.ico")).toBe(true);
     expect(isImagePath("/w/vector.svg")).toBe(true);
     expect(isImagePath("/w/index.html")).toBe(false);
+  });
+});
+
+describe("relativePath", () => {
+  it("returns the path relative to the workspace root", () => {
+    expect(relativePath("/w", "/w/src/main.ts")).toBe("src/main.ts");
+    expect(relativePath("/w/", "/w/src/main.ts")).toBe("src/main.ts");
+  });
+
+  it("returns the bare name for the root itself", () => {
+    expect(relativePath("/w/proj", "/w/proj")).toBe("proj");
+  });
+
+  it("returns the absolute path when the file is outside the root", () => {
+    expect(relativePath("/w", "/other/x.ts")).toBe("/other/x.ts");
+  });
+
+  it("normalizes Windows separators in the relative portion", () => {
+    expect(relativePath("C:\\w", "C:\\w\\src\\a.ts")).toBe("src/a.ts");
+  });
+
+  it("returns the path unchanged when there is no root", () => {
+    expect(relativePath("", "/w/a.ts")).toBe("/w/a.ts");
   });
 });

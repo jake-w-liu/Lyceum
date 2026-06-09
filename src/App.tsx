@@ -7,6 +7,7 @@ import { StatusBar } from "./components/StatusBar";
 import { Resizer } from "./components/Resizer";
 import { CommandPalette } from "./components/CommandPalette";
 import { QuickOpen } from "./components/QuickOpen";
+import { ContextMenu } from "./components/ContextMenu";
 import { useEffect } from "react";
 import { useCommandKeybindings } from "./hooks/useCommandKeybindings";
 import { useMenuCommands } from "./hooks/useMenuCommands";
@@ -113,6 +114,7 @@ export default function App() {
 
       <CommandPalette />
       <QuickOpen />
+      <ContextMenu />
     </div>
   );
 }

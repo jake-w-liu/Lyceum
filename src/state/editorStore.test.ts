@@ -1,7 +1,7 @@
 // Unit tests for the editor store: open/close/activate tabs, dirty tracking,
 // and the pure getActiveDoc/isDirty helpers.
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   getActiveDoc,
@@ -206,5 +206,60 @@ describe("editorStore", () => {
     expect(doc.path).toBe("/w/notes.md");
     expect(doc.language).toBe("markdown");
     expect(doc.content).toBe("# Notes");
+  });
+
+  describe("batch close", () => {
+    afterEach(() => vi.restoreAllMocks());
+
+    const openThree = () => {
+      const store = useEditorStore.getState();
+      store.openDoc({ path: "/a.ts", content: "a", language: "typescript" });
+      store.openDoc({ path: "/b.ts", content: "b", language: "typescript" });
+      store.openDoc({ path: "/c.ts", content: "c", language: "typescript" });
+    };
+    const paths = () => useEditorStore.getState().docs.map((d) => d.path);
+
+    it("closeOtherDocs keeps only the given tab", () => {
+      openThree();
+      useEditorStore.getState().closeOtherDocs("/b.ts");
+      expect(paths()).toEqual(["/b.ts"]);
+      expect(useEditorStore.getState().activePath).toBe("/b.ts");
+    });
+
+    it("closeDocsToRight closes tabs after the given one", () => {
+      openThree(); // active is /c.ts
+      useEditorStore.getState().closeDocsToRight("/a.ts");
+      expect(paths()).toEqual(["/a.ts"]);
+      // Active /c.ts was closed; nearest survivor is /a.ts.
+      expect(useEditorStore.getState().activePath).toBe("/a.ts");
+    });
+
+    it("closeAllDocs clears everything (clean docs never prompt)", () => {
+      const confirmSpy = vi.spyOn(globalThis, "confirm");
+      openThree();
+      useEditorStore.getState().closeAllDocs();
+      expect(paths()).toEqual([]);
+      expect(useEditorStore.getState().activePath).toBeNull();
+      expect(confirmSpy).not.toHaveBeenCalled();
+    });
+
+    it("closeSavedDocs closes clean tabs and keeps dirty ones", () => {
+      openThree();
+      useEditorStore.getState().updateContent("/b.ts", "b dirty");
+      useEditorStore.getState().closeSavedDocs();
+      expect(paths()).toEqual(["/b.ts"]);
+      expect(useEditorStore.getState().activePath).toBe("/b.ts");
+    });
+
+    it("a cancelled discard confirmation spares only that dirty tab", () => {
+      vi.spyOn(globalThis, "confirm").mockReturnValue(false);
+      const store = useEditorStore.getState();
+      store.openDoc({ path: "/a.ts", content: "a", language: "typescript" });
+      store.openDoc({ path: "/b.ts", content: "b", language: "typescript" });
+      store.updateContent("/a.ts", "a dirty"); // dirty → will prompt
+      store.closeAllDocs();
+      // /a.ts kept (discard declined); clean /b.ts closed without a prompt.
+      expect(paths()).toEqual(["/a.ts"]);
+    });
   });
 });

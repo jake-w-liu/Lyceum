@@ -7,12 +7,16 @@ import userEvent from "@testing-library/user-event";
 import { CommandPalette } from "./CommandPalette";
 import { initialUiData, useUiStore } from "../state/uiStore";
 import { commandRegistry } from "../commands/commandRegistry";
+import { initialKeymapData, useKeymapStore } from "../state/keymapStore";
+import { formatChord } from "../keybindings/keybindingRegistry";
+import { isMac } from "../hooks/useLayoutKeybindings";
 
 const runOne = vi.fn();
 const runTwo = vi.fn();
 
 beforeEach(() => {
   useUiStore.setState(initialUiData, false);
+  useKeymapStore.setState(initialKeymapData, false);
   commandRegistry.clear();
   runOne.mockClear();
   runTwo.mockClear();
@@ -51,6 +55,36 @@ describe("CommandPalette", () => {
     expect(runTwo).toHaveBeenCalledTimes(1);
     expect(runOne).not.toHaveBeenCalled();
     expect(useUiStore.getState().activeModal).toBeNull();
+  });
+
+  it("shows the bound keybinding next to a command", () => {
+    useKeymapStore.setState({ keymap: [{ key: "mod+s", command: "a.one" }] }, false);
+    useUiStore.getState().openModal("palette");
+    render(<CommandPalette />);
+    expect(
+      screen.getByText(formatChord("mod+s", isMac())),
+    ).toBeInTheDocument();
+  });
+
+  it("groups by category headers when the query is empty", () => {
+    commandRegistry.register({ id: "v.x", title: "Xeno", category: "View", run: vi.fn() });
+    commandRegistry.register({ id: "f.y", title: "Yak", category: "File", run: vi.fn() });
+    useUiStore.getState().openModal("palette");
+    render(<CommandPalette />);
+    expect(screen.getByText("View")).toBeInTheDocument();
+    expect(screen.getByText("File")).toBeInTheDocument();
+  });
+
+  it("drops category headers while filtering", async () => {
+    const user = userEvent.setup();
+    commandRegistry.register({ id: "v.x", title: "Xeno", category: "View", run: vi.fn() });
+    useUiStore.getState().openModal("palette");
+    render(<CommandPalette />);
+
+    await user.type(screen.getByLabelText("Command input"), "xeno");
+
+    expect(screen.queryByText("View")).toBeNull();
+    expect(screen.getByText("Xeno")).toBeInTheDocument();
   });
 
   it("closes on Escape without running a command", async () => {

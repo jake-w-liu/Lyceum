@@ -10,9 +10,18 @@ import {
 } from "../lib/fileTypes";
 import { runActiveJulia } from "../lib/julia";
 import { runLatexBuild } from "../lib/latexBuild";
-import { confirmDiscard, isDirty, useEditorStore } from "../state/editorStore";
+import {
+  confirmDiscard,
+  isDirty,
+  useEditorStore,
+  type EditorDoc,
+} from "../state/editorStore";
 import { useLayoutStore } from "../state/layoutStore";
 import { useOutputStore } from "../state/outputStore";
+import {
+  useContextMenuStore,
+  type ContextMenuItem,
+} from "../state/contextMenuStore";
 
 export function TabBar() {
   const docs = useEditorStore((s) => s.docs);
@@ -31,13 +40,39 @@ export function TabBar() {
     activeDoc?.kind === "text" && isJuliaSourcePath(activeDoc.path);
   const previewing = canPreview && editorPreview;
 
+  function openTabMenu(e: React.MouseEvent, doc: EditorDoc) {
+    e.preventDefault();
+    const store = useEditorStore.getState();
+    const items: ContextMenuItem[] = [
+      {
+        label: "Close",
+        run: () => {
+          if (confirmDiscard(doc.path)) store.closeDoc(doc.path);
+        },
+      },
+      {
+        label: "Close Others",
+        run: () => store.closeOtherDocs(doc.path),
+        separatorBefore: true,
+      },
+      { label: "Close to the Right", run: () => store.closeDocsToRight(doc.path) },
+      { label: "Close Saved", run: () => store.closeSavedDocs() },
+      { label: "Close All", run: () => store.closeAllDocs() },
+    ];
+    useContextMenuStore.getState().openMenu(e.clientX, e.clientY, items);
+  }
+
   return (
     <div className="tab-bar">
       <div className="tab-list" role="tablist" aria-label="Open editors">
         {docs.map((doc) => {
           const active = doc.path === activePath;
           return (
-            <div className={"tab" + (active ? " active" : "")} key={doc.path}>
+            <div
+              className={"tab" + (active ? " active" : "")}
+              key={doc.path}
+              onContextMenu={(e) => openTabMenu(e, doc)}
+            >
               <button
                 type="button"
                 role="tab"

@@ -1278,3 +1278,125 @@ kbd {
   margin: -2px 0;
   cursor: row-resize;
 }
+
+/* --- Command palette: title + keybinding hint + category grouping --- */
+.modal-item-title {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.modal-item.selected .modal-item-detail {
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.modal-category-header {
+  padding: 6px 12px 2px;
+  color: var(--fg-muted);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* --- Right-click context menu --- */
+.context-menu-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+}
+
+.context-menu {
+  position: fixed;
+  min-width: 180px;
+  max-width: 320px;
+  padding: 4px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+  display: flex;
+  flex-direction: column;
+  font-size: 13px;
+}
+
+.context-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 5px 10px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+  white-space: nowrap;
+  font: inherit;
+}
+
+.context-menu-item:hover:not(.disabled) {
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.context-menu-item.disabled {
+  color: var(--fg-muted);
+  cursor: default;
+}
+
+.context-menu-item.separator-before {
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+  padding-top: 7px;
+}
+
+/* --- Explorer file-type icon --- */
+.tree-icon {
+  flex: 0 0 auto;
+  margin-right: 5px;
+  color: var(--fg-muted);
+}
+
+/* --- Status bar: clickable item + running spinner --- */
+.status-item-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.status-item-button:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.status-spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid rgba(255, 255, 255, 0.4);
+  border-top-color: #ffffff;
+  border-radius: 50%;
+  animation: status-spin 0.8s linear infinite;
+}
+
+@keyframes status-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* --- PDF toolbar: editable page number --- */
+.pdf-page-input {
+  width: 2.5em;
+  text-align: right;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font: inherit;
+  padding: 1px 3px;
+  margin-right: 2px;
+}

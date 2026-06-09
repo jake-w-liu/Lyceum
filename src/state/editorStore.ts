@@ -66,6 +66,14 @@ export interface EditorActions {
     kind?: EditorDocKind;
   }) => void;
   closeDoc: (path: string) => void;
+  /** Close every open doc except `keepPath` (prompts per unsaved doc). */
+  closeOtherDocs: (keepPath: string) => void;
+  /** Close docs positioned after `fromPath` in the tab order. */
+  closeDocsToRight: (fromPath: string) => void;
+  /** Close every open doc. */
+  closeAllDocs: () => void;
+  /** Close only docs with no unsaved changes (never prompts). */
+  closeSavedDocs: () => void;
   setActive: (path: string) => void;
   updateContent: (path: string, content: string) => void;
   /**
@@ -94,7 +102,46 @@ export const initialEditorData: EditorData = {
   selection: "",
 };
 
-export const useEditorStore = create<EditorState>()((set) => ({
+/**
+ * Remove `pathsToClose` (after per-doc discard confirmation) and recompute the
+ * active tab, choosing the nearest surviving neighbor to the left then right of
+ * the old active tab — matching closeDoc's single-tab preference so a single
+ * close and a batch close activate the same tab in the same situation.
+ */
+function closeDocs(
+  set: (fn: (s: EditorState) => Partial<EditorState>) => void,
+  pathsToClose: string[],
+): void {
+  const confirmed = pathsToClose.filter((path) => confirmDiscard(path));
+  if (confirmed.length === 0) return;
+  const closing = new Set(confirmed);
+  set((s) => {
+    const docs = s.docs.filter((doc) => !closing.has(doc.path));
+    let activePath = s.activePath;
+    if (activePath !== null && closing.has(activePath)) {
+      const idx = s.docs.findIndex((doc) => doc.path === activePath);
+      let neighbor: EditorDoc | null = null;
+      for (let i = idx - 1; i >= 0; i -= 1) {
+        if (!closing.has(s.docs[i].path)) {
+          neighbor = s.docs[i];
+          break;
+        }
+      }
+      if (!neighbor) {
+        for (let i = idx + 1; i < s.docs.length; i += 1) {
+          if (!closing.has(s.docs[i].path)) {
+            neighbor = s.docs[i];
+            break;
+          }
+        }
+      }
+      activePath = neighbor ? neighbor.path : null;
+    }
+    return { docs, activePath };
+  });
+}
+
+export const useEditorStore = create<EditorState>()((set, get) => ({
   ...initialEditorData,
 
   openDoc: (input) =>
@@ -128,6 +175,34 @@ export const useEditorStore = create<EditorState>()((set) => ({
         s.docs[index - 1] ?? s.docs[index + 1] ?? null;
       return { docs, activePath: neighbor ? neighbor.path : null };
     }),
+
+  closeOtherDocs: (keepPath) =>
+    closeDocs(
+      set,
+      get()
+        .docs.filter((doc) => doc.path !== keepPath)
+        .map((doc) => doc.path),
+    ),
+
+  closeDocsToRight: (fromPath) => {
+    const docs = get().docs;
+    const index = docs.findIndex((doc) => doc.path === fromPath);
+    if (index === -1) return;
+    closeDocs(
+      set,
+      docs.slice(index + 1).map((doc) => doc.path),
+    );
+  },
+
+  closeAllDocs: () => closeDocs(set, get().docs.map((doc) => doc.path)),
+
+  closeSavedDocs: () =>
+    closeDocs(
+      set,
+      get()
+        .docs.filter((doc) => !isDirty(doc))
+        .map((doc) => doc.path),
+    ),
 
   setActive: (path) => set({ activePath: path }),
 

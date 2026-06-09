@@ -19,6 +19,8 @@ export const DEFAULT_KEYMAP: Keybinding[] = [
   { key: "ctrl+shift+backquote", command: "terminal.new" },
   { key: "mod+j", command: "workbench.toggleBottomPanel" },
   { key: "mod+s", command: "file.save" },
+  { key: "mod+alt+s", command: "file.saveAll" },
+  { key: "mod+shift+e", command: "explorer.revealActiveFile" },
   { key: "mod+w", command: "editor.closeTab" },
   { key: "mod+tab", command: "editor.nextTab" },
   { key: "mod+shift+tab", command: "editor.previousTab" },
@@ -119,6 +121,54 @@ function parseChord(key: string): Chord {
     }
   }
   return chord;
+}
+
+// Human-readable label for a chord's main key (the non-modifier token).
+const MAIN_KEY_LABELS: Record<string, string> = {
+  backquote: "`",
+  equal: "=",
+  minus: "-",
+  digit0: "0",
+  tab: "Tab",
+  enter: "Enter",
+  escape: "Esc",
+  up: "↑",
+  down: "↓",
+  left: "←",
+  right: "→",
+  f12: "F12",
+};
+
+function mainKeyLabel(token: string): string {
+  if (token in MAIN_KEY_LABELS) return MAIN_KEY_LABELS[token];
+  return token.length === 1 ? token.toUpperCase() : token;
+}
+
+/**
+ * Pretty-print a keymap chord (e.g. "mod+shift+p") for display next to a command.
+ * On macOS uses the symbol glyphs (⌃⌥⇧⌘); elsewhere uses Ctrl/Alt/Shift words.
+ * `mod` resolves to ⌘ on macOS and Ctrl otherwise, matching the matcher.
+ */
+export function formatChord(key: string, isMacOs: boolean): string {
+  const chord = parseChord(key);
+  const wantsCtrl = chord.ctrl || (chord.mod && !isMacOs);
+  const wantsMeta = chord.cmd || chord.meta || (chord.mod && isMacOs);
+  const main = mainKeyLabel(chord.mainKey);
+  if (isMacOs) {
+    return (
+      (wantsCtrl ? "⌃" : "") +
+      (chord.alt ? "⌥" : "") +
+      (chord.shift ? "⇧" : "") +
+      (wantsMeta ? "⌘" : "") +
+      main
+    );
+  }
+  const parts: string[] = [];
+  if (wantsCtrl || wantsMeta) parts.push("Ctrl");
+  if (chord.alt) parts.push("Alt");
+  if (chord.shift) parts.push("Shift");
+  parts.push(main);
+  return parts.join("+");
 }
 
 function matchMainKey(token: string, e: KeyboardEvent): boolean {

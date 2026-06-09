@@ -5,7 +5,13 @@
 
 import { useEffect } from "react";
 import { isMac } from "./useLayoutKeybindings";
-import { confirmDiscard, getActiveDoc, isTextDoc, useEditorStore } from "../state/editorStore";
+import {
+  confirmDiscard,
+  getActiveDoc,
+  isDirty,
+  isTextDoc,
+  useEditorStore,
+} from "../state/editorStore";
 import { useGitStore } from "../state/gitStore";
 import { writeFile } from "../lib/ipc";
 
@@ -24,6 +30,30 @@ export async function saveActiveDoc(): Promise<void> {
     // Surfaced via the problems/output panel in a later milestone.
     console.error("Failed to save", doc.path, e);
   }
+}
+
+/**
+ * Persist every dirty text document to disk. Each write captures the exact bytes
+ * sent so a doc still being edited during its async write stays dirty (same rule
+ * as saveActiveDoc). Refreshes git decorations once after the batch.
+ */
+export async function saveAllDocs(): Promise<void> {
+  const dirty = useEditorStore
+    .getState()
+    .docs.filter((doc) => isTextDoc(doc) && isDirty(doc));
+  if (dirty.length === 0) return;
+  let wrote = false;
+  for (const doc of dirty) {
+    const content = doc.content;
+    try {
+      await writeFile(doc.path, content);
+      useEditorStore.getState().markSaved(doc.path, content);
+      wrote = true;
+    } catch (e) {
+      console.error("Failed to save", doc.path, e);
+    }
+  }
+  if (wrote) void useGitStore.getState().refresh();
 }
 
 /** Move the active tab by `dir` (+1 next, -1 previous), wrapping around. */

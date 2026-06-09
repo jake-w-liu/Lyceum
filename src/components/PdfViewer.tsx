@@ -486,6 +486,49 @@ function PdfPage({
   );
 }
 
+// Editable current-page indicator: shows "N / total", and on Enter/blur jumps to
+// the typed page. Follows the live `page` as the user scrolls (resets the draft).
+function PdfPageInput({
+  page,
+  numPages,
+  onGo,
+}: {
+  page: number;
+  numPages: number;
+  onGo: (n: number) => void;
+}) {
+  const [draft, setDraft] = useState(String(page));
+  useEffect(() => {
+    setDraft(String(page));
+  }, [page]);
+  const commit = () => {
+    const n = Number.parseInt(draft, 10);
+    if (Number.isFinite(n)) onGo(n);
+    else setDraft(String(page));
+  };
+  return (
+    <span className="pdf-page-indicator">
+      <input
+        className="pdf-page-input"
+        aria-label="Page number"
+        inputMode="numeric"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value.replace(/[^0-9]/g, ""))}
+        onFocus={(e) => e.currentTarget.select()}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") e.currentTarget.blur();
+          else if (e.key === "Escape") {
+            setDraft(String(page));
+            e.currentTarget.blur();
+          }
+        }}
+      />
+      {` / ${numPages}`}
+    </span>
+  );
+}
+
 export default function PdfViewer({ path }: { path: string }) {
   const saved = usePreviewStore.getState().viewState[path];
   const docRef = useRef<PDFDocumentProxy | null>(null);
@@ -959,9 +1002,11 @@ export default function PdfViewer({ path }: { path: string }) {
         >
           Prev
         </button>
-        <span className="pdf-page-indicator">
-          {page} / {numPages}
-        </span>
+        <PdfPageInput
+          page={page}
+          numPages={numPages}
+          onGo={(n) => scrollToPage(clampPage(n, numPages))}
+        />
         <button
           type="button"
           aria-label="Next page"

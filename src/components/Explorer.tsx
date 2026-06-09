@@ -17,6 +17,12 @@ import {
 import { useTreeStore } from "../state/treeStore";
 import { useEditorStore } from "../state/editorStore";
 import { useGitStore } from "../state/gitStore";
+import {
+  useContextMenuStore,
+  type ContextMenuItem,
+} from "../state/contextMenuStore";
+import { commandRegistry } from "../commands/commandRegistry";
+import { fileIconFor } from "../lib/fileIcons";
 import { Icon } from "./Icon";
 
 // Delay before a click on an already-selected file opens its inline rename.
@@ -260,6 +266,29 @@ function TreeNode({
     }
   }
 
+  function onContextMenu(e: React.MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    clearRenameClickTimer();
+    // Right-clicking a row outside the current selection selects just it, so the
+    // menu's actions target what the user clicked (VS Code behavior).
+    if (!selected) useTreeStore.getState().selectSingle(entry.path);
+    const multi = selected && selectedPaths.length > 1;
+    const run = (id: string) => () => void commandRegistry.execute(id);
+    const items: ContextMenuItem[] = [
+      { label: "New File", run: run("explorer.newFile") },
+      { label: "New Folder", run: run("explorer.newFolder") },
+      { label: "Rename", run: () => setRenaming(true), disabled: multi, separatorBefore: true },
+      {
+        label: multi ? `Delete ${selectedEntries.length} Items` : "Delete",
+        run: () => onDeleteEntries(entriesForDelete()),
+      },
+      { label: "Copy Path", run: run("file.copyPath"), separatorBefore: true },
+      { label: "Copy Relative Path", run: run("file.copyRelativePath") },
+    ];
+    useContextMenuStore.getState().openMenu(e.clientX, e.clientY, items);
+  }
+
   function entriesForDelete(): DirEntry[] {
     return selected && selectedEntries.length > 1 ? selectedEntries : [entry];
   }
@@ -311,6 +340,7 @@ function TreeNode({
         }
         draggable={!renaming}
         style={{ paddingLeft: 8 + depth * 12 }}
+        onContextMenu={onContextMenu}
         onDragStart={(e) => {
           const entries = entriesForDrag();
           if (!selected) useTreeStore.getState().selectSingle(entry.path);
@@ -369,6 +399,17 @@ function TreeNode({
           >
             {entry.isDir ? "▸" : ""}
           </span>
+          <Icon
+            name={
+              entry.isDir
+                ? expanded
+                  ? "folder-open"
+                  : "folder"
+                : fileIconFor(entry.name)
+            }
+            size={14}
+            className="tree-icon"
+          />
           {renaming ? (
             <RenameInput initial={entry.name} onCommit={commitRename} />
           ) : (

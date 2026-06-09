@@ -122,7 +122,9 @@ describe("PdfViewer", () => {
     const { container } = render(<PdfViewer path="/w/paper.pdf" />);
 
     // Indicator shows the total; the top page is current.
-    expect(await screen.findByText("1 / 3")).toBeInTheDocument();
+    const indicator = await screen.findByLabelText("Page number");
+    expect(indicator).toHaveValue("1");
+    expect(indicator.parentElement).toHaveTextContent("/ 3");
     // One page-layer per page, stacked in a single scroll container — i.e. a
     // continuous document, not a single paged canvas.
     const scroll = container.querySelector(".pdf-scroll") as HTMLElement;
@@ -144,9 +146,11 @@ describe("PdfViewer", () => {
 
     render(<PdfViewer path="/w/page-two.pdf" />);
 
-    expect(await screen.findByText("2 / 3")).toBeInTheDocument();
+    const indicator = await screen.findByLabelText("Page number");
+    expect(indicator).toHaveValue("2");
+    expect(indicator.parentElement).toHaveTextContent("/ 3");
     await waitFor(() => expect(pdfMocks.getPage).toHaveBeenCalledWith(2));
-    expect(screen.getByText("2 / 3")).toBeInTheDocument();
+    expect(screen.getByLabelText("Page number")).toHaveValue("2");
   });
 
   it("restores the saved zoom on reopen", async () => {
@@ -175,7 +179,7 @@ describe("PdfViewer", () => {
     try {
       mockPdfDocument(1);
       const { container } = render(<PdfViewer path="/w/hd.pdf" />);
-      await screen.findByText("1 / 1");
+      await screen.findByLabelText("Page number");
       await waitFor(() => expect(pdfMocks.pageRender).toHaveBeenCalled());
 
       const canvas = container.querySelector(
@@ -241,13 +245,15 @@ describe("PdfViewer", () => {
 
     const { container } = render(<PdfViewer path="/w/links.pdf" />);
 
-    expect(await screen.findByText("1 / 3")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Page number")).toHaveValue("1");
     await waitFor(() =>
       expect(container.querySelector(".pdf-annotation-layer a")).not.toBeNull(),
     );
     fireEvent.click(container.querySelector(".pdf-annotation-layer a")!);
 
-    await waitFor(() => expect(screen.getByText("3 / 3")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByLabelText("Page number")).toHaveValue("3"),
+    );
     expect(pdfMocks.getDestination).toHaveBeenCalledWith("sec");
     expect(pdfMocks.getPageIndex).toHaveBeenCalledWith(destinationRef);
   });

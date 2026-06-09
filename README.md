@@ -293,6 +293,8 @@ say **Ctrl**.
 | Ctrl+Shift+` | New terminal |
 | Cmd/Ctrl+J | Toggle bottom panel |
 | Cmd/Ctrl+S | Save |
+| Cmd/Ctrl+Alt+S | Save all |
+| Cmd/Ctrl+Shift+E | Reveal active file in Explorer |
 | Cmd/Ctrl+W | Close tab |
 | Cmd/Ctrl+Tab | Next tab |
 | Cmd/Ctrl+Shift+Tab | Previous tab |
@@ -320,8 +322,11 @@ See [docs/KEYBINDINGS.md](docs/KEYBINDINGS.md) for the full reference.
   root when there is no single selected target. **Rename** by pressing **F2** on
   a selected item, by clicking the name of an already-selected file (a slow
   second click, as in VS Code), or via the inline rename button; **Esc** cancels.
-  Drag selected files/folders onto another folder to move them. **Delete
-  Selected** moves items into a
+  Drag selected files/folders onto another folder to move them. **Right-click**
+  any file or folder for a context menu (New File/Folder, Rename, Delete, Copy
+  Path / Copy Relative Path); rows show a file-type icon. Tabs have their own
+  right-click menu (Close, Close Others, Close to the Right, Close Saved, Close
+  All). **Delete Selected** moves items into a
   workspace-local `.lyceum-trash/` folder hidden from the Explorer; with the
   Explorer focused, Cmd/Ctrl+Z restores the last delete and Cmd/Ctrl+Shift+Z or
   Ctrl+Y redoes it.

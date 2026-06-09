@@ -14,7 +14,14 @@ export type IconName =
   | "preview"
   | "undo"
   | "redo"
-  | "close";
+  | "close"
+  | "folder"
+  | "folder-open"
+  | "file"
+  | "file-code"
+  | "markdown"
+  | "image"
+  | "pdf";
 
 function glyph(name: IconName): ReactNode {
   switch (name) {
@@ -99,6 +106,56 @@ function glyph(name: IconName): ReactNode {
         <>
           <line x1="6" y1="6" x2="18" y2="18" />
           <line x1="18" y1="6" x2="6" y2="18" />
+        </>
+      );
+    case "folder":
+      return <path d="M3 6.5h6l2 2h10V18a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z" />;
+    case "folder-open":
+      return (
+        <>
+          <path d="M3 6.5h6l2 2h10v2" />
+          <path d="M3 8.5h18l-2.2 9.2a1 1 0 0 1-1 .8H5a1 1 0 0 1-1-1z" />
+        </>
+      );
+    case "file":
+      return (
+        <>
+          <path d="M6 3h8l4 4v14H6z" />
+          <path d="M14 3v4h4" />
+        </>
+      );
+    case "file-code":
+      return (
+        <>
+          <path d="M6 3h8l4 4v14H6z" />
+          <path d="M14 3v4h4" />
+          <path d="M10.5 12l-1.8 1.8 1.8 1.8" />
+          <path d="M13.5 12l1.8 1.8-1.8 1.8" />
+        </>
+      );
+    case "markdown":
+      return (
+        <>
+          <path d="M6 3h8l4 4v14H6z" />
+          <path d="M14 3v4h4" />
+          <line x1="8.5" y1="13" x2="15.5" y2="13" />
+          <line x1="8.5" y1="16" x2="13" y2="16" />
+        </>
+      );
+    case "image":
+      return (
+        <>
+          <rect x="3" y="5" width="18" height="14" rx="2" />
+          <circle cx="8.5" cy="10" r="1.5" />
+          <path d="M21 16l-5-5-8 8" />
+        </>
+      );
+    case "pdf":
+      return (
+        <>
+          <path d="M6 3h8l4 4v14H6z" />
+          <path d="M14 3v4h4" />
+          <rect x="8.5" y="13" width="7" height="4.5" rx="1" />
         </>
       );
   }

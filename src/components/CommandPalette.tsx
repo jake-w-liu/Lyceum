@@ -1,14 +1,21 @@
 // Command palette overlay (mod+shift+P): fuzzy-search and run registered
 // commands. Visible only while the UI store's active modal is "palette".
+//
+// With no query, results are grouped by category (browsing mode); with a query,
+// results are the flat best-match order. Each row shows its bound keybinding.
 
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { useUiStore } from "../state/uiStore";
 import { commandRegistry } from "../commands/commandRegistry";
+import { useKeymapStore } from "../state/keymapStore";
+import { formatChord } from "../keybindings/keybindingRegistry";
+import { isMac } from "../hooks/useLayoutKeybindings";
 import { fuzzyFilter } from "../lib/fuzzy";
 
 export function CommandPalette() {
   const activeModal = useUiStore((s) => s.activeModal);
   const closeModal = useUiStore((s) => s.closeModal);
+  const keymap = useKeymapStore((s) => s.keymap);
 
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
@@ -26,15 +33,30 @@ export function CommandPalette() {
     }
   }, [activeModal]);
 
+  // Last binding wins (user overrides are appended after defaults), matching the
+  // keymap matcher; shown as a hint next to each command.
+  const keyByCommand = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const binding of keymap) map.set(binding.command, binding.key);
+    return map;
+  }, [keymap]);
+
+  const grouped = query.trim() === "";
+
   // Memoized; only computed while the palette is open (commandRegistry.list()
   // is not hoisted above the gate so it doesn't run on every closed-state render).
-  const results = useMemo(
-    () =>
-      activeModal === "palette"
-        ? fuzzyFilter(commandRegistry.list(), query, (c) => c.title)
-        : [],
-    [activeModal, query],
-  );
+  const results = useMemo(() => {
+    if (activeModal !== "palette") return [];
+    const all = commandRegistry.list();
+    if (grouped) {
+      // Group by category (alphabetical), preserving registration order within
+      // each group via a stable sort.
+      return [...all].sort((a, b) =>
+        (a.category ?? "").localeCompare(b.category ?? ""),
+      );
+    }
+    return fuzzyFilter(all, query, (c) => c.title);
+  }, [activeModal, query, grouped]);
 
   if (activeModal !== "palette") {
     return null;
@@ -65,6 +87,8 @@ export function CommandPalette() {
     }
   }
 
+  const macOs = isMac();
+
   return (
     <div className="modal-overlay" onClick={closeModal}>
       <div
@@ -83,17 +107,33 @@ export function CommandPalette() {
           aria-label="Command input"
         />
         <ul className="modal-list" role="listbox">
-          {results.map((cmd, i) => (
-            <li
-              key={cmd.id}
-              role="option"
-              aria-selected={i === selected}
-              className={"modal-item" + (i === selected ? " selected" : "")}
-              onClick={() => runAt(i)}
-            >
-              {cmd.title}
-            </li>
-          ))}
+          {results.map((cmd, i) => {
+            const showHeader =
+              grouped && (i === 0 || results[i - 1].category !== cmd.category);
+            const chord = keyByCommand.get(cmd.id);
+            return (
+              <Fragment key={cmd.id}>
+                {showHeader && (
+                  <li className="modal-category-header" role="presentation">
+                    {cmd.category ?? "Other"}
+                  </li>
+                )}
+                <li
+                  role="option"
+                  aria-selected={i === selected}
+                  className={"modal-item" + (i === selected ? " selected" : "")}
+                  onClick={() => runAt(i)}
+                >
+                  <span className="modal-item-title">{cmd.title}</span>
+                  {chord && (
+                    <span className="modal-item-detail">
+                      {formatChord(chord, macOs)}
+                    </span>
+                  )}
+                </li>
+              </Fragment>
+            );
+          })}
           {results.length === 0 && (
             <li className="modal-empty">No matching commands</li>
           )}

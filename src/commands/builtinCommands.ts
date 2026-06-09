@@ -11,6 +11,7 @@ import {
   closeActiveTab,
   focusAdjacentTab,
   saveActiveDoc,
+  saveAllDocs,
 } from "../hooks/useEditorKeybindings";
 import { THEME_LABELS, THEME_ORDER, useThemeStore } from "../state/themeStore";
 import { useTerminalStore } from "../state/terminalStore";
@@ -30,7 +31,7 @@ import {
   useSettingsStore,
 } from "../state/settingsStore";
 import { writePty } from "../lib/terminal";
-import { isInlinePreviewPath, isTexSourcePath } from "../lib/fileTypes";
+import { isInlinePreviewPath, isTexSourcePath, relativePath } from "../lib/fileTypes";
 
 let registered = false;
 
@@ -76,6 +77,12 @@ export function registerBuiltinCommands(): void {
     run: () => saveActiveDoc(),
   });
   commandRegistry.register({
+    id: "file.saveAll",
+    title: "Save All",
+    category: "File",
+    run: () => saveAllDocs(),
+  });
+  commandRegistry.register({
     id: "file.openSettings",
     title: "Open Settings (JSON)",
     category: "File",
@@ -101,6 +108,36 @@ export function registerBuiltinCommands(): void {
     title: "Previous Editor",
     category: "Editor",
     run: () => focusAdjacentTab(-1),
+  });
+  commandRegistry.register({
+    id: "editor.closeOthers",
+    title: "Close Other Editors",
+    category: "Editor",
+    run: () => {
+      const active = useEditorStore.getState().activePath;
+      if (active) useEditorStore.getState().closeOtherDocs(active);
+    },
+  });
+  commandRegistry.register({
+    id: "editor.closeToRight",
+    title: "Close Editors to the Right",
+    category: "Editor",
+    run: () => {
+      const active = useEditorStore.getState().activePath;
+      if (active) useEditorStore.getState().closeDocsToRight(active);
+    },
+  });
+  commandRegistry.register({
+    id: "editor.closeSaved",
+    title: "Close Saved Editors",
+    category: "Editor",
+    run: () => useEditorStore.getState().closeSavedDocs(),
+  });
+  commandRegistry.register({
+    id: "editor.closeAll",
+    title: "Close All Editors",
+    category: "Editor",
+    run: () => useEditorStore.getState().closeAllDocs(),
   });
   commandRegistry.register({
     id: "workbench.toggleSidebar",
@@ -272,6 +309,40 @@ export function registerBuiltinCommands(): void {
     if (!useWorkspaceStore.getState().rootPath) return;
     useTreeStore.getState().requestCreate(kind);
   };
+  // Copy Path / Copy Relative Path: target the Explorer's selected entry, else
+  // the active editor document. Clipboard write is best-effort.
+  const copyToClipboard = async (text: string) => {
+    try {
+      await navigator.clipboard?.writeText(text);
+    } catch (e) {
+      console.error("clipboard write failed", e);
+    }
+  };
+  const pathCommandTarget = (): string | null => {
+    const selected = useTreeStore.getState().selectedPaths;
+    if (selected.length > 0) return selected[selected.length - 1];
+    return getActiveDoc(useEditorStore.getState())?.path ?? null;
+  };
+  commandRegistry.register({
+    id: "file.copyPath",
+    title: "Copy Path",
+    category: "File",
+    run: () => {
+      const path = pathCommandTarget();
+      if (path) void copyToClipboard(path);
+    },
+  });
+  commandRegistry.register({
+    id: "file.copyRelativePath",
+    title: "Copy Relative Path",
+    category: "File",
+    run: () => {
+      const path = pathCommandTarget();
+      if (!path) return;
+      const root = useWorkspaceStore.getState().rootPath;
+      void copyToClipboard(root ? relativePath(root, path) : path);
+    },
+  });
   commandRegistry.register({
     id: "explorer.newFile",
     title: "New File",

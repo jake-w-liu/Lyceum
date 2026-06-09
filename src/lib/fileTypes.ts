@@ -54,3 +54,26 @@ export function imageMimeForPath(path: string): string | null {
 export function isImagePath(path: string): boolean {
   return imageMimeForPath(path) !== null;
 }
+
+/** The last path segment (file or folder name). */
+export function baseNameOf(path: string): string {
+  const trimmed = path.replace(/[\\/]+$/, "");
+  return trimmed.split(/[\\/]/).pop() ?? trimmed;
+}
+
+/**
+ * Path of `abs` relative to workspace `root` (forward slashes, no leading sep).
+ * Returns the bare name when `abs` is the root itself, and the absolute path
+ * unchanged when it lies outside the root.
+ */
+export function relativePath(root: string, abs: string): string {
+  if (!root) return abs;
+  const sep = root.includes("\\") ? "\\" : "/";
+  const normRoot = root.endsWith(sep) ? root.slice(0, -1) : root;
+  if (abs === normRoot) return baseNameOf(normRoot);
+  const prefix = normRoot + sep;
+  if (abs.startsWith(prefix)) {
+    return abs.slice(prefix.length).replace(/\\/g, "/");
+  }
+  return abs;
+}
