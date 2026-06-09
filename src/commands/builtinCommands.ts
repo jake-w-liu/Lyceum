@@ -158,6 +158,12 @@ export function registerBuiltinCommands(): void {
     run: () => layout().toggleTerminal(),
   });
   commandRegistry.register({
+    id: "workbench.togglePanelPosition",
+    title: "Toggle Panel Position (Bottom / Right)",
+    category: "View",
+    run: () => layout().togglePanelPosition(),
+  });
+  commandRegistry.register({
     id: "terminal.new",
     title: "New Terminal",
     category: "Terminal",

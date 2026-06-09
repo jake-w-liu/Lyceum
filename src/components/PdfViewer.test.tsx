@@ -257,4 +257,53 @@ describe("PdfViewer", () => {
     expect(pdfMocks.getDestination).toHaveBeenCalledWith("sec");
     expect(pdfMocks.getPageIndex).toHaveBeenCalledWith(destinationRef);
   });
+
+  it("finds text and navigates matches via the find bar", async () => {
+    pdfMocks.getTextContent.mockResolvedValue({
+      items: [{ str: "the quick brown fox the" }],
+      styles: {},
+    });
+    mockPdfDocument(1);
+
+    render(<PdfViewer path="/w/find.pdf" />);
+    await screen.findByLabelText("Page number");
+
+    // Opening find reveals the input; "the" matches twice on the page.
+    fireEvent.click(screen.getByRole("button", { name: "Find in document" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Find in document" }), {
+      target: { value: "the" },
+    });
+    expect(await screen.findByText("1 of 2")).toBeInTheDocument();
+
+    // Next wraps around; Escape closes the bar.
+    fireEvent.click(screen.getByRole("button", { name: "Next match" }));
+    expect(await screen.findByText("2 of 2")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Next match" }));
+    expect(await screen.findByText("1 of 2")).toBeInTheDocument();
+
+    fireEvent.keyDown(
+      screen.getByRole("textbox", { name: "Find in document" }),
+      { key: "Escape" },
+    );
+    expect(
+      screen.queryByRole("textbox", { name: "Find in document" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("reports no results for a query that is not present", async () => {
+    pdfMocks.getTextContent.mockResolvedValue({
+      items: [{ str: "lorem ipsum" }],
+      styles: {},
+    });
+    mockPdfDocument(1);
+
+    render(<PdfViewer path="/w/none.pdf" />);
+    await screen.findByLabelText("Page number");
+
+    fireEvent.click(screen.getByRole("button", { name: "Find in document" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Find in document" }), {
+      target: { value: "zzz" },
+    });
+    expect(await screen.findByText("No results")).toBeInTheDocument();
+  });
 });

@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   BOTTOM_MAX_HEIGHT,
   BOTTOM_MIN_HEIGHT,
+  PANEL_MAX_WIDTH,
+  PANEL_MIN_WIDTH,
   PDF_MAX_WIDTH,
   PDF_MIN_WIDTH,
   SIDEBAR_MAX_WIDTH,
@@ -28,6 +30,33 @@ describe("layoutStore", () => {
     expect(get().sidebarVisible).toBe(false);
     get().toggleSidebar();
     expect(get().sidebarVisible).toBe(true);
+  });
+
+  describe("panel position", () => {
+    it("defaults to bottom", () => {
+      expect(get().panelPosition).toBe("bottom");
+    });
+
+    it("toggles between bottom and right", () => {
+      get().togglePanelPosition();
+      expect(get().panelPosition).toBe("right");
+      get().togglePanelPosition();
+      expect(get().panelPosition).toBe("bottom");
+    });
+
+    it("sets a specific position", () => {
+      get().setPanelPosition("right");
+      expect(get().panelPosition).toBe("right");
+    });
+
+    it("clamps the right-dock width", () => {
+      get().setPanelWidth(10_000);
+      expect(get().panelWidth).toBe(PANEL_MAX_WIDTH);
+      get().setPanelWidth(1);
+      expect(get().panelWidth).toBe(PANEL_MIN_WIDTH);
+      get().setPanelWidth(500);
+      expect(get().panelWidth).toBe(500);
+    });
   });
 
   describe("selectView", () => {

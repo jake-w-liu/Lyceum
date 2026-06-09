@@ -1400,3 +1400,115 @@ kbd {
   padding: 1px 3px;
   margin-right: 2px;
 }
+
+/* --- Panel docked on the right (vs along the bottom) --- */
+.center.panel-right {
+  flex-direction: row;
+}
+
+/* Right-docked panel: width-driven and full height, with a left border instead
+   of the default top border. Width is set inline from the layout store. */
+.bottom-panel--right {
+  height: auto;
+  align-self: stretch;
+  border-top: none;
+  border-left: 1px solid var(--border);
+  min-width: 0;
+}
+
+.panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* --- Find in PDF --- */
+.pdf-find-toggle {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 5px;
+}
+
+.pdf-find-toggle.active {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.pdf-find {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated);
+}
+
+.pdf-find-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  border-radius: 3px;
+  padding: 3px 6px;
+  font-size: 12px;
+}
+
+.pdf-find-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.pdf-find-count {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--fg-muted);
+  min-width: 56px;
+  text-align: right;
+}
+
+.pdf-find button {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--fg);
+  border-radius: 3px;
+  padding: 2px 4px;
+  cursor: pointer;
+}
+
+.pdf-find button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.pdf-find button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Highlight overlay sits above the canvas/text layer; boxes are positioned
+   imperatively from the matched text's client rects (see PdfViewer). */
+.pdf-highlight-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.pdf-search-highlight {
+  position: absolute;
+  background: rgba(250, 204, 21, 0.4);
+  border-radius: 1px;
+}
+
+.pdf-search-highlight--active {
+  background: rgba(249, 115, 22, 0.55);
+  outline: 1px solid rgba(249, 115, 22, 0.9);
+}

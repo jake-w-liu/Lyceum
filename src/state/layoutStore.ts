@@ -16,11 +16,16 @@ export type ActivityView =
 
 export type BottomTab = "terminal" | "problems" | "output";
 
+/** Where the Terminal/Output/Problems panel docks: along the bottom or the right. */
+export type PanelPosition = "bottom" | "right";
+
 // Size clamps (px). Exported so components/resizers and tests share one source.
 export const SIDEBAR_MIN_WIDTH = 170;
 export const SIDEBAR_MAX_WIDTH = 600;
 export const BOTTOM_MIN_HEIGHT = 80;
 export const BOTTOM_MAX_HEIGHT = 800;
+export const PANEL_MIN_WIDTH = 200;
+export const PANEL_MAX_WIDTH = 900;
 export const PDF_MIN_WIDTH = 240;
 export const PDF_MAX_WIDTH = 1000;
 
@@ -33,6 +38,10 @@ export interface LayoutData {
   activeView: ActivityView;
   bottomPanelVisible: boolean;
   bottomPanelHeight: number;
+  /** Width of the panel when docked on the right (`panelPosition === "right"`). */
+  panelWidth: number;
+  /** Whether the bottom panel docks along the bottom or on the right. */
+  panelPosition: PanelPosition;
   activeBottomTab: BottomTab;
   pdfPanelVisible: boolean;
   pdfPanelWidth: number;
@@ -59,6 +68,10 @@ export interface LayoutActions {
   toggleBottomPanel: () => void;
   setBottomPanelVisible: (visible: boolean) => void;
   setBottomPanelHeight: (height: number) => void;
+  setPanelWidth: (width: number) => void;
+  setPanelPosition: (position: PanelPosition) => void;
+  /** Flip the panel between bottom and right docking. */
+  togglePanelPosition: () => void;
   setActiveBottomTab: (tab: BottomTab) => void;
   /** Open the bottom panel and focus a specific tab. */
   showBottomTab: (tab: BottomTab) => void;
@@ -84,6 +97,8 @@ export const initialLayoutData: LayoutData = {
   activeView: "explorer",
   bottomPanelVisible: false,
   bottomPanelHeight: 240,
+  panelWidth: 480,
+  panelPosition: "bottom",
   activeBottomTab: "terminal",
   pdfPanelVisible: false,
   pdfPanelWidth: 480,
@@ -112,6 +127,13 @@ export const useLayoutStore = create<LayoutState>((set) => ({
     set({
       bottomPanelHeight: clamp(height, BOTTOM_MIN_HEIGHT, BOTTOM_MAX_HEIGHT),
     }),
+  setPanelWidth: (width) =>
+    set({ panelWidth: clamp(width, PANEL_MIN_WIDTH, PANEL_MAX_WIDTH) }),
+  setPanelPosition: (position) => set({ panelPosition: position }),
+  togglePanelPosition: () =>
+    set((s) => ({
+      panelPosition: s.panelPosition === "bottom" ? "right" : "bottom",
+    })),
   setActiveBottomTab: (tab) => set({ activeBottomTab: tab }),
   showBottomTab: (tab) =>
     set({ bottomPanelVisible: true, activeBottomTab: tab }),

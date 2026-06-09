@@ -21,7 +21,11 @@ export type IconName =
   | "file-code"
   | "markdown"
   | "image"
-  | "pdf";
+  | "pdf"
+  | "dock-right"
+  | "dock-bottom"
+  | "chevron-up"
+  | "chevron-down";
 
 function glyph(name: IconName): ReactNode {
   switch (name) {
@@ -158,6 +162,24 @@ function glyph(name: IconName): ReactNode {
           <rect x="8.5" y="13" width="7" height="4.5" rx="1" />
         </>
       );
+    case "dock-right":
+      return (
+        <>
+          <rect x="3" y="5" width="18" height="14" rx="1.5" />
+          <line x1="14" y1="5" x2="14" y2="19" />
+        </>
+      );
+    case "dock-bottom":
+      return (
+        <>
+          <rect x="3" y="5" width="18" height="14" rx="1.5" />
+          <line x1="3" y1="14" x2="21" y2="14" />
+        </>
+      );
+    case "chevron-up":
+      return <path d="M6 14l6-6 6 6" />;
+    case "chevron-down":
+      return <path d="M6 10l6 6 6-6" />;
   }
 }
 

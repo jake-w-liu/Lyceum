@@ -64,4 +64,33 @@ describe("BottomPanel", () => {
 
     expect(screen.getByTestId("terminal-stub")).toBeInTheDocument();
   });
+
+  it("moves the panel right and back via the dock button", async () => {
+    const user = userEvent.setup();
+    render(<BottomPanel visible />);
+
+    await user.click(screen.getByRole("button", { name: "Move Panel Right" }));
+    expect(useLayoutStore.getState().panelPosition).toBe("right");
+
+    await user.click(
+      screen.getByRole("button", { name: "Move Panel to Bottom" }),
+    );
+    expect(useLayoutStore.getState().panelPosition).toBe("bottom");
+  });
+
+  it("applies a width style and right modifier when docked right", () => {
+    useLayoutStore.setState(
+      {
+        ...initialLayoutData,
+        bottomPanelVisible: true,
+        panelPosition: "right",
+        panelWidth: 333,
+      },
+      false,
+    );
+    const { container } = render(<BottomPanel visible />);
+    const section = container.querySelector(".bottom-panel") as HTMLElement;
+    expect(section.classList.contains("bottom-panel--right")).toBe(true);
+    expect(section.style.width).toBe("333px");
+  });
 });

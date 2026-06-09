@@ -53,6 +53,7 @@ export default function App() {
 
   const sidebarVisible = useLayoutStore((s) => s.sidebarVisible);
   const bottomPanelVisible = useLayoutStore((s) => s.bottomPanelVisible);
+  const panelPosition = useLayoutStore((s) => s.panelPosition);
   const pdfPanelVisible = useLayoutStore((s) => s.pdfPanelVisible);
 
   return (
@@ -75,21 +76,37 @@ export default function App() {
           </>
         )}
 
-        <div className="center">
+        {/* The panel stays a child of `.center` in BOTH dock positions, so
+            toggling bottom↔right never remounts BottomPanel (and never kills a
+            running terminal). Only `.center`'s flex-direction and the resizer
+            orientation change. */}
+        <div className={"center" + (panelPosition === "right" ? " panel-right" : "")}>
           <EditorArea />
 
-          {bottomPanelVisible && (
-            <Resizer
-              orientation="horizontal"
-              ariaLabel="Resize panel"
-              onDelta={(_dx, dy) => {
-                const { bottomPanelHeight, setBottomPanelHeight } =
-                  useLayoutStore.getState();
-                // Dragging up (dy < 0) makes the panel taller.
-                setBottomPanelHeight(bottomPanelHeight - dy);
-              }}
-            />
-          )}
+          {bottomPanelVisible &&
+            (panelPosition === "right" ? (
+              <Resizer
+                orientation="vertical"
+                ariaLabel="Resize panel"
+                onDelta={(dx) => {
+                  const { panelWidth, setPanelWidth } = useLayoutStore.getState();
+                  // The resizer sits on the panel's left edge; dragging left
+                  // (dx < 0) widens it.
+                  setPanelWidth(panelWidth - dx);
+                }}
+              />
+            ) : (
+              <Resizer
+                orientation="horizontal"
+                ariaLabel="Resize panel"
+                onDelta={(_dx, dy) => {
+                  const { bottomPanelHeight, setBottomPanelHeight } =
+                    useLayoutStore.getState();
+                  // Dragging up (dy < 0) makes the panel taller.
+                  setBottomPanelHeight(bottomPanelHeight - dy);
+                }}
+              />
+            ))}
           <BottomPanel visible={bottomPanelVisible} />
         </div>
 

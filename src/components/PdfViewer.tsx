@@ -6,10 +6,12 @@
 // the preview store so reopening a PDF restores roughly where it was.
 
 import {
+  type KeyboardEvent as ReactKeyboardEvent,
   type MutableRefObject,
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -25,6 +27,7 @@ import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
 import { readFileBytes } from "../lib/ipc";
 import { usePreviewStore } from "../state/previewStore";
+import { Icon } from "./Icon";
 import {
   clampPage,
   clampZoom,
@@ -32,6 +35,14 @@ import {
   zoomIn,
   zoomOut,
 } from "../lib/pdf";
+import {
+  buildPageIndex,
+  findMatches,
+  matchRectsInElement,
+  MAX_PDF_MATCHES,
+  type PdfMatch,
+  type PdfPageIndex,
+} from "../lib/pdfSearch";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -51,6 +62,10 @@ type PdfDestCommand = {
 };
 
 type PageRefs = MutableRefObject<Map<number, HTMLDivElement>>;
+
+/** A search match to paint on a page: its ordinal among that page's matches
+ *  (used to re-locate it in the text layer) plus whether it's the active one. */
+type PageHighlight = { occurrence: number; active: boolean };
 
 // A4-ish fallback so a not-yet-rendered page reserves plausible scroll space;
 // replaced by the page's real size the moment it first renders.
@@ -333,6 +348,8 @@ function PdfPage({
   visible,
   pageRefs,
   linkService,
+  searchQuery,
+  highlights,
 }: {
   doc: PDFDocumentProxy;
   pageNumber: number;
@@ -340,15 +357,21 @@ function PdfPage({
   visible: boolean;
   pageRefs: PageRefs;
   linkService: LocalPdfLinkService;
+  searchQuery: string;
+  highlights: PageHighlight[] | undefined;
 }) {
   const elRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const textLayerRef = useRef<HTMLDivElement | null>(null);
   const annotationLayerRef = useRef<HTMLDivElement | null>(null);
+  const highlightLayerRef = useRef<HTMLDivElement | null>(null);
   const pageRef = useRef<PDFPageProxy | null>(null);
   // Intrinsic page size (scale 1); drives the placeholder box before render.
   const [size, setSize] = useState(FALLBACK_SIZE);
   const [renderError, setRenderError] = useState<string | null>(null);
+  // True once this page's text layer is in the DOM, so search highlights can be
+  // measured against it. Reset whenever the page re-renders or is released.
+  const [textReady, setTextReady] = useState(false);
 
   // Register the element so the parent can observe it and scroll to it. Runs
   // before the parent's observer effect (child effects fire first), so the map
@@ -372,8 +395,10 @@ function PdfPage({
       }
       textLayerRef.current?.replaceChildren();
       annotationLayerRef.current?.replaceChildren();
+      highlightLayerRef.current?.replaceChildren();
       pageRef.current?.cleanup();
       pageRef.current = null;
+      setTextReady(false);
       return;
     }
 
@@ -381,6 +406,7 @@ function PdfPage({
     let task: RenderTask | null = null;
     let textLayer: TextLayerRender | null = null;
     setRenderError(null);
+    setTextReady(false);
     (async () => {
       try {
         const pdfPage = await doc.getPage(pageNumber);
@@ -446,6 +472,7 @@ function PdfPage({
             enableScripting: false,
           }),
         ]);
+        if (!cancelled) setTextReady(true);
       } catch (e) {
         if (!cancelled) {
           setRenderError(e instanceof Error ? e.message : String(e));
@@ -458,6 +485,40 @@ function PdfPage({
       textLayer?.cancel();
     };
   }, [visible, doc, pageNumber, zoom, linkService]);
+
+  // Paint search highlights over the rendered text. Rects are measured from the
+  // live text layer, so this re-runs when the page renders (`textReady`), when
+  // the matches change, or on zoom (which re-lays-out the text and changes the
+  // page box origin). Positions are relative to the page box, hence scroll-safe.
+  useEffect(() => {
+    const layer = highlightLayerRef.current;
+    if (!layer) return;
+    layer.replaceChildren();
+    const textEl = textLayerRef.current;
+    const pageEl = elRef.current;
+    if (!textReady || !textEl || !pageEl || !searchQuery || !highlights?.length) {
+      return;
+    }
+    const pageRect = pageEl.getBoundingClientRect();
+    let activeBox: HTMLDivElement | null = null;
+    for (const h of highlights) {
+      for (const rect of matchRectsInElement(textEl, searchQuery, h.occurrence)) {
+        const box = document.createElement("div");
+        box.className =
+          "pdf-search-highlight" +
+          (h.active ? " pdf-search-highlight--active" : "");
+        box.style.left = `${rect.left - pageRect.left}px`;
+        box.style.top = `${rect.top - pageRect.top}px`;
+        box.style.width = `${rect.width}px`;
+        box.style.height = `${rect.height}px`;
+        layer.appendChild(box);
+        if (h.active && !activeBox) activeBox = box;
+      }
+    }
+    // Nudge the active match into view. `nearest` is a no-op when it's already
+    // visible, so navigating within one screenful doesn't jolt the scroll.
+    activeBox?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [textReady, searchQuery, highlights, zoom]);
 
   return (
     <div
@@ -476,6 +537,11 @@ function PdfPage({
         ref={annotationLayerRef}
         className="pdf-annotation-layer annotationLayer"
         aria-label={`Page ${pageNumber} annotations`}
+      />
+      <div
+        ref={highlightLayerRef}
+        className="pdf-highlight-layer"
+        aria-hidden="true"
       />
       {renderError && (
         <div className="pdf-error pdf-error-inline" role="alert">
@@ -551,6 +617,21 @@ export default function PdfViewer({ path }: { path: string }) {
   // A fatal load error replaces the whole viewer; per-page render errors are
   // shown inline by each PdfPage so the rest of the document stays usable.
   const [loadError, setLoadError] = useState<string | null>(null);
+
+  // Find-in-document state. The text index is built lazily on first search and
+  // cached per-document; matches/activeMatch drive the count, navigation, and
+  // per-page highlights.
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [matches, setMatches] = useState<PdfMatch[]>([]);
+  const [activeMatch, setActiveMatch] = useState(-1);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const findInputRef = useRef<HTMLInputElement | null>(null);
+  const findTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const indexRef = useRef<{ doc: PDFDocumentProxy; index: PdfPageIndex[] } | null>(
+    null,
+  );
+  const searchQuery = findQuery.trim();
 
   useEffect(() => {
     pageStateRef.current = page;
@@ -946,6 +1027,114 @@ export default function PdfViewer({ path }: { path: string }) {
     usePreviewStore.getState().setViewState(path, { page, zoom });
   }, [page, zoom, path, numPages]);
 
+  // Build (once per document) a lowercased text index of every page. pdf.js
+  // caches page proxies and their text content, so re-opening find is cheap.
+  const ensureIndex = useCallback(async (): Promise<PdfPageIndex[]> => {
+    const pdf = docRef.current;
+    if (!pdf) return [];
+    if (indexRef.current?.doc === pdf) return indexRef.current.index;
+    const index: PdfPageIndex[] = [];
+    for (let n = 1; n <= pdf.numPages; n += 1) {
+      try {
+        const pdfPage = await pdf.getPage(n);
+        const content = await pdfPage.getTextContent();
+        index.push(buildPageIndex(n, content));
+      } catch {
+        index.push(buildPageIndex(n, { items: [] }));
+      }
+    }
+    // The document may have been swapped/destroyed while we awaited.
+    if (docRef.current !== pdf) return [];
+    indexRef.current = { doc: pdf, index };
+    return index;
+  }, []);
+
+  // Debounced search whenever the query changes while the find bar is open.
+  useEffect(() => {
+    if (!findOpen) return;
+    if (findTimerRef.current) clearTimeout(findTimerRef.current);
+    if (!searchQuery) {
+      setMatches([]);
+      setActiveMatch(-1);
+      return;
+    }
+    let cancelled = false;
+    findTimerRef.current = setTimeout(() => {
+      void (async () => {
+        const index = await ensureIndex();
+        if (cancelled) return;
+        const found = findMatches(index, searchQuery);
+        setMatches(found);
+        // Start at the first match at or after the current page so navigation
+        // feels anchored to where the reader already is.
+        const current = pageStateRef.current;
+        const initial = found.findIndex((m) => m.pageNumber >= current);
+        setActiveMatch(found.length ? (initial === -1 ? 0 : initial) : -1);
+      })();
+    }, 150);
+    return () => {
+      cancelled = true;
+      if (findTimerRef.current) clearTimeout(findTimerRef.current);
+    };
+    // `doc` re-runs the search against a freshly opened document's index.
+  }, [searchQuery, findOpen, ensureIndex, doc]);
+
+  // Clear stale results immediately when the document swaps (the search effect
+  // above then re-runs against the new index if find is still open).
+  useEffect(() => {
+    setMatches([]);
+    setActiveMatch(-1);
+  }, [doc]);
+
+  // Jump to the active match's page as it changes.
+  useEffect(() => {
+    if (activeMatch < 0 || activeMatch >= matches.length) return;
+    scrollToPage(matches[activeMatch].pageNumber);
+  }, [activeMatch, matches, scrollToPage]);
+
+  // Focus the input each time the find bar opens.
+  useEffect(() => {
+    if (findOpen) findInputRef.current?.select();
+  }, [findOpen]);
+
+  // Group matches by page (with per-page ordinals) so each PdfPage can re-locate
+  // and highlight them, marking the active one.
+  const highlightsByPage = useMemo(() => {
+    const byPage = new Map<number, PageHighlight[]>();
+    matches.forEach((m, i) => {
+      const list = byPage.get(m.pageNumber) ?? [];
+      list.push({ occurrence: m.occurrence, active: i === activeMatch });
+      byPage.set(m.pageNumber, list);
+    });
+    return byPage;
+  }, [matches, activeMatch]);
+
+  const goToMatch = useCallback(
+    (step: number) => {
+      setActiveMatch((i) => {
+        if (matches.length === 0) return -1;
+        const base = i < 0 ? 0 : i;
+        return (base + step + matches.length) % matches.length;
+      });
+    },
+    [matches.length],
+  );
+
+  const closeFind = useCallback(() => {
+    setFindOpen(false);
+    setMatches([]);
+    setActiveMatch(-1);
+  }, []);
+
+  // Cmd/Ctrl+F opens find when focus is anywhere inside the viewer.
+  const handleRootKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if ((event.metaKey || event.ctrlKey) && (event.key === "f" || event.key === "F")) {
+      event.preventDefault();
+      setFindOpen(true);
+      findInputRef.current?.select();
+    }
+  };
+
   const fitWidth = async () => {
     const pdf = docRef.current;
     const wrap = scrollRef.current;
@@ -992,7 +1181,12 @@ export default function PdfViewer({ path }: { path: string }) {
   }
 
   return (
-    <div className="pdf-viewer">
+    <div
+      className="pdf-viewer"
+      ref={rootRef}
+      tabIndex={0}
+      onKeyDown={handleRootKeyDown}
+    >
       <div className="pdf-toolbar">
         <button
           type="button"
@@ -1036,7 +1230,71 @@ export default function PdfViewer({ path }: { path: string }) {
         <button type="button" aria-label="Fit page" onClick={fitPage}>
           Fit page
         </button>
+        <button
+          type="button"
+          className={"pdf-find-toggle" + (findOpen ? " active" : "")}
+          aria-label="Find in document"
+          aria-pressed={findOpen}
+          title="Find in document"
+          onClick={() => (findOpen ? closeFind() : setFindOpen(true))}
+        >
+          <Icon name="search" />
+        </button>
       </div>
+      {findOpen && (
+        <div className="pdf-find" role="search">
+          <input
+            ref={findInputRef}
+            className="pdf-find-input"
+            type="text"
+            aria-label="Find in document"
+            placeholder="Find"
+            value={findQuery}
+            onChange={(e) => setFindQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                goToMatch(e.shiftKey ? -1 : 1);
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                closeFind();
+              }
+            }}
+          />
+          <span className="pdf-find-count" aria-live="polite">
+            {matches.length > 0
+              ? `${activeMatch + 1} of ${matches.length}` +
+                (matches.length >= MAX_PDF_MATCHES ? "+" : "")
+              : searchQuery
+                ? "No results"
+                : ""}
+          </span>
+          <button
+            type="button"
+            aria-label="Previous match"
+            disabled={matches.length === 0}
+            onClick={() => goToMatch(-1)}
+          >
+            <Icon name="chevron-up" />
+          </button>
+          <button
+            type="button"
+            aria-label="Next match"
+            disabled={matches.length === 0}
+            onClick={() => goToMatch(1)}
+          >
+            <Icon name="chevron-down" />
+          </button>
+          <button
+            type="button"
+            className="icon-button"
+            aria-label="Close find"
+            onClick={closeFind}
+          >
+            <Icon name="close" />
+          </button>
+        </div>
+      )}
       <div ref={scrollRef} className="pdf-scroll">
         {doc &&
           Array.from({ length: numPages }, (_, i) => i + 1).map((n) => (
@@ -1048,6 +1306,8 @@ export default function PdfViewer({ path }: { path: string }) {
               visible={visiblePages.has(n)}
               pageRefs={pageRefs}
               linkService={linkService}
+              searchQuery={searchQuery}
+              highlights={highlightsByPage.get(n)}
             />
           ))}
       </div>

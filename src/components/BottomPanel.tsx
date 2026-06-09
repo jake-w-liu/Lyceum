@@ -22,9 +22,13 @@ const tabs: { id: BottomTab; label: string }[] = [
 
 export function BottomPanel({ visible }: { visible: boolean }) {
   const bottomPanelHeight = useLayoutStore((s) => s.bottomPanelHeight);
+  const panelWidth = useLayoutStore((s) => s.panelWidth);
+  const panelPosition = useLayoutStore((s) => s.panelPosition);
   const activeBottomTab = useLayoutStore((s) => s.activeBottomTab);
   const setActiveBottomTab = useLayoutStore((s) => s.setActiveBottomTab);
   const toggleBottomPanel = useLayoutStore((s) => s.toggleBottomPanel);
+  const togglePanelPosition = useLayoutStore((s) => s.togglePanelPosition);
+  const onRight = panelPosition === "right";
 
   // Mount the terminal lazily, the first time its tab is shown, then keep it.
   const [terminalMounted, setTerminalMounted] = useState(
@@ -36,10 +40,10 @@ export function BottomPanel({ visible }: { visible: boolean }) {
 
   return (
     <section
-      className="bottom-panel"
+      className={"bottom-panel" + (onRight ? " bottom-panel--right" : "")}
       aria-label="Panel"
       hidden={!visible}
-      style={{ height: bottomPanelHeight }}
+      style={onRight ? { width: panelWidth } : { height: bottomPanelHeight }}
     >
       <div className="panel-header">
         <div className="panel-tabs" role="tablist" aria-label="Panel tabs">
@@ -56,14 +60,25 @@ export function BottomPanel({ visible }: { visible: boolean }) {
             </button>
           ))}
         </div>
-        <button
-          className="icon-button"
-          type="button"
-          aria-label="Close Panel"
-          onClick={toggleBottomPanel}
-        >
-          <Icon name="close" />
-        </button>
+        <div className="panel-actions">
+          <button
+            className="icon-button"
+            type="button"
+            aria-label={onRight ? "Move Panel to Bottom" : "Move Panel Right"}
+            title={onRight ? "Move Panel to Bottom" : "Move Panel Right"}
+            onClick={togglePanelPosition}
+          >
+            <Icon name={onRight ? "dock-bottom" : "dock-right"} />
+          </button>
+          <button
+            className="icon-button"
+            type="button"
+            aria-label="Close Panel"
+            onClick={toggleBottomPanel}
+          >
+            <Icon name="close" />
+          </button>
+        </div>
       </div>
       <div className="panel-content" role="tabpanel">
         {terminalMounted && (
