@@ -22,6 +22,7 @@ import { useWorkspaceStore } from "../state/workspaceStore";
 import { getActiveDoc, useEditorStore } from "../state/editorStore";
 import { useTerminalStore } from "../state/terminalStore";
 import { resolveTerminalCwd } from "../lib/terminalCwd";
+import { createOutputBatcher } from "../lib/terminalOutputBatcher";
 import { terminalKeyOverride } from "../lib/terminalKeys";
 import { isMac } from "../hooks/useLayoutKeybindings";
 
@@ -75,6 +76,14 @@ export function TerminalView({
     // (`terminal:data:<ptyId>`), which only allow alphanumerics, `-/:_`.
     const ptyId = `${id}_${(terminalMountSeq += 1)}`;
     let disposed = false;
+    // Coalesce PTY output into one write per animation frame so a backlog (e.g.
+    // catching up after the screen unlocks, or a verbose command) doesn't make
+    // xterm parse thousands of tiny chunks and stall the UI. See terminalOutputBatcher.
+    const outputBatcher = createOutputBatcher({
+      write: (bytes) => term.write(bytes),
+      requestFrame: (cb) => requestAnimationFrame(cb),
+      cancelFrame: (handle) => cancelAnimationFrame(handle),
+    });
     // Buffer keystrokes typed before the PTY exists, then flush on ready — so
     // the first characters a user types into a brand-new terminal aren't dropped
     // (and don't reject with "no such terminal").
@@ -127,10 +136,12 @@ export function TerminalView({
         // Register listeners BEFORE creating the PTY: the Rust reader thread
         // starts emitting output immediately, so attaching after createPty
         // would drop the initial shell prompt/banner.
-        offData = await onPtyData(ptyId, (bytes) => term.write(bytes));
-        offExit = await onPtyExit(ptyId, () =>
-          term.write("\r\n\x1b[90m[process exited]\x1b[0m\r\n"),
-        );
+        offData = await onPtyData(ptyId, (bytes) => outputBatcher.push(bytes));
+        offExit = await onPtyExit(ptyId, () => {
+          // Drain buffered output first so the exit notice prints after it.
+          outputBatcher.flushNow();
+          term.write("\r\n\x1b[90m[process exited]\x1b[0m\r\n");
+        });
         if (disposed) {
           offData();
           offExit();
@@ -197,6 +208,9 @@ export function TerminalView({
       observer.disconnect();
       dataDisp.dispose();
       unlistens.forEach((off) => off());
+      // Cancel any pending batched flush before disposing the terminal so a
+      // queued animation frame can't write into a disposed xterm instance.
+      outputBatcher.dispose();
       useTerminalStore.getState().clearBackendPtyId(id, ptyId);
       void closePty(ptyId);
       term.dispose();
