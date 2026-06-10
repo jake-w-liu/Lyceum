@@ -1,6 +1,7 @@
 import { useEffect } from "react";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { type UnlistenFn } from "@tauri-apps/api/event";
 import type { Event } from "@tauri-apps/api/event";
+import { listenScoped } from "../lib/windowEvents";
 import {
   unwatchWorkspace,
   watchWorkspace,
@@ -61,7 +62,7 @@ export function useWorkspaceFileWatcher(): void {
 
     void (async () => {
       try {
-        const fn = await listen<WorkspaceFsEvent>(
+        const fn = await listenScoped<WorkspaceFsEvent>(
           "workspace:fs-change",
           scheduleRefresh,
         );

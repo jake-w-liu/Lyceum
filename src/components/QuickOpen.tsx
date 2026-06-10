@@ -1,7 +1,7 @@
 // Quick-open file finder (mod+P): fuzzy-search workspace files by name and
 // open the chosen one. Visible only while useUiStore.activeModal === "quickOpen".
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useUiStore } from "../state/uiStore";
 import { baseName, useWorkspaceStore } from "../state/workspaceStore";
 import { useTreeStore } from "../state/treeStore";
@@ -9,6 +9,20 @@ import { listWorkspaceFiles } from "../lib/ipc";
 import { fuzzyFilter } from "../lib/fuzzy";
 
 const MAX_RESULTS = 100;
+
+// The directory shown after a result's file name (VS Code style), relative to
+// the workspace root so duplicates like `a/index.ts` / `b/index.ts` are
+// distinguishable. Empty for files directly in the root.
+function relativeDir(path: string, rootPath: string | null): string {
+  const sep = path.includes("\\") ? "\\" : "/";
+  let rel = path;
+  if (rootPath) {
+    const prefix = rootPath.endsWith(sep) ? rootPath : rootPath + sep;
+    if (path.startsWith(prefix)) rel = path.slice(prefix.length);
+  }
+  const idx = rel.lastIndexOf(sep);
+  return idx > 0 ? rel.slice(0, idx) : "";
+}
 
 export function QuickOpen() {
   const activeModal = useUiStore((s) => s.activeModal);
@@ -19,6 +33,7 @@ export function QuickOpen() {
   const [files, setFiles] = useState<string[]>([]);
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
+  const listRef = useRef<HTMLUListElement>(null);
 
   useEffect(() => {
     if (activeModal !== "quickOpen") {
@@ -64,6 +79,14 @@ export function QuickOpen() {
     [activeModal, files, query],
   );
 
+  // Keep the keyboard-selected row visible as ArrowUp/ArrowDown move it past
+  // the list's scroll fold. `nearest` is a no-op when it's already in view.
+  useEffect(() => {
+    listRef.current
+      ?.querySelector(".modal-item.selected")
+      ?.scrollIntoView?.({ block: "nearest" });
+  }, [selected, results]);
+
   if (activeModal !== "quickOpen") {
     return null;
   }
@@ -93,8 +116,13 @@ export function QuickOpen() {
   }
 
   return (
-    <div className="modal-overlay">
-      <div className="modal" role="dialog" aria-label="Quick Open">
+    <div className="modal-overlay" onClick={closeModal}>
+      <div
+        className="modal"
+        role="dialog"
+        aria-label="Quick Open"
+        onClick={(e) => e.stopPropagation()}
+      >
         <input
           className="modal-input"
           aria-label="File search"
@@ -107,23 +135,27 @@ export function QuickOpen() {
           }}
           onKeyDown={onKeyDown}
         />
-        <ul className="modal-list">
+        <ul className="modal-list" ref={listRef}>
           {!rootPath ? (
             <li className="modal-empty">Open a folder first</li>
           ) : results.length === 0 ? (
             <li className="modal-empty">No matching files</li>
           ) : (
-            results.map((path, i) => (
-              <li
-                key={path}
-                className={"modal-item" + (i === selected ? " active" : "")}
-                title={path}
-                onMouseEnter={() => setSelected(i)}
-                onClick={() => openAt(i)}
-              >
-                {baseName(path)}
-              </li>
-            ))
+            results.map((path, i) => {
+              const dir = relativeDir(path, rootPath);
+              return (
+                <li
+                  key={path}
+                  className={"modal-item" + (i === selected ? " selected" : "")}
+                  title={path}
+                  onMouseEnter={() => setSelected(i)}
+                  onClick={() => openAt(i)}
+                >
+                  <span className="modal-item-name">{baseName(path)}</span>
+                  {dir && <span className="modal-item-dir">{dir}</span>}
+                </li>
+              );
+            })
           )}
         </ul>
       </div>

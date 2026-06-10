@@ -63,6 +63,87 @@ describe("useOpenFileBridge", () => {
     expect(readFile).not.toHaveBeenCalled();
   });
 
+  it("records a pending reveal when the request carries a position", async () => {
+    render(<Harness />);
+    act(() => {
+      useWorkspaceStore.getState().requestOpenFile("/w/main.py", {
+        line: 14,
+        column: 5,
+      });
+    });
+
+    await waitFor(() => {
+      expect(useEditorStore.getState().docs).toHaveLength(1);
+    });
+
+    expect(useEditorStore.getState().pendingReveal).toEqual({
+      path: "/w/main.py",
+      line: 14,
+      column: 5,
+    });
+    expect(useWorkspaceStore.getState().pendingOpenPosition).toBeNull();
+  });
+
+  it("re-triggers for the same path when only the position changes", async () => {
+    render(<Harness />);
+    act(() => {
+      useWorkspaceStore.getState().requestOpenFile("/w/main.py", { line: 1 });
+    });
+    await waitFor(() =>
+      expect(useEditorStore.getState().pendingReveal?.line).toBe(1),
+    );
+
+    act(() => {
+      useWorkspaceStore.getState().requestOpenFile("/w/main.py", { line: 9 });
+    });
+    await waitFor(() =>
+      expect(useEditorStore.getState().pendingReveal?.line).toBe(9),
+    );
+    expect(useEditorStore.getState().docs).toHaveLength(1);
+  });
+
+  it("still opens a read that was superseded mid-flight, without stealing focus", async () => {
+    let resolveFirst!: (content: string) => void;
+    vi.mocked(readFile)
+      .mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            resolveFirst = resolve;
+          }),
+      )
+      .mockImplementationOnce(async () => "second contents");
+
+    render(<Harness />);
+    act(() => {
+      useWorkspaceStore.getState().requestOpenFile("/w/first.py");
+    });
+    // A newer request lands while the first read is still in flight.
+    act(() => {
+      useWorkspaceStore.getState().requestOpenFile("/w/second.py");
+    });
+    await waitFor(() =>
+      expect(
+        useEditorStore.getState().docs.some((d) => d.path === "/w/second.py"),
+      ).toBe(true),
+    );
+
+    // The first read resolves late: it must still open (no silent drop) but
+    // must NOT steal the active tab from the newer request.
+    act(() => resolveFirst("first contents"));
+    await waitFor(() =>
+      expect(
+        useEditorStore.getState().docs.some((d) => d.path === "/w/first.py"),
+      ).toBe(true),
+    );
+
+    expect(useEditorStore.getState().activePath).toBe("/w/second.py");
+    expect(
+      useEditorStore.getState().docs.find((d) => d.path === "/w/first.py")
+        ?.content,
+    ).toBe("first contents");
+    expect(useWorkspaceStore.getState().pendingOpenPath).toBeNull();
+  });
+
   it("opens images as viewer tabs without reading as text", async () => {
     render(<Harness />);
     act(() => {

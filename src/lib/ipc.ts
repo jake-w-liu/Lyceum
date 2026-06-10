@@ -38,12 +38,6 @@ export interface MovedPath {
   isDir: boolean;
 }
 
-export interface LatexToolInfo {
-  tool: string;
-  path: string;
-  source: "path" | string;
-}
-
 export interface WorkspaceFsEvent {
   root: string;
   paths: string[];
@@ -72,6 +66,11 @@ export async function getAppInfo(): Promise<AppInfo> {
 /** Open another Lyceum application window. */
 export async function newWindow(): Promise<void> {
   await invoke("new_window");
+}
+
+/** Exit the application (called after the frontend's unsaved-changes check). */
+export async function quitApp(): Promise<void> {
+  await invoke("quit_app");
 }
 
 /** List the immediate children of a directory (file explorer, M2). */
@@ -141,21 +140,6 @@ export async function movePaths(
   destinationDir: string,
 ): Promise<MovedPath[]> {
   return invoke<MovedPath[]>("move_paths", { root, paths, destinationDir });
-}
-
-/** Delete a file or directory tree. */
-export async function deletePath(path: string): Promise<void> {
-  await invoke("delete_path", { path });
-}
-
-/** Delete a file if it exists. Returns true when a file was removed. */
-export async function deleteFileIfExists(path: string): Promise<boolean> {
-  return invoke<boolean>("delete_file_if_exists", { path });
-}
-
-/** Return LaTeX compilers available to build/preview workflows. */
-export async function resolveLatexTools(): Promise<LatexToolInfo[]> {
-  return invoke<LatexToolInfo[]>("resolve_latex_tools");
 }
 
 /** Move files/directories into Lyceum's workspace-local trash for undoable delete. */

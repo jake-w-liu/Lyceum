@@ -113,6 +113,30 @@ pub fn run() {
             }
             Ok(())
         })
+        // Window labels are never reused (window_ops::WINDOW_SEQUENCE is
+        // monotonic), so a destroyed window's backend resources — its workspace
+        // watcher, terminal shells, language servers, and Julia runs — would
+        // otherwise leak until app exit. Tear them down here. Each manager
+        // removes its entries under its own lock and kills/drops after the
+        // guard is released; the managers are independent, so no two locks are
+        // ever held at once.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                let label = window.label();
+                window
+                    .state::<workspace_watch::WorkspaceWatchManager>()
+                    .remove_window(label);
+                window
+                    .state::<terminal::TerminalManager>()
+                    .close_sessions_for_window(label);
+                window
+                    .state::<lsp::LspManager>()
+                    .stop_servers_for_window(label);
+                window
+                    .state::<julia::RunManager>()
+                    .cancel_runs_for_window(label);
+            }
+        })
         // Native menu items carry frontend command ids; window lifecycle
         // commands must run in the backend so they work without a live webview.
         .on_menu_event(|app, event| {
@@ -150,8 +174,6 @@ pub fn run() {
             fs_ops::create_directory,
             fs_ops::rename_path,
             fs_ops::move_paths,
-            fs_ops::delete_path,
-            fs_ops::delete_file_if_exists,
             fs_ops::move_paths_to_trash,
             fs_ops::restore_trash_batch,
             fs_ops::redo_trash_batch,
@@ -168,11 +190,11 @@ pub fn run() {
             terminal::terminal_close,
             julia::run_julia,
             julia::run_cancel,
-            latex::resolve_latex_tools,
             latex::run_latex_build,
             workspace_watch::watch_workspace,
             workspace_watch::unwatch_workspace,
             window_ops::new_window,
+            window_ops::quit_app,
             lsp::lsp_start,
             lsp::lsp_send,
             lsp::lsp_stop

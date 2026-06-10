@@ -18,6 +18,7 @@ import {
   writePty,
 } from "../lib/terminal";
 import { useSettingsStore } from "../state/settingsStore";
+import { useThemeStore } from "../state/themeStore";
 import { useWorkspaceStore } from "../state/workspaceStore";
 import { getActiveDoc, useEditorStore } from "../state/editorStore";
 import { useTerminalStore } from "../state/terminalStore";
@@ -31,6 +32,22 @@ export interface TerminalViewProps {
   cwd: string | null;
   active: boolean;
   startupCommand?: string;
+}
+
+// xterm colors derived from the active theme's CSS custom properties (read off
+// the terminal host so light/high-contrast themes apply), with dark-theme
+// fallbacks for environments without the variables (e.g. jsdom).
+function xtermThemeFromCss(el: HTMLElement) {
+  const styles = getComputedStyle(el);
+  const read = (name: string, fallback: string) =>
+    styles.getPropertyValue(name).trim() || fallback;
+  const foreground = read("--fg", "#cccccc");
+  return {
+    background: read("--bg", "#1e1e1e"),
+    foreground,
+    cursor: foreground,
+    selectionBackground: read("--selection", "#264f78"),
+  };
 }
 
 // Monotonic per-mount token. Each mount talks to a backend PTY under a unique id
@@ -56,7 +73,7 @@ export function TerminalView({
       fontSize: 13,
       fontFamily:
         '"SF Mono", "JetBrains Mono", Menlo, Consolas, monospace',
-      theme: { background: "#1e1e1e", foreground: "#cccccc" },
+      theme: xtermThemeFromCss(host),
       cursorBlink: true,
       scrollback: 5000,
     });
@@ -115,6 +132,15 @@ export function TerminalView({
     });
 
     const dataDisp = term.onData(sendInput);
+
+    // Keep the xterm colors in sync with the app theme. The `data-theme`
+    // attribute is applied by a React effect after the store updates, so read
+    // the new CSS variables on the next frame.
+    const unsubTheme = useThemeStore.subscribe(() => {
+      requestAnimationFrame(() => {
+        if (!disposed) term.options.theme = xtermThemeFromCss(host);
+      });
+    });
 
     const unlistens: UnlistenLike[] = [];
     const settings = useSettingsStore.getState().settings;
@@ -206,6 +232,7 @@ export function TerminalView({
     return () => {
       disposed = true;
       observer.disconnect();
+      unsubTheme();
       dataDisp.dispose();
       unlistens.forEach((off) => off());
       // Cancel any pending batched flush before disposing the terminal so a

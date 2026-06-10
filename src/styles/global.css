@@ -391,6 +391,18 @@ kbd {
   background: var(--bg-hover);
 }
 
+/* Keyboard-active result (ArrowUp/Down from the search input). */
+.search-result.active {
+  background: var(--selection);
+  color: var(--selection-fg);
+  border-left-color: var(--focus);
+}
+
+.search-result:focus-visible {
+  outline: 1px solid var(--focus);
+  outline-offset: -1px;
+}
+
 .search-result-loc {
   color: var(--fg);
   font-size: 12px;
@@ -647,6 +659,25 @@ kbd {
   text-overflow: ellipsis;
 }
 
+/* Quick-open rows: the file name keeps its natural width so the dimmed
+   relative directory (VS Code style) sits right after it; the directory
+   shrinks with an ellipsis. Distinguishes identically named files. */
+.modal-item-name {
+  flex: 0 0 auto;
+}
+
+.modal-item-dir {
+  flex: 0 1 auto;
+  color: var(--fg-muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.modal-item.selected .modal-item-dir {
+  color: rgba(255, 255, 255, 0.82);
+}
+
 .modal-empty {
   padding: 8px 12px;
   color: var(--fg-muted);
@@ -813,7 +844,8 @@ kbd {
   flex: 1 1 auto;
   position: relative;
   min-height: 0;
-  background: #1e1e1e;
+  /* Matches the xterm theme background, which reads the same variable. */
+  background: var(--bg);
 }
 
 .terminal-view-host {

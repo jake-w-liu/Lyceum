@@ -2,8 +2,10 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  MAX_CANVAS_PIXELS,
   ZOOM_MAX,
   ZOOM_MIN,
+  capOutputScale,
   clampPage,
   clampZoom,
   zoomFromWheel,
@@ -57,6 +59,33 @@ describe("zoomFromWheel", () => {
   it("respects zoom bounds", () => {
     expect(zoomFromWheel(ZOOM_MAX, -1000)).toBe(ZOOM_MAX);
     expect(zoomFromWheel(ZOOM_MIN, 1000)).toBe(ZOOM_MIN);
+  });
+});
+
+describe("capOutputScale", () => {
+  it("keeps the scale when the canvas fits the pixel budget", () => {
+    // 612x792 at scale 2 ≈ 1.9M pixels, far under 2^25.
+    expect(capOutputScale(612, 792, 2)).toBe(2);
+  });
+
+  it("reduces the scale so total pixels stay within the cap", () => {
+    // A4-ish page at zoom 5 on a 2x display: 3060x3960x4 ≈ 48.5M pixels.
+    const scale = capOutputScale(3060, 3960, 2);
+    expect(scale).toBeLessThan(2);
+    // The canvas floors each dimension, so assert on the actual allocation.
+    expect(
+      Math.floor(3060 * scale) * Math.floor(3960 * scale),
+    ).toBeLessThanOrEqual(MAX_CANVAS_PIXELS);
+  });
+
+  it("honors a custom pixel budget", () => {
+    const scale = capOutputScale(100, 100, 2, 10_000);
+    expect(100 * 100 * scale * scale).toBeLessThanOrEqual(10_000);
+    expect(scale).toBeCloseTo(1, 5);
+  });
+
+  it("passes degenerate sizes through unchanged", () => {
+    expect(capOutputScale(0, 0, 3)).toBe(3);
   });
 });
 

@@ -52,6 +52,38 @@ describe("matchKeybinding (isMacOs=false, ctx={})", () => {
   });
 });
 
+describe("matchKeybinding tab cycling (Ctrl on every platform)", () => {
+  it("ctrl+tab => editor.nextTab on macOS", () => {
+    const e = new KeyboardEvent("keydown", { key: "Tab", ctrlKey: true });
+    expect(matchKeybinding(e, {}, true)).toBe("editor.nextTab");
+  });
+
+  it("ctrl+shift+tab => editor.previousTab on macOS", () => {
+    const e = new KeyboardEvent("keydown", {
+      key: "Tab",
+      ctrlKey: true,
+      shiftKey: true,
+    });
+    expect(matchKeybinding(e, {}, true)).toBe("editor.previousTab");
+  });
+
+  it("ctrl+tab => editor.nextTab on other platforms", () => {
+    const e = new KeyboardEvent("keydown", { key: "Tab", ctrlKey: true });
+    expect(matchKeybinding(e, {}, false)).toBe("editor.nextTab");
+  });
+
+  it("meta+tab on macOS matches nothing (Cmd+Tab is the OS app switcher)", () => {
+    const e = new KeyboardEvent("keydown", { key: "Tab", metaKey: true });
+    expect(matchKeybinding(e, {}, true)).toBeNull();
+  });
+
+  it("renders the palette hint as ⌃Tab / Ctrl+Tab", () => {
+    expect(formatChord("ctrl+tab", true)).toBe("⌃Tab");
+    expect(formatChord("ctrl+shift+tab", true)).toBe("⌃⇧Tab");
+    expect(formatChord("ctrl+tab", false)).toBe("Ctrl+Tab");
+  });
+});
+
 describe("matchKeybinding escape when-clause", () => {
   it("escape with ctx={} => null", () => {
     const e = new KeyboardEvent("keydown", { key: "Escape" });

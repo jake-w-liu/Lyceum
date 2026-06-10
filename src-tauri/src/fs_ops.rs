@@ -72,11 +72,22 @@ pub fn read_dir_entries(dir: &Path) -> Result<Vec<DirEntryDto>, String> {
         if name == LYCEUM_TRASH_DIR {
             continue;
         }
-        let path = entry.path().to_string_lossy().to_string();
+        let path = entry.path();
+        // Resolve the REAL kind: file_type() reports a symlink as a symlink
+        // (is_dir() == false), so a symlinked directory would otherwise render
+        // as a bogus, unopenable "file". Follow the link (mirrors walk.rs);
+        // a broken symlink is listed as a file.
+        let is_dir = if file_type.is_symlink() {
+            std::fs::metadata(&path)
+                .map(|meta| meta.is_dir())
+                .unwrap_or(false)
+        } else {
+            file_type.is_dir()
+        };
         entries.push(DirEntryDto {
             name,
-            path,
-            is_dir: file_type.is_dir(),
+            path: path.to_string_lossy().to_string(),
+            is_dir,
         });
     }
 
@@ -143,36 +154,6 @@ pub fn move_paths(
     destination_dir: String,
 ) -> Result<Vec<MovedPathDto>, String> {
     move_paths_impl(Path::new(&root), paths, Path::new(&destination_dir))
-}
-
-/// Delete `path`, recursively removing directory trees and unlinking files.
-#[tauri::command]
-pub fn delete_path(path: String) -> Result<(), String> {
-    let target = Path::new(&path);
-    let file_type = std::fs::symlink_metadata(target)
-        .map_err(|e| format!("{path}: {e}"))?
-        .file_type();
-    if file_type.is_dir() {
-        std::fs::remove_dir_all(target).map_err(|e| format!("{path}: {e}"))
-    } else {
-        std::fs::remove_file(target).map_err(|e| format!("{path}: {e}"))
-    }
-}
-
-#[tauri::command]
-pub fn delete_file_if_exists(path: String) -> Result<bool, String> {
-    let target = Path::new(&path);
-    let metadata = match std::fs::symlink_metadata(target) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(format!("{path}: {error}")),
-    };
-    if metadata.file_type().is_dir() {
-        return Err(format!("expected a file, found directory: {path}"));
-    }
-    std::fs::remove_file(target)
-        .map(|_| true)
-        .map_err(|e| format!("{path}: {e}"))
 }
 
 #[tauri::command]
@@ -931,67 +912,25 @@ mod tests {
             .is_symlink());
     }
 
-    #[test]
-    fn delete_path_removes_file_and_non_empty_directory_tree() {
-        let tmp = tempfile::tempdir().expect("create temp dir");
-
-        let file = tmp.path().join("doomed.txt");
-        fs::write(&file, b"bye").unwrap();
-        delete_path(file.to_string_lossy().to_string()).expect("delete file");
-        assert!(!file.exists());
-
-        let dir = tmp.path().join("tree");
-        fs::create_dir_all(dir.join("sub")).unwrap();
-        fs::write(dir.join("sub").join("leaf.txt"), b"leaf").unwrap();
-        delete_path(dir.to_string_lossy().to_string()).expect("delete dir tree");
-        assert!(!dir.exists());
-    }
-
-    #[test]
-    fn delete_file_if_exists_removes_only_files() {
-        let tmp = tempfile::tempdir().expect("create temp dir");
-        let file = tmp.path().join("paper.pdf");
-        fs::write(&file, b"pdf").unwrap();
-
-        assert!(delete_file_if_exists(file.to_string_lossy().to_string()).unwrap());
-        assert!(!file.exists());
-        assert!(!delete_file_if_exists(file.to_string_lossy().to_string()).unwrap());
-
-        let dir = tmp.path().join("dir.pdf");
-        fs::create_dir(&dir).unwrap();
-        let result = delete_file_if_exists(dir.to_string_lossy().to_string());
-        assert!(result.unwrap_err().contains("expected a file"));
-    }
-
     #[cfg(unix)]
     #[test]
-    fn delete_helpers_unlink_symlinks_without_touching_targets() {
+    fn symlinked_directory_is_listed_as_a_directory() {
         use std::os::unix::fs::symlink;
 
         let tmp = tempfile::tempdir().expect("create temp dir");
-        let target_dir = tmp.path().join("target-dir");
-        let link_dir = tmp.path().join("link-dir");
-        fs::create_dir(&target_dir).unwrap();
-        fs::write(target_dir.join("leaf.txt"), b"leaf").unwrap();
-        symlink(&target_dir, &link_dir).unwrap();
+        let root = tmp.path();
+        let real = root.join("real-dir");
+        fs::create_dir(&real).unwrap();
+        symlink(&real, root.join("link-dir")).unwrap();
+        // A broken symlink must still be listed, as a file.
+        symlink(root.join("missing"), root.join("broken-link")).unwrap();
 
-        delete_path(link_dir.to_string_lossy().to_string()).expect("delete symlinked dir entry");
+        let entries = read_dir_entries(root).expect("read dir");
 
-        assert!(std::fs::symlink_metadata(&link_dir).is_err());
-        assert_eq!(fs::read(target_dir.join("leaf.txt")).unwrap(), b"leaf");
-
-        let target_file = tmp.path().join("target-file.txt");
-        let link_file = tmp.path().join("link-file.txt");
-        fs::write(&target_file, b"target").unwrap();
-        symlink(&target_file, &link_file).unwrap();
-
-        assert!(
-            delete_file_if_exists(link_file.to_string_lossy().to_string())
-                .expect("delete symlinked file entry")
-        );
-
-        assert!(std::fs::symlink_metadata(&link_file).is_err());
-        assert_eq!(fs::read(&target_file).unwrap(), b"target");
+        let link = entries.iter().find(|e| e.name == "link-dir").unwrap();
+        assert!(link.is_dir, "symlinked dir must resolve to a directory");
+        let broken = entries.iter().find(|e| e.name == "broken-link").unwrap();
+        assert!(!broken.is_dir);
     }
 
     #[test]

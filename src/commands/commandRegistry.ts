@@ -28,7 +28,14 @@ export class CommandRegistry {
       console.warn(`Unknown command: ${id}`);
       return;
     }
-    await cmd.run();
+    // Contain sync throws AND async rejections: execute() is mostly called as
+    // `void execute(...)` (keybindings, menu, palette), where an escaping
+    // rejection would surface as an unhandled rejection with no context.
+    try {
+      await cmd.run();
+    } catch (e) {
+      console.error(`Command failed: ${id}`, e);
+    }
   }
 
   clear(): void {

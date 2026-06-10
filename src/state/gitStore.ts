@@ -74,25 +74,33 @@ export const initialGitData: GitData = {
   folders: {},
 };
 
+// Monotonic refresh id: only the LATEST in-flight refresh may write state, so a
+// slow earlier git query can't clobber a newer one even within the same root
+// (e.g. refresh-on-save racing refresh-on-focus).
+let refreshSeq = 0;
+
 export const useGitStore = create<GitState>()((set) => ({
   ...initialGitData,
 
   refresh: async () => {
     const root = useWorkspaceStore.getState().rootPath;
+    const seq = (refreshSeq += 1);
+    const isCurrent = () =>
+      seq === refreshSeq && useWorkspaceStore.getState().rootPath === root;
     if (!root) {
       set(initialGitData);
       return;
     }
     try {
       const res = await gitStatus(root);
-      if (useWorkspaceStore.getState().rootPath !== root) return;
+      if (!isCurrent()) return;
       set({
         isRepo: res.isRepo,
         files: res.files,
         folders: computeFolders(res.files),
       });
     } catch {
-      if (useWorkspaceStore.getState().rootPath !== root) return;
+      if (!isCurrent()) return;
       // No Tauri backend (web/dev) or git error: show no decorations.
       set(initialGitData);
     }

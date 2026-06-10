@@ -120,4 +120,42 @@ describe("gitStore", () => {
       "/new/a.ts": "modified",
     });
   });
+
+  it("ignores out-of-order responses within the SAME root (staleness guard)", async () => {
+    let resolveFirst!: (value: {
+      isRepo: boolean;
+      files: Record<string, GitFileStatus>;
+    }) => void;
+    let resolveSecond!: (value: {
+      isRepo: boolean;
+      files: Record<string, GitFileStatus>;
+    }) => void;
+    gitStatusMock
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveFirst = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveSecond = resolve;
+          }),
+      );
+
+    useWorkspaceStore.getState().openWorkspace("/repo");
+    const first = useGitStore.getState().refresh();
+    const second = useGitStore.getState().refresh();
+
+    // The NEWER request resolves first; the older one must not clobber it.
+    resolveSecond({ isRepo: true, files: { "/repo/new.ts": "modified" } });
+    await second;
+    resolveFirst({ isRepo: true, files: { "/repo/stale.ts": "deleted" } });
+    await first;
+
+    expect(useGitStore.getState().files).toEqual({
+      "/repo/new.ts": "modified",
+    });
+  });
 });

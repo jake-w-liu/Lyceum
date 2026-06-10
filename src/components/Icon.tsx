@@ -11,6 +11,7 @@ export type IconName =
   | "output"
   | "run"
   | "build"
+  | "edit"
   | "preview"
   | "undo"
   | "redo"
@@ -82,6 +83,14 @@ function glyph(name: IconName): ReactNode {
           <path d="M13 9l2-2 2 2-2 2z" />
           <path d="M4 20l8.5-8.5" />
           <path d="M7 17l2 2" />
+        </>
+      );
+    case "edit":
+      // Pencil: rename / switch back to editing.
+      return (
+        <>
+          <path d="M5 19l1.2-4.2L15.5 5.5l3 3L9.2 17.8z" />
+          <path d="M14 7l3 3" />
         </>
       );
     case "preview":

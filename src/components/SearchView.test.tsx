@@ -60,16 +60,52 @@ describe("SearchView", () => {
     expect(screen.getByText("using LinearAlgebra")).toBeInTheDocument();
   });
 
-  it("requests opening the file when a result is clicked", async () => {
+  it("requests opening the file at the match position when a result is clicked", async () => {
     useWorkspaceStore.setState({ rootPath: ROOT });
     vi.mocked(searchWorkspace).mockResolvedValue([
-      match("/ws/a.jl", 3, "using LinearAlgebra"),
+      { path: "/ws/a.jl", line: 3, column: 7, text: "using LinearAlgebra" },
     ]);
     render(<SearchView />);
     await userEvent.type(screen.getByLabelText("Search workspace"), "using");
     const result = await screen.findByText("a.jl:3");
     await userEvent.click(result);
     expect(useWorkspaceStore.getState().pendingOpenPath).toBe("/ws/a.jl");
+    expect(useWorkspaceStore.getState().pendingOpenPosition).toEqual({
+      line: 3,
+      column: 7,
+    });
+  });
+
+  it("supports ArrowDown/Up + Enter from the input to open a result", async () => {
+    useWorkspaceStore.setState({ rootPath: ROOT });
+    vi.mocked(searchWorkspace).mockResolvedValue([
+      match("/ws/a.jl", 1, "first match"),
+      match("/ws/b.jl", 2, "second match"),
+    ]);
+    render(<SearchView />);
+    const input = screen.getByLabelText("Search workspace");
+    await userEvent.type(input, "match");
+    await screen.findByText("first match");
+
+    await userEvent.keyboard("{ArrowDown}{Enter}");
+
+    expect(useWorkspaceStore.getState().pendingOpenPath).toBe("/ws/b.jl");
+    expect(useWorkspaceStore.getState().pendingOpenPosition).toEqual({
+      line: 2,
+      column: 1,
+    });
+  });
+
+  it("shows an error message when the search fails (not 'No results')", async () => {
+    useWorkspaceStore.setState({ rootPath: ROOT });
+    vi.mocked(searchWorkspace).mockRejectedValue(new Error("ripgrep exploded"));
+    render(<SearchView />);
+    await userEvent.type(screen.getByLabelText("Search workspace"), "boom");
+
+    expect(
+      await screen.findByText(/Search failed: .*ripgrep exploded/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("No results")).toBeNull();
   });
 
   it("ignores a stale search response that resolves after a newer one", async () => {

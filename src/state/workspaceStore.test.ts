@@ -21,14 +21,31 @@ describe("workspaceStore", () => {
   it("records and clears an open-file intent", () => {
     get().requestOpenFile("/tmp/project/a.ts");
     expect(get().pendingOpenPath).toBe("/tmp/project/a.ts");
+    expect(get().pendingOpenPosition).toBeNull();
     get().clearPendingOpen();
     expect(get().pendingOpenPath).toBeNull();
   });
 
+  it("records an optional target position and clears it with the intent", () => {
+    get().requestOpenFile("/tmp/project/a.ts", { line: 12, column: 3 });
+    expect(get().pendingOpenPosition).toEqual({ line: 12, column: 3 });
+    get().clearPendingOpen();
+    expect(get().pendingOpenPosition).toBeNull();
+  });
+
+  it("bumps pendingOpenSeq on every request so same-path requests re-trigger", () => {
+    const before = get().pendingOpenSeq;
+    get().requestOpenFile("/x", { line: 1 });
+    get().requestOpenFile("/x", { line: 2 });
+    expect(get().pendingOpenSeq).toBe(before + 2);
+    expect(get().pendingOpenPosition).toEqual({ line: 2 });
+  });
+
   it("openWorkspace clears any pending open intent", () => {
-    get().requestOpenFile("/x");
+    get().requestOpenFile("/x", { line: 4 });
     get().openWorkspace("/tmp/p2");
     expect(get().pendingOpenPath).toBeNull();
+    expect(get().pendingOpenPosition).toBeNull();
   });
 });
 

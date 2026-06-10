@@ -4,7 +4,8 @@
 // UTF-8 split across reads is handled by xterm, not by us.
 
 import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { type UnlistenFn } from "@tauri-apps/api/event";
+import { listenScoped } from "./windowEvents";
 
 export interface CreatePtyOptions {
   shell?: string | null;
@@ -64,11 +65,11 @@ export function onPtyData(
   id: string,
   cb: (bytes: Uint8Array) => void,
 ): Promise<UnlistenFn> {
-  return listen<string>(`terminal:data:${id}`, (event) => {
+  return listenScoped<string>(`terminal:data:${id}`, (event) => {
     cb(base64ToBytes(event.payload));
   });
 }
 
 export function onPtyExit(id: string, cb: () => void): Promise<UnlistenFn> {
-  return listen(`terminal:exit:${id}`, () => cb());
+  return listenScoped(`terminal:exit:${id}`, () => cb());
 }

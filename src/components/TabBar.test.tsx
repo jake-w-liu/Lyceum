@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { TabBar } from "./TabBar";
 import { initialEditorData, useEditorStore } from "../state/editorStore";
@@ -68,6 +68,39 @@ describe("TabBar", () => {
     expect(get().docs).toHaveLength(1);
     expect(get().docs.map((d) => d.path)).toEqual(["/w/b.ts"]);
     expect(screen.queryByText("a.ts")).not.toBeInTheDocument();
+  });
+
+  it("closes a tab on middle-click", async () => {
+    seed();
+    render(<TabBar />);
+
+    const tab = screen
+      .getByRole("tab", { name: "a.ts" })
+      .closest(".tab") as HTMLElement;
+    fireEvent(
+      tab,
+      new MouseEvent("auxclick", { bubbles: true, cancelable: true, button: 1 }),
+    );
+
+    await waitFor(() => expect(get().docs).toHaveLength(1));
+    expect(get().docs.map((d) => d.path)).toEqual(["/w/b.ts"]);
+  });
+
+  it("ignores non-middle aux clicks", async () => {
+    seed();
+    render(<TabBar />);
+
+    const tab = screen
+      .getByRole("tab", { name: "a.ts" })
+      .closest(".tab") as HTMLElement;
+    fireEvent(
+      tab,
+      new MouseEvent("auxclick", { bubbles: true, cancelable: true, button: 2 }),
+    );
+
+    // Give any (incorrect) async close a chance to land before asserting.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(get().docs).toHaveLength(2);
   });
 
   it("shows a dirty indicator on a tab with unsaved changes", () => {

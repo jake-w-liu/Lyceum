@@ -4,7 +4,7 @@
 // With no query, results are grouped by category (browsing mode); with a query,
 // results are the flat best-match order. Each row shows its bound keybinding.
 
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useUiStore } from "../state/uiStore";
 import { commandRegistry } from "../commands/commandRegistry";
 import { useKeymapStore } from "../state/keymapStore";
@@ -19,6 +19,7 @@ export function CommandPalette() {
 
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
+  const listRef = useRef<HTMLUListElement>(null);
 
   useEffect(() => {
     setSelected(0);
@@ -57,6 +58,14 @@ export function CommandPalette() {
     }
     return fuzzyFilter(all, query, (c) => c.title);
   }, [activeModal, query, grouped]);
+
+  // Keep the keyboard-selected row visible as ArrowUp/ArrowDown move it past
+  // the list's scroll fold. `nearest` is a no-op when it's already in view.
+  useEffect(() => {
+    listRef.current
+      ?.querySelector(".modal-item.selected")
+      ?.scrollIntoView?.({ block: "nearest" });
+  }, [selected, results]);
 
   if (activeModal !== "palette") {
     return null;
@@ -106,7 +115,7 @@ export function CommandPalette() {
           onKeyDown={onKeyDown}
           aria-label="Command input"
         />
-        <ul className="modal-list" role="listbox">
+        <ul className="modal-list" role="listbox" ref={listRef}>
           {results.map((cmd, i) => {
             const showHeader =
               grouped && (i === 0 || results[i - 1].category !== cmd.category);

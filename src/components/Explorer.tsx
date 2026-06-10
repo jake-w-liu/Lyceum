@@ -3,6 +3,7 @@
 // and per-row actions for create / rename / delete. Directories load lazily.
 
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { ask, message } from "@tauri-apps/plugin-dialog";
 import {
   createDirectory,
   createFile,
@@ -102,6 +103,20 @@ function isEditableEventTarget(target: EventTarget | null): boolean {
   );
 }
 
+/**
+ * Native yes/no confirmation via the dialog plugin (same pattern as
+ * editorStore's askDiscard): `window.confirm` is unreliable in Tauri WebViews,
+ * so use the plugin and fall back to `confirm` only outside Tauri (vite dev,
+ * tests), where the plugin rejects.
+ */
+async function confirmDelete(text: string): Promise<boolean> {
+  try {
+    return await ask(text, { title: "Delete", kind: "warning" });
+  } catch {
+    return confirm(text);
+  }
+}
+
 function isSafeEntryName(name: string): boolean {
   return !!name && name !== "." && name !== ".." && !/[\\/]/.test(name);
 }
@@ -175,6 +190,8 @@ interface NodeProps {
   setDraggingEntries: (entries: DirEntry[]) => void;
   dropTargetPath: string | null;
   setDropTargetPath: (path: string | null) => void;
+  /** Ask the Explorer to focus a row (once it exists after a refresh). */
+  onRequestFocus: (path: string) => void;
 }
 
 function TreeNode({
@@ -193,6 +210,7 @@ function TreeNode({
   setDraggingEntries,
   dropTargetPath,
   setDropTargetPath,
+  onRequestFocus,
 }: NodeProps) {
   const expanded = useTreeStore((s) => Boolean(s.expanded[entry.path]));
   const children = useTreeStore((s) => s.children[entry.path]);
@@ -244,16 +262,18 @@ function TreeNode({
     tree.selectSingle(entry.path);
     if (entry.isDir) {
       useTreeStore.getState().toggleExpanded(entry.path);
-    } else if (wasSoleSelection) {
-      // Click on an already-selected file → begin inline rename (like VS Code),
-      // unless a double-click arrives first (handled in onDoubleClick → open).
-      clearRenameClickTimer();
-      renameClickTimer.current = setTimeout(() => {
-        renameClickTimer.current = null;
-        setRenaming(true);
-      }, RENAME_CLICK_DELAY_MS);
     } else {
+      // A single click on a file always opens it (VS Code behavior). When the
+      // file was already the sole selection, additionally arm the slow-click
+      // rename; a double-click (open) cancels it before it fires.
       onOpenFile(entry.path);
+      if (wasSoleSelection) {
+        clearRenameClickTimer();
+        renameClickTimer.current = setTimeout(() => {
+          renameClickTimer.current = null;
+          setRenaming(true);
+        }, RENAME_CLICK_DELAY_MS);
+      }
     }
   }
 
@@ -305,9 +325,15 @@ function TreeNode({
   async function commitRename(name: string) {
     setRenaming(false);
     const trimmed = name.trim();
-    if (!trimmed || trimmed === entry.name) return;
+    if (!trimmed || trimmed === entry.name) {
+      // Cancelled / no-op rename: put focus back on the row so F2 etc. keep
+      // working (the rename input had stolen it).
+      onRequestFocus(entry.path);
+      return;
+    }
     if (!isSafeEntryName(trimmed)) {
-      alert(unsafeEntryNameMessage(trimmed));
+      onRequestFocus(entry.path);
+      void message(unsafeEntryNameMessage(trimmed));
       return;
     }
     try {
@@ -318,11 +344,14 @@ function TreeNode({
       useTreeStore.getState().remapExpanded(move);
       useTreeStore.getState().setSelection([to]);
       useTreeStore.getState().refresh();
+      // Refocus the renamed row once the refreshed tree contains it.
+      onRequestFocus(to);
     } catch (err) {
       console.error("rename failed", err);
       // Re-sync the tree to disk and tell the user why (e.g. name already taken).
       useTreeStore.getState().refresh();
-      alert(`Rename failed: ${String(err)}`);
+      onRequestFocus(entry.path);
+      void message(`Rename failed: ${String(err)}`);
     }
   }
 
@@ -379,6 +408,7 @@ function TreeNode({
           role="treeitem"
           aria-selected={selected}
           className="tree-row-main"
+          data-path={entry.path}
           aria-expanded={entry.isDir ? expanded : undefined}
           title={
             gitStatus && !entry.isDir
@@ -434,7 +464,7 @@ function TreeNode({
                 setRenaming(true);
               }}
             >
-              <Icon name="settings" size={12} />
+              <Icon name="edit" size={12} />
             </button>
             <button
               type="button"
@@ -477,6 +507,7 @@ function TreeNode({
               setDraggingEntries={setDraggingEntries}
               dropTargetPath={dropTargetPath}
               setDropTargetPath={setDropTargetPath}
+              onRequestFocus={onRequestFocus}
             />
           ))}
         </ul>
@@ -610,8 +641,10 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
   const [creating, setCreating] = useState<CreatingState | null>(null);
   const [draggingEntries, setDraggingEntries] = useState<DirEntry[]>([]);
   const [dropTargetPath, setDropTargetPath] = useState<string | null>(null);
+  const [pendingFocusPath, setPendingFocusPath] = useState<string | null>(null);
   const createInputRef = useRef<HTMLInputElement>(null);
   const createCommittedRef = useRef(false);
+  const treeRef = useRef<HTMLUListElement>(null);
   const visibleEntries = useMemo(
     () => flattenVisibleEntries(rootChildren, allChildren, expanded),
     [rootChildren, allChildren, expanded],
@@ -627,6 +660,50 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
         .filter((entry) => selectedPaths.includes(entry.path)),
     [selectedPaths, visibleEntries],
   );
+  const entryByPath = useMemo(() => {
+    const map = new Map<string, DirEntry>();
+    for (const { entry } of visibleEntries) map.set(entry.path, entry);
+    return map;
+  }, [visibleEntries]);
+
+  // Focus (and reveal) a row by path. Returns false when the row isn't in the
+  // DOM yet (e.g. right after a refresh).
+  function focusRow(path: string): boolean {
+    const el = treeRef.current?.querySelector<HTMLElement>(
+      `[data-path="${CSS.escape(path)}"]`,
+    );
+    if (!el) return false;
+    el.focus();
+    el.scrollIntoView?.({ block: "nearest" });
+    return true;
+  }
+
+  // Deferred focus restoration: rename/delete trigger a tree refresh, so the
+  // target row may not exist until the refreshed children arrive. Retry on
+  // visible-entries changes, but with a bounded life: never steal focus from
+  // an inline rename/create input the user opened while the refresh was in
+  // flight (focusing the row would blur and commit/cancel it), and give up
+  // after the entries change a couple of times without the row appearing.
+  const pendingFocusMissesRef = useRef(0);
+  function requestRowFocus(path: string) {
+    pendingFocusMissesRef.current = 0;
+    setPendingFocusPath(path);
+  }
+  useEffect(() => {
+    if (!pendingFocusPath) return;
+    if (isEditableEventTarget(document.activeElement)) {
+      setPendingFocusPath(null);
+      return;
+    }
+    if (focusRow(pendingFocusPath)) {
+      setPendingFocusPath(null);
+      return;
+    }
+    pendingFocusMissesRef.current += 1;
+    if (pendingFocusMissesRef.current > 2) setPendingFocusPath(null);
+    // focusRow only reads refs/DOM; visibleEntries drives the retry.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingFocusPath, visibleEntries]);
 
   useEffect(() => {
     if (rootChildren === undefined) loadInto(rootPath, refreshNonce);
@@ -684,7 +761,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     const trimmed = name.trim();
     if (!pending || !trimmed) return;
     if (!isSafeEntryName(trimmed)) {
-      alert(unsafeEntryNameMessage(trimmed));
+      void message(unsafeEntryNameMessage(trimmed));
       return;
     }
     const target = joinPath(pending.parentPath, trimmed);
@@ -696,7 +773,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
       console.error("create failed", err);
       // Surface duplicate-name / invalid-name failures instead of silently no-op.
       useTreeStore.getState().refresh();
-      alert(`Create failed: ${String(err)}`);
+      void message(`Create failed: ${String(err)}`);
     }
   }
 
@@ -709,15 +786,33 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     }
   }
 
+  // The nearest visible row that survives deleting `deleted` (next below the
+  // first deleted row, else nearest above), for focus restoration.
+  function nearestSurvivor(deleted: string[]): string | null {
+    const gone = (path: string) =>
+      deleted.some((d) => isSameOrDescendant(path, d));
+    const first = visiblePaths.findIndex(gone);
+    if (first === -1) return null;
+    for (let i = first; i < visiblePaths.length; i += 1) {
+      if (!gone(visiblePaths[i])) return visiblePaths[i];
+    }
+    for (let i = first - 1; i >= 0; i -= 1) {
+      if (!gone(visiblePaths[i])) return visiblePaths[i];
+    }
+    return null;
+  }
+
   async function deleteEntries(entries: DirEntry[]) {
     if (entries.length === 0) return;
     const names =
       entries.length === 1
         ? `"${entries[0].name}"`
         : `${entries.length} selected items`;
-    if (!confirm(`Move ${names} to Lyceum Trash? You can undo this with Cmd/Ctrl+Z.`)) {
-      return;
-    }
+    const confirmed = await confirmDelete(
+      `Move ${names} to Lyceum Trash? You can undo this with Cmd/Ctrl+Z.`,
+    );
+    if (!confirmed) return;
+    const survivor = nearestSurvivor(entries.map((entry) => entry.path));
     try {
       const batch = await movePathsToTrash(
         rootPath,
@@ -730,13 +825,21 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
           .getState()
           .dropExpanded(batch.items.map((item) => item.originalPath));
       }
-      useTreeStore.getState().clearSelection();
+      // Keep keyboard flows alive after the rows vanish: select + focus the
+      // nearest surviving sibling, or fall back to the tree container.
+      if (survivor) {
+        useTreeStore.getState().setSelection([survivor]);
+        requestRowFocus(survivor);
+      } else {
+        useTreeStore.getState().clearSelection();
+        treeRef.current?.focus();
+      }
       useTreeStore.getState().refresh();
     } catch (err) {
       console.error("delete failed", err);
       // Re-sync after a possible partial trash move so the tree reflects disk.
       useTreeStore.getState().refresh();
-      alert(`Delete failed: ${String(err)}`);
+      void message(`Delete failed: ${String(err)}`);
     }
   }
 
@@ -752,7 +855,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     } catch (err) {
       tree.pushDeleteUndo(batch);
       console.error("undo delete failed", err);
-      alert(`Undo delete failed: ${String(err)}`);
+      void message(`Undo delete failed: ${String(err)}`);
     }
   }
 
@@ -769,7 +872,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     } catch (err) {
       tree.pushDeleteRedo(batch);
       console.error("redo delete failed", err);
-      alert(`Redo delete failed: ${String(err)}`);
+      void message(`Redo delete failed: ${String(err)}`);
     }
   }
 
@@ -800,7 +903,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
       // so the tree re-reads the real filesystem state instead of showing stale
       // paths for items that did move.
       useTreeStore.getState().refresh();
-      alert(`Move failed: ${String(err)}`);
+      void message(`Move failed: ${String(err)}`);
     }
   }
 
@@ -822,6 +925,95 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     if (!mod && !e.altKey && (e.key === "Delete" || e.key === "Backspace")) {
       e.preventDefault();
       void deleteEntries(selectedEntries);
+    }
+  }
+
+  // Arrow-key navigation for the tree (role="tree"), VS Code style:
+  // Up/Down move through visible rows, Right expands / enters a dir, Left
+  // collapses / moves to the parent, Enter opens a file or toggles a dir,
+  // Home/End jump. Selection uses the existing single-selection mechanism.
+  function onTreeKeyDown(e: React.KeyboardEvent) {
+    if (isEditableEventTarget(e.target)) return;
+    const navKeys = [
+      "ArrowDown",
+      "ArrowUp",
+      "ArrowRight",
+      "ArrowLeft",
+      "Enter",
+      "Home",
+      "End",
+    ];
+    if (!navKeys.includes(e.key) || visiblePaths.length === 0) return;
+    const rowPath =
+      e.target instanceof HTMLElement
+        ? e.target.closest<HTMLElement>("[data-path]")?.dataset.path ?? null
+        : null;
+    // Let Enter activate non-row controls inside the tree (the per-row
+    // rename/delete buttons); rows and the tree itself are handled below.
+    if (e.key === "Enter" && !rowPath && e.target !== e.currentTarget) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const tree = useTreeStore.getState();
+    const current =
+      rowPath && visiblePaths.includes(rowPath)
+        ? rowPath
+        : selectedPaths.find((path) => visiblePaths.includes(path)) ?? null;
+    const index = current ? visiblePaths.indexOf(current) : -1;
+    const moveTo = (path: string | undefined) => {
+      if (!path) return;
+      tree.selectSingle(path);
+      focusRow(path);
+    };
+    switch (e.key) {
+      case "ArrowDown":
+        moveTo(visiblePaths[index < 0 ? 0 : Math.min(index + 1, visiblePaths.length - 1)]);
+        break;
+      case "ArrowUp":
+        moveTo(visiblePaths[index < 0 ? 0 : Math.max(index - 1, 0)]);
+        break;
+      case "Home":
+        moveTo(visiblePaths[0]);
+        break;
+      case "End":
+        moveTo(visiblePaths[visiblePaths.length - 1]);
+        break;
+      case "ArrowRight": {
+        if (!current) {
+          moveTo(visiblePaths[0]);
+          break;
+        }
+        const entry = entryByPath.get(current);
+        if (!entry?.isDir) break;
+        if (!expanded[current]) {
+          tree.setExpanded(current, true);
+        } else {
+          const next = visiblePaths[index + 1];
+          if (next && isDirectChild(next, current)) moveTo(next);
+        }
+        break;
+      }
+      case "ArrowLeft": {
+        if (!current) {
+          moveTo(visiblePaths[0]);
+          break;
+        }
+        const entry = entryByPath.get(current);
+        if (entry?.isDir && expanded[current]) {
+          tree.setExpanded(current, false);
+        } else {
+          const parent = parentDir(current);
+          if (visiblePaths.includes(parent)) moveTo(parent);
+        }
+        break;
+      }
+      case "Enter": {
+        if (!current) break;
+        const entry = entryByPath.get(current);
+        if (!entry) break;
+        if (entry.isDir) tree.toggleExpanded(current);
+        else onOpenFile(current);
+        break;
+      }
     }
   }
 
@@ -899,6 +1091,9 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
         className={"tree" + (dropTargetPath === rootPath ? " drop-target" : "")}
         role="tree"
         aria-label="Files"
+        ref={treeRef}
+        tabIndex={-1}
+        onKeyDown={onTreeKeyDown}
         onDragOver={(e) => {
           if (!isRootDropSurface(e.target, e.currentTarget)) return;
           if (!canMoveEntriesTo(draggingEntries, rootPath)) return;
@@ -948,6 +1143,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
             setDraggingEntries={setDraggingEntries}
             dropTargetPath={dropTargetPath}
             setDropTargetPath={setDropTargetPath}
+            onRequestFocus={requestRowFocus}
           />
         ))}
       </ul>

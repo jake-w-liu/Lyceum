@@ -18,15 +18,19 @@ pub fn build_app_menu<R: Runtime>(handle: &AppHandle<R>) -> tauri::Result<Menu<R
         .separator()
         .about(Some(AboutMetadata::default()))
         .separator()
-        .quit()
+        // Custom Quit (not the predefined item) so it routes through the same
+        // "menu" event path as every other item: the frontend can dirty-check
+        // unsaved editors first and then invoke `quit_app` itself.
+        .item(
+            &MenuItemBuilder::with_id("quit", "Quit Lyceum")
+                .accelerator("CmdOrCtrl+Q")
+                .build(handle)?,
+        )
         .build()?;
 
     let file_menu = SubmenuBuilder::new(handle, "File")
-        .item(
-            &MenuItemBuilder::with_id("app.newWindow", "New Window")
-                .accelerator("CmdOrCtrl+N")
-                .build(handle)?,
-        )
+        // No accelerator: Cmd/Ctrl+N belongs to the frontend's New File binding.
+        .item(&MenuItemBuilder::with_id("app.newWindow", "New Window").build(handle)?)
         .separator()
         .item(&MenuItemBuilder::with_id("explorer.newFile", "New File").build(handle)?)
         .item(&MenuItemBuilder::with_id("explorer.newFolder", "New Folder").build(handle)?)

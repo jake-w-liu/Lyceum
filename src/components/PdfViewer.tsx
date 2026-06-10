@@ -29,6 +29,7 @@ import { readFileBytes } from "../lib/ipc";
 import { usePreviewStore } from "../state/previewStore";
 import { Icon } from "./Icon";
 import {
+  capOutputScale,
   clampPage,
   clampZoom,
   zoomFromWheel,
@@ -430,7 +431,14 @@ function PdfPage({
         // Render at the device pixel ratio so pages are crisp on HiDPI/Retina
         // displays: the bitmap is sized in physical pixels (viewport × dpr) while
         // its CSS box stays in layout pixels, and the draw is scaled by transform.
-        const outputScale = window.devicePixelRatio || 1;
+        // The scale is capped (pdf.js-style maxCanvasPixels) so huge pages at
+        // high zoom can't allocate a canvas WebKit refuses to paint; the CSS box
+        // still reflects the requested zoom, so the page just renders softer.
+        const outputScale = capOutputScale(
+          viewport.width,
+          viewport.height,
+          window.devicePixelRatio || 1,
+        );
         canvas.width = Math.floor(viewport.width * outputScale);
         canvas.height = Math.floor(viewport.height * outputScale);
         canvas.style.width = `${Math.floor(viewport.width)}px`;
@@ -564,10 +572,17 @@ function PdfPageInput({
   onGo: (n: number) => void;
 }) {
   const [draft, setDraft] = useState(String(page));
+  // Escape must cancel, but blur() still fires onBlur → commit, which would
+  // read the stale draft and navigate. The ref marks that blur as a cancel.
+  const cancelledRef = useRef(false);
   useEffect(() => {
     setDraft(String(page));
   }, [page]);
   const commit = () => {
+    if (cancelledRef.current) {
+      cancelledRef.current = false;
+      return;
+    }
     const n = Number.parseInt(draft, 10);
     if (Number.isFinite(n)) onGo(n);
     else setDraft(String(page));
@@ -585,6 +600,7 @@ function PdfPageInput({
         onKeyDown={(e) => {
           if (e.key === "Enter") e.currentTarget.blur();
           else if (e.key === "Escape") {
+            cancelledRef.current = true;
             setDraft(String(page));
             e.currentTarget.blur();
           }
@@ -1124,6 +1140,9 @@ export default function PdfViewer({ path }: { path: string }) {
     setFindOpen(false);
     setMatches([]);
     setActiveMatch(-1);
+    // Drop the full-document text index; it's rebuilt lazily on the next
+    // search. (pdf.js keeps managing its own page-proxy caches.)
+    indexRef.current = null;
   }, []);
 
   // Cmd/Ctrl+F opens find when focus is anywhere inside the viewer.

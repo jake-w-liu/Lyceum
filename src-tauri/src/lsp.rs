@@ -9,9 +9,15 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
+
+/// Monotonic generation stamp for sessions. The reader thread only removes its
+/// own session from the map when the stored generation still matches, so a new
+/// server that reused the same id is never torn down by a stale reader.
+static SESSION_GEN: AtomicU64 = AtomicU64::new(0);
 
 /// Upper bound on a single LSP message body. A larger declared `Content-Length`
 /// is treated as a desync/protocol error rather than buffered unboundedly.
@@ -98,6 +104,13 @@ struct LspSession {
     // lsp_start/lsp_stop for every server).
     stdin: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Child,
+    gen: u64,
+}
+
+/// Servers are app-global but ids are generated per window, so the map is
+/// keyed by `"<window label>:<id>"` to keep windows from colliding.
+fn session_key(window: &tauri::Window, id: &str) -> String {
+    format!("{}:{}", window.label(), id)
 }
 
 #[derive(Default)]
@@ -116,18 +129,44 @@ impl LspManager {
             }
         }
     }
+
+    /// Kill and reap every server belonging to one window (called when it is
+    /// destroyed), mirroring `lsp_stop` for each entry. Entries are removed
+    /// under the lock, but the (blocking) kill+wait happens after the guard is
+    /// dropped so other windows' LSP commands are never blocked on it.
+    pub fn stop_servers_for_window(&self, label: &str) {
+        let prefix = format!("{label}:");
+        let removed: Vec<LspSession> = {
+            let Ok(mut servers) = self.servers.lock() else {
+                return;
+            };
+            let keys: Vec<String> = servers
+                .keys()
+                .filter(|key| key.starts_with(&prefix))
+                .cloned()
+                .collect();
+            keys.iter().filter_map(|key| servers.remove(key)).collect()
+        };
+        for mut session in removed {
+            let _ = session.child.kill();
+            // Reap so the exited server does not linger as a zombie process.
+            let _ = session.child.wait();
+        }
+    }
 }
 
 /// Spawn a language server, streaming its framed stdout messages to the frontend.
 #[tauri::command]
 pub fn lsp_start(
     app: AppHandle,
+    window: tauri::Window,
     state: State<LspManager>,
     id: String,
     command: String,
     args: Vec<String>,
     cwd: Option<String>,
 ) -> Result<(), String> {
+    let key = session_key(&window, &id);
     let mut cmd = Command::new(&command);
     cmd.args(&args)
         .stdin(Stdio::piped())
@@ -144,7 +183,10 @@ pub fn lsp_start(
     let mut stdout = child.stdout.take().ok_or("failed to capture stdout")?;
 
     // Reader thread: frame stdout, emit each message, then emit exit on EOF.
+    let gen = SESSION_GEN.fetch_add(1, Ordering::Relaxed);
+    let label = window.label().to_string();
     let app_for_thread = app.clone();
+    let key_for_thread = key.clone();
     let message_event = format!("lsp:message:{id}");
     let exit_event = format!("lsp:exit:{id}");
     std::thread::spawn(move || {
@@ -156,13 +198,29 @@ pub fn lsp_start(
                 Ok(n) => {
                     decoder.push(&buf[..n]);
                     while let Some(body) = decoder.next_message() {
-                        let _ = app_for_thread.emit(&message_event, body);
+                        let _ = app_for_thread.emit_to(label.as_str(), &message_event, body);
                     }
                 }
                 Err(_) => break,
             }
         }
-        let _ = app_for_thread.emit(&exit_event, ());
+        // EOF: the server is gone (or wedged its stdout). Remove the session
+        // and reap the child so no zombie process or dead map entry lingers.
+        // Only remove our own generation — a new server may have reused the id.
+        if let Some(manager) = app_for_thread.try_state::<LspManager>() {
+            let mut servers = manager.servers.lock().unwrap();
+            if servers
+                .get(&key_for_thread)
+                .is_some_and(|session| session.gen == gen)
+            {
+                if let Some(mut session) = servers.remove(&key_for_thread) {
+                    drop(servers);
+                    let _ = session.child.kill();
+                    let _ = session.child.wait();
+                }
+            }
+        }
+        let _ = app_for_thread.emit_to(label.as_str(), &exit_event, ());
     });
 
     // If a server with this id already exists, kill AND reap it first so its
@@ -170,10 +228,11 @@ pub fn lsp_start(
     // (The frontend normally uses a unique id per spawn and stops the old one
     // explicitly; this is a belt-and-suspenders cleanup.)
     if let Some(mut old) = state.servers.lock().unwrap().insert(
-        id,
+        key,
         LspSession {
             stdin: Arc::new(Mutex::new(Box::new(stdin))),
             child,
+            gen,
         },
     ) {
         let _ = old.child.kill();
@@ -184,13 +243,20 @@ pub fn lsp_start(
 
 /// Frame and write a JSON-RPC message to a server's stdin.
 #[tauri::command]
-pub fn lsp_send(state: State<LspManager>, id: String, message: String) -> Result<(), String> {
+pub fn lsp_send(
+    window: tauri::Window,
+    state: State<LspManager>,
+    id: String,
+    message: String,
+) -> Result<(), String> {
     // Clone out the per-session stdin handle under the map lock, then release
     // the map lock BEFORE the (potentially blocking) write/flush so a full pipe
     // on one server can't wedge lsp_start/lsp_stop for all the others.
     let stdin = {
         let servers = state.servers.lock().unwrap();
-        let session = servers.get(&id).ok_or("no such lsp server")?;
+        let session = servers
+            .get(&session_key(&window, &id))
+            .ok_or("no such lsp server")?;
         session.stdin.clone()
     };
     let mut stdin = stdin.lock().unwrap();
@@ -203,8 +269,17 @@ pub fn lsp_send(state: State<LspManager>, id: String, message: String) -> Result
 
 /// Kill and remove a server (idempotent).
 #[tauri::command]
-pub fn lsp_stop(state: State<LspManager>, id: String) -> Result<(), String> {
-    if let Some(mut session) = state.servers.lock().unwrap().remove(&id) {
+pub fn lsp_stop(
+    window: tauri::Window,
+    state: State<LspManager>,
+    id: String,
+) -> Result<(), String> {
+    if let Some(mut session) = state
+        .servers
+        .lock()
+        .unwrap()
+        .remove(&session_key(&window, &id))
+    {
         let _ = session.child.kill();
         // Reap so the exited server does not linger as a zombie process.
         let _ = session.child.wait();

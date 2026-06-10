@@ -6,6 +6,7 @@
 // Monaco documents. The tab bar drives setActive/closeDoc.
 
 import { create } from "zustand";
+import { ask } from "@tauri-apps/plugin-dialog";
 
 import { baseName } from "./workspaceStore";
 import { languageForPath } from "../lib/language";
@@ -22,11 +23,24 @@ export interface EditorDoc {
   reloadVersion: number;
 }
 
+/** A 1-based position to reveal once the doc is bound to the editor. */
+export interface PendingReveal {
+  path: string;
+  line: number;
+  column: number;
+}
+
 export interface EditorData {
   docs: EditorDoc[];
   activePath: string | null;
   /** Current selection text in the active editor (for run-selection, M8). */
   selection: string;
+  /** Cursor target for the next editor bind (set on open-at-position; consumed
+   * and cleared by MonacoEditor so it never re-reveals on later tab switches). */
+  pendingReveal: PendingReveal | null;
+  /** The last rename/move applied to open docs, consumed by MonacoEditor to
+   * re-key its path->model map (preserving undo history and view state). */
+  lastDocMoves: { moves: Array<{ from: string; to: string }>; seq: number } | null;
 }
 
 /** True when the in-memory content has unsaved changes. */
@@ -39,15 +53,42 @@ export function isTextDoc(doc: EditorDoc): boolean {
   return doc.kind === "text";
 }
 
+// MonacoEditor registers a flusher that synchronously commits its debounced
+// editor->store content write. Anything that reads doc.content (saves, dirty
+// checks, run/build save-before-run) calls flushPendingEdits() first so the
+// store can never lag behind the buffer at a decision point. Lives here (not in
+// MonacoEditor) so callers don't pull the lazy-loaded monaco chunk.
+let pendingEditsFlusher: (() => void) | null = null;
+export function setPendingEditsFlusher(flush: (() => void) | null): void {
+  pendingEditsFlusher = flush;
+}
+export function flushPendingEdits(): void {
+  pendingEditsFlusher?.();
+}
+
 /**
- * Guard closing a document that has unsaved changes. Returns true when the doc
+ * Native yes/no confirmation via the dialog plugin. `window.confirm` is
+ * unreliable in Tauri WebViews (can return immediately / render oddly), so use
+ * the plugin and fall back to `confirm` only outside Tauri (vite dev, tests).
+ */
+export async function askDiscard(message: string): Promise<boolean> {
+  try {
+    return await ask(message, { title: "Unsaved Changes", kind: "warning" });
+  } catch {
+    return confirm(message);
+  }
+}
+
+/**
+ * Guard closing a document that has unsaved changes. Resolves true when the doc
  * is clean/absent or when the user confirms discarding; false to cancel the
  * close. Centralized so the tab bar and Cmd+W keybinding behave identically.
  */
-export function confirmDiscard(path: string): boolean {
+export async function confirmDiscard(path: string): Promise<boolean> {
+  flushPendingEdits();
   const doc = useEditorStore.getState().docs.find((d) => d.path === path);
   if (!doc || !isDirty(doc)) return true;
-  return confirm(`Discard unsaved changes to ${doc.name}?`);
+  return askDiscard(`Discard unsaved changes to ${doc.name}?`);
 }
 
 /** The doc whose path matches activePath, or null when none is active. */
@@ -64,16 +105,19 @@ export interface EditorActions {
     content: string;
     language: string;
     kind?: EditorDocKind;
+    /** Default true. False adds the doc without stealing the active tab (used
+     * when a superseded open-file request resolves late). */
+    activate?: boolean;
   }) => void;
   closeDoc: (path: string) => void;
   /** Close every open doc except `keepPath` (prompts per unsaved doc). */
-  closeOtherDocs: (keepPath: string) => void;
+  closeOtherDocs: (keepPath: string) => Promise<void>;
   /** Close docs positioned after `fromPath` in the tab order. */
-  closeDocsToRight: (fromPath: string) => void;
+  closeDocsToRight: (fromPath: string) => Promise<void>;
   /** Close every open doc. */
-  closeAllDocs: () => void;
+  closeAllDocs: () => Promise<void>;
   /** Close only docs with no unsaved changes (never prompts). */
-  closeSavedDocs: () => void;
+  closeSavedDocs: () => Promise<void>;
   setActive: (path: string) => void;
   updateContent: (path: string, content: string) => void;
   /**
@@ -92,6 +136,8 @@ export interface EditorActions {
   markSaved: (path: string, savedContent?: string) => void;
   moveDocPaths: (moves: Array<{ from: string; to: string }>) => void;
   setSelection: (text: string) => void;
+  setPendingReveal: (path: string, line: number, column: number) => void;
+  clearPendingReveal: () => void;
 }
 
 export type EditorState = EditorData & EditorActions;
@@ -100,6 +146,8 @@ export const initialEditorData: EditorData = {
   docs: [],
   activePath: null,
   selection: "",
+  pendingReveal: null,
+  lastDocMoves: null,
 };
 
 /**
@@ -108,11 +156,15 @@ export const initialEditorData: EditorData = {
  * the old active tab — matching closeDoc's single-tab preference so a single
  * close and a batch close activate the same tab in the same situation.
  */
-function closeDocs(
+async function closeDocs(
   set: (fn: (s: EditorState) => Partial<EditorState>) => void,
   pathsToClose: string[],
-): void {
-  const confirmed = pathsToClose.filter((path) => confirmDiscard(path));
+): Promise<void> {
+  // Sequential prompts (one native dialog at a time, in tab order).
+  const confirmed: string[] = [];
+  for (const path of pathsToClose) {
+    if (await confirmDiscard(path)) confirmed.push(path);
+  }
   if (confirmed.length === 0) return;
   const closing = new Set(confirmed);
   set((s) => {
@@ -146,8 +198,9 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
 
   openDoc: (input) =>
     set((s) => {
+      const activate = input.activate ?? true;
       if (s.docs.some((doc) => doc.path === input.path)) {
-        return { activePath: input.path };
+        return activate ? { activePath: input.path } : {};
       }
       const doc: EditorDoc = {
         path: input.path,
@@ -158,7 +211,10 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
         kind: input.kind ?? "text",
         reloadVersion: 0,
       };
-      return { docs: [...s.docs, doc], activePath: input.path };
+      return {
+        docs: [...s.docs, doc],
+        activePath: activate ? input.path : s.activePath,
+      };
     }),
 
   closeDoc: (path) =>
@@ -184,11 +240,11 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
         .map((doc) => doc.path),
     ),
 
-  closeDocsToRight: (fromPath) => {
+  closeDocsToRight: async (fromPath) => {
     const docs = get().docs;
     const index = docs.findIndex((doc) => doc.path === fromPath);
     if (index === -1) return;
-    closeDocs(
+    await closeDocs(
       set,
       docs.slice(index + 1).map((doc) => doc.path),
     );
@@ -196,13 +252,17 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
 
   closeAllDocs: () => closeDocs(set, get().docs.map((doc) => doc.path)),
 
-  closeSavedDocs: () =>
-    closeDocs(
+  closeSavedDocs: () => {
+    // Flush before filtering: a doc with edits still in the debounce window
+    // would otherwise pass the !isDirty check and get prompted as a close.
+    flushPendingEdits();
+    return closeDocs(
       set,
       get()
         .docs.filter((doc) => !isDirty(doc))
         .map((doc) => doc.path),
-    ),
+    );
+  },
 
   setActive: (path) => set({ activePath: path }),
 
@@ -264,9 +324,13 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
         }
         return path;
       };
+      // Record the per-doc moves so MonacoEditor can re-key its model map
+      // (keeping the same model object preserves undo history + view state).
+      const applied: Array<{ from: string; to: string }> = [];
       const docs = s.docs.map((doc) => {
         const path = movedPath(doc.path);
         if (path === doc.path) return doc;
+        applied.push({ from: doc.path, to: path });
         // A rename can change the extension, so recompute the editor language
         // for text docs (e.g. notes.txt -> notes.md should switch to markdown).
         const language =
@@ -274,9 +338,18 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
         return { ...doc, path, name: baseName(path), language };
       });
       const activePath = s.activePath ? movedPath(s.activePath) : s.activePath;
-      return { docs, activePath };
+      const lastDocMoves =
+        applied.length > 0
+          ? { moves: applied, seq: (s.lastDocMoves?.seq ?? 0) + 1 }
+          : s.lastDocMoves;
+      return { docs, activePath, lastDocMoves };
     });
   },
 
   setSelection: (text) => set({ selection: text }),
+
+  setPendingReveal: (path, line, column) =>
+    set({ pendingReveal: { path, line, column } }),
+
+  clearPendingReveal: () => set({ pendingReveal: null }),
 }));

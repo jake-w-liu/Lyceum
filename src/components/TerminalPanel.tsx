@@ -18,11 +18,13 @@ export function TerminalPanel() {
   const rootPath = useWorkspaceStore((s) => s.rootPath);
   const [renamingId, setRenamingId] = useState<string | null>(null);
 
+  // Auto-create a terminal on first mount, and again whenever the last one is
+  // closed — the panel should never sit on a blank surface while visible.
   useEffect(() => {
     if (useTerminalStore.getState().terminals.length === 0) {
       createTerminal(rootPath);
     }
-  }, [createTerminal, rootPath]);
+  }, [terminals.length, createTerminal, rootPath]);
 
   return (
     <div className="terminal-panel">

@@ -148,6 +148,61 @@ describe("createRpcClient", () => {
     });
   });
 
+  it("answers workspace/configuration with one null per requested item", () => {
+    const { transport, sent } = makeTransport();
+    const client = createRpcClient(transport);
+
+    client.handleMessage(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 7,
+        method: "workspace/configuration",
+        params: { items: [{ section: "julia" }, { section: "julia.lint" }] },
+      }),
+    );
+
+    expect(JSON.parse(sent[0])).toEqual({
+      jsonrpc: "2.0",
+      id: 7,
+      result: [null, null],
+    });
+  });
+
+  it("answers workspace/configuration with [] when items are missing", () => {
+    const { transport, sent } = makeTransport();
+    const client = createRpcClient(transport);
+
+    client.handleMessage(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 8,
+        method: "workspace/configuration",
+      }),
+    );
+
+    expect(JSON.parse(sent[0])).toEqual({ jsonrpc: "2.0", id: 8, result: [] });
+  });
+
+  it("declines workspace/applyEdit with { applied: false }", () => {
+    const { transport, sent } = makeTransport();
+    const client = createRpcClient(transport);
+
+    client.handleMessage(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 9,
+        method: "workspace/applyEdit",
+        params: { edit: {} },
+      }),
+    );
+
+    expect(JSON.parse(sent[0])).toEqual({
+      jsonrpc: "2.0",
+      id: 9,
+      result: { applied: false },
+    });
+  });
+
   it("times out a non-initialize request at 60s and initialize at the longer cap", async () => {
     vi.useFakeTimers();
     try {

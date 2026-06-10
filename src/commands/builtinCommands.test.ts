@@ -10,11 +10,22 @@ import { initialPreviewData, usePreviewStore } from "../state/previewStore";
 
 const runLatexBuildMock = vi.hoisted(() => vi.fn());
 const writePtyMock = vi.hoisted(() => vi.fn());
+const invokeMock = vi.hoisted(() =>
+  vi.fn(async (..._args: unknown[]) => undefined),
+);
+const askMock = vi.hoisted(() => vi.fn(async (..._args: unknown[]) => true));
 vi.mock("../lib/latexBuild", () => ({
   runLatexBuild: (...args: unknown[]) => runLatexBuildMock(...args),
 }));
 vi.mock("../lib/terminal", () => ({
   writePty: (...args: unknown[]) => writePtyMock(...args),
+}));
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: (...args: unknown[]) => invokeMock(...args),
+}));
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  ask: (...args: unknown[]) => askMock(...args),
+  open: vi.fn(),
 }));
 
 beforeEach(() => {
@@ -26,6 +37,8 @@ beforeEach(() => {
   usePreviewStore.setState(initialPreviewData, false);
   runLatexBuildMock.mockClear();
   writePtyMock.mockClear();
+  invokeMock.mockClear();
+  askMock.mockReset().mockResolvedValue(true);
 });
 
 describe("builtinCommands", () => {
@@ -141,6 +154,46 @@ describe("builtinCommands", () => {
     expect(useLayoutStore.getState().pdfPanelVisible).toBe(false);
     expect(usePreviewStore.getState().pdfPath).toBeNull();
     expect(usePreviewStore.getState().imagePath).toBeNull();
+  });
+
+  describe("quit", () => {
+    it("invokes quit_app directly when no docs are dirty", async () => {
+      await commandRegistry.execute("quit");
+      expect(askMock).not.toHaveBeenCalled();
+      expect(invokeMock).toHaveBeenCalledWith("quit_app");
+    });
+
+    it("asks before quitting with dirty docs and aborts when declined", async () => {
+      useEditorStore.getState().openDoc({
+        path: "/w/a.ts",
+        content: "a",
+        language: "typescript",
+      });
+      useEditorStore.getState().updateContent("/w/a.ts", "dirty");
+      askMock.mockResolvedValue(false);
+
+      await commandRegistry.execute("quit");
+
+      expect(askMock).toHaveBeenCalledWith(
+        "Discard unsaved changes and quit?",
+        expect.anything(),
+      );
+      expect(invokeMock).not.toHaveBeenCalledWith("quit_app");
+    });
+
+    it("quits when discarding dirty docs is confirmed", async () => {
+      useEditorStore.getState().openDoc({
+        path: "/w/a.ts",
+        content: "a",
+        language: "typescript",
+      });
+      useEditorStore.getState().updateContent("/w/a.ts", "dirty");
+      askMock.mockResolvedValue(true);
+
+      await commandRegistry.execute("quit");
+
+      expect(invokeMock).toHaveBeenCalledWith("quit_app");
+    });
   });
 
   it("every default keybinding resolves to a registered command", () => {

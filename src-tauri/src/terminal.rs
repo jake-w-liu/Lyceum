@@ -7,16 +7,32 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
+
+/// Monotonic generation stamp for sessions. The reader thread only removes its
+/// own session from the map when the stored generation still matches, so a new
+/// session that reused the same id is never torn down by a stale reader.
+static SESSION_GEN: AtomicU64 = AtomicU64::new(0);
 
 struct Session {
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    // The writer lives behind its own lock so terminal_write never holds the
+    // manager map lock across blocking PTY I/O (a full PTY buffer would
+    // otherwise deadlock every terminal command). Mirrors lsp.rs's stdin.
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     killer: Box<dyn ChildKiller + Send + Sync>,
+    gen: u64,
+}
+
+/// Sessions are app-global but ids are generated per window, so the map is
+/// keyed by `"<window label>:<id>"` to keep windows from colliding.
+fn session_key(window: &tauri::Window, id: &str) -> String {
+    format!("{}:{}", window.label(), id)
 }
 
 #[derive(Default)]
@@ -32,6 +48,31 @@ impl TerminalManager {
             for (_id, mut session) in sessions.drain() {
                 let _ = session.killer.kill();
             }
+        }
+    }
+
+    /// Kill every session belonging to one window (called when it is
+    /// destroyed), so its shells and PTY fds do not outlive the window.
+    /// Entries are removed under the lock, but the kills happen after the
+    /// guard is dropped so other windows' terminal commands are never blocked
+    /// on them. Each killed shell's reader thread then sees EOF and reaps the
+    /// child as usual (its map entry is already gone, which is fine — removal
+    /// there is gen-guarded and tolerates a miss).
+    pub fn close_sessions_for_window(&self, label: &str) {
+        let prefix = format!("{label}:");
+        let removed: Vec<Session> = {
+            let Ok(mut sessions) = self.sessions.lock() else {
+                return;
+            };
+            let keys: Vec<String> = sessions
+                .keys()
+                .filter(|key| key.starts_with(&prefix))
+                .cloned()
+                .collect();
+            keys.iter().filter_map(|key| sessions.remove(key)).collect()
+        };
+        for mut session in removed {
+            let _ = session.killer.kill();
         }
     }
 }
@@ -83,6 +124,7 @@ fn normalize_terminal_input(data: &str) -> Vec<u8> {
 #[tauri::command]
 pub fn terminal_create(
     app: AppHandle,
+    window: tauri::Window,
     state: State<TerminalManager>,
     id: String,
     shell: Option<String>,
@@ -90,6 +132,13 @@ pub fn terminal_create(
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
+    let key = session_key(&window, &id);
+    // Reject a duplicate id outright rather than silently killing the existing
+    // session (which would orphan the old tab and leak its reader thread).
+    if state.sessions.lock().unwrap().contains_key(&key) {
+        return Err(format!("terminal already exists: {id}"));
+    }
+
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -131,69 +180,123 @@ pub fn terminal_create(
         }
     };
 
-    // Reader thread: stream output, then emit an exit event when the shell ends.
-    let app_for_thread = app.clone();
+    let gen = SESSION_GEN.fetch_add(1, Ordering::Relaxed);
+    let label = window.label().to_string();
     let data_event = format!("terminal:data:{id}");
     let exit_event = format!("terminal:exit:{id}");
+
+    // Reader thread: pull raw bytes off the PTY and hand them to the emitter
+    // thread through a channel. Splitting read from emit lets the emitter
+    // coalesce a backlog without ever issuing a blocking read that would sit on
+    // already-buffered output.
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let app_for_reader = app.clone();
+    let key_for_reader = key.clone();
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    // base64 (a JSON-safe string) instead of Vec<u8>, which Tauri
-                    // would serialize as a bloated JSON number array (~3.5x).
-                    let _ = app_for_thread.emit(&data_event, STANDARD.encode(&buf[..n]));
+                    if tx.send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
                 }
                 Err(_) => break,
             }
         }
+        drop(tx);
         let _ = child.wait();
-        let _ = app_for_thread.emit(&exit_event, ());
+        // The shell ended on its own (or was killed): drop the session so its
+        // PTY fds do not linger in the map until the tab is closed. Only remove
+        // our own generation — a new session may have reused the id since.
+        if let Some(manager) = app_for_reader.try_state::<TerminalManager>() {
+            let mut sessions = manager.sessions.lock().unwrap();
+            if sessions
+                .get(&key_for_reader)
+                .is_some_and(|session| session.gen == gen)
+            {
+                sessions.remove(&key_for_reader);
+            }
+        }
     });
 
-    // If a session with this id already exists, kill it first so its child
-    // exits and its reader thread reaches EOF (otherwise both would leak).
-    if let Some(mut old) = state.sessions.lock().unwrap().insert(
-        id,
+    // Emitter thread: coalesce bursts (up to ~32 KiB or ~5 ms) into one event so
+    // heavy output does not become thousands of IPC events per second, while
+    // small interactive output is flushed immediately (try_recv -> Empty).
+    let app_for_thread = app.clone();
+    std::thread::spawn(move || {
+        const MAX_BATCH: usize = 32 * 1024;
+        const MAX_DELAY: std::time::Duration = std::time::Duration::from_millis(5);
+        while let Ok(first) = rx.recv() {
+            let mut batch = first;
+            let deadline = std::time::Instant::now() + MAX_DELAY;
+            while batch.len() < MAX_BATCH && std::time::Instant::now() < deadline {
+                match rx.try_recv() {
+                    Ok(chunk) => batch.extend_from_slice(&chunk),
+                    Err(_) => break,
+                }
+            }
+            // base64 (a JSON-safe string) instead of Vec<u8>, which Tauri
+            // would serialize as a bloated JSON number array (~3.5x).
+            let _ = app_for_thread.emit_to(label.as_str(), &data_event, STANDARD.encode(&batch));
+        }
+        let _ = app_for_thread.emit_to(label.as_str(), &exit_event, ());
+    });
+
+    // A duplicate id was rejected above, so this insert never replaces a live
+    // session (terminal commands run serially on the main thread).
+    state.sessions.lock().unwrap().insert(
+        key,
         Session {
             master: pair.master,
-            writer,
+            writer: Arc::new(Mutex::new(writer)),
             killer,
+            gen,
         },
-    ) {
-        let _ = old.killer.kill();
-    }
+    );
     Ok(())
 }
 
 /// Send input bytes to a session's shell.
 #[tauri::command]
 pub fn terminal_write(
+    window: tauri::Window,
     state: State<TerminalManager>,
     id: String,
     data: String,
 ) -> Result<(), String> {
-    let mut sessions = state.sessions.lock().unwrap();
-    let session = sessions.get_mut(&id).ok_or("no such terminal")?;
-    session
-        .writer
+    // Clone out the per-session writer under the map lock, then release the map
+    // lock BEFORE the (potentially blocking) write/flush so a full PTY buffer
+    // on one terminal can't wedge every other terminal command.
+    let writer = {
+        let sessions = state.sessions.lock().unwrap();
+        let session = sessions
+            .get(&session_key(&window, &id))
+            .ok_or("no such terminal")?;
+        session.writer.clone()
+    };
+    let mut writer = writer.lock().unwrap();
+    writer
         .write_all(&normalize_terminal_input(&data))
         .map_err(|e| e.to_string())?;
-    session.writer.flush().map_err(|e| e.to_string())?;
+    writer.flush().map_err(|e| e.to_string())?;
     Ok(())
 }
 
 /// Resize a session's PTY (in character cells).
 #[tauri::command]
 pub fn terminal_resize(
+    window: tauri::Window,
     state: State<TerminalManager>,
     id: String,
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
     let sessions = state.sessions.lock().unwrap();
-    let session = sessions.get(&id).ok_or("no such terminal")?;
+    let session = sessions
+        .get(&session_key(&window, &id))
+        .ok_or("no such terminal")?;
     session
         .master
         .resize(PtySize {
@@ -208,8 +311,17 @@ pub fn terminal_resize(
 
 /// Kill and remove a session.
 #[tauri::command]
-pub fn terminal_close(state: State<TerminalManager>, id: String) -> Result<(), String> {
-    if let Some(mut session) = state.sessions.lock().unwrap().remove(&id) {
+pub fn terminal_close(
+    window: tauri::Window,
+    state: State<TerminalManager>,
+    id: String,
+) -> Result<(), String> {
+    if let Some(mut session) = state
+        .sessions
+        .lock()
+        .unwrap()
+        .remove(&session_key(&window, &id))
+    {
         let _ = session.killer.kill();
     }
     Ok(())

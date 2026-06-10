@@ -5,8 +5,9 @@
 // Julia process output into the Output panel, and updates run state.
 
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { listenScoped } from "./windowEvents";
 import {
+  flushPendingEdits,
   getActiveDoc,
   isTextDoc,
   useEditorStore,
@@ -42,6 +43,10 @@ let runSeq = 0;
 
 /** Run the active Julia file (or selection) and stream output to the panel. */
 export async function runActiveJulia(): Promise<void> {
+  // Commit any debounced editor->store write so we save/run the live buffer,
+  // not a ≤150ms-stale snapshot (callers other than the editor.run command —
+  // e.g. the tab-strip Run button — don't flush themselves).
+  flushPendingEdits();
   const state = useEditorStore.getState();
   const doc = getActiveDoc(state);
   const invocation = runInvocation(doc, state.selection);
@@ -63,31 +68,40 @@ export async function runActiveJulia(): Promise<void> {
   out.setRunId(id);
   out.append(invocation.code ? "julia -e <selection>" : `julia ${doc.name}`);
 
-  const offData = await listen<{ stream: string; line: string }>(
-    `julia:output:${id}`,
-    (event) =>
-      appendOutputBuffered(
-        event.payload.stream === "stderr"
-          ? `[stderr] ${event.payload.line}`
-          : event.payload.line,
-      ),
-  );
-  const offExit = await listen<number>(`julia:exit:${id}`, (event) => {
+  // The run is already claimed (running=true above); from here every failure
+  // path must release it, including listenScoped rejecting — otherwise the
+  // Output panel is stuck "running" and future runs are refused forever.
+  let offData: (() => void) | null = null;
+  let offExit: (() => void) | null = null;
+  const releaseRun = () => {
     const store = useOutputStore.getState();
-    flushOutputBuffer(); // ensure streamed lines land before the exit line
-    store.append(`[julia exited with code ${event.payload}]`);
     store.setRunning(false);
     store.setRunId(null);
-    offData();
-    offExit();
-  });
+    offData?.();
+    offExit?.();
+  };
 
-  // Run a workspace-less file from its own directory rather than null cwd.
-  const rootPath = useWorkspaceStore.getState().rootPath;
-  const cwd = invocation.file
-    ? resolveTerminalCwd("currentFileDir", rootPath, doc.path)
-    : rootPath;
   try {
+    offData = await listenScoped<{ stream: string; line: string }>(
+      `julia:output:${id}`,
+      (event) =>
+        appendOutputBuffered(
+          event.payload.stream === "stderr"
+            ? `[stderr] ${event.payload.line}`
+            : event.payload.line,
+        ),
+    );
+    offExit = await listenScoped<number>(`julia:exit:${id}`, (event) => {
+      flushOutputBuffer(); // ensure streamed lines land before the exit line
+      useOutputStore.getState().append(`[julia exited with code ${event.payload}]`);
+      releaseRun();
+    });
+
+    // Run a workspace-less file from its own directory rather than null cwd.
+    const rootPath = useWorkspaceStore.getState().rootPath;
+    const cwd = invocation.file
+      ? resolveTerminalCwd("currentFileDir", rootPath, doc.path)
+      : rootPath;
     if (invocation.file) {
       await writeFile(doc.path, doc.content);
       // Record the exact bytes written so edits typed during the save keep the
@@ -107,10 +121,7 @@ export async function runActiveJulia(): Promise<void> {
     store.append(`failed to run julia: ${message}`);
     const missingMessage = missingJuliaMessage(message);
     if (missingMessage) store.append(missingMessage);
-    store.setRunning(false);
-    store.setRunId(null);
-    offData();
-    offExit();
+    releaseRun();
   }
 }
 

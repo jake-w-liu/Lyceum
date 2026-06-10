@@ -5,8 +5,8 @@
 // view and which bottom-panel tab is active. It is intentionally UI-only;
 // editor/document state lives elsewhere in later milestones.
 //
-// Persistence of these values (restore on startup) is a M10 concern; for now
-// the store is in-memory with sensible defaults.
+// Layout is persisted across launches (debounced) by lib/settingsPersistence,
+// via persistedLayoutData/sanitizeLayoutData below.
 
 import { create } from "zustand";
 
@@ -104,6 +104,74 @@ export const initialLayoutData: LayoutData = {
   pdfPanelWidth: 480,
   editorPreview: false,
 };
+
+/**
+ * The slice of layout state worth persisting across launches. `editorPreview`
+ * is excluded: it's transient, tied to whichever document is active.
+ */
+export function persistedLayoutData(state: LayoutData): Omit<LayoutData, "editorPreview"> {
+  return {
+    sidebarVisible: state.sidebarVisible,
+    sidebarWidth: state.sidebarWidth,
+    activeView: state.activeView,
+    bottomPanelVisible: state.bottomPanelVisible,
+    bottomPanelHeight: state.bottomPanelHeight,
+    panelWidth: state.panelWidth,
+    panelPosition: state.panelPosition,
+    activeBottomTab: state.activeBottomTab,
+    pdfPanelVisible: state.pdfPanelVisible,
+    pdfPanelWidth: state.pdfPanelWidth,
+  };
+}
+
+/**
+ * Validate untrusted (on-disk) layout JSON into a partial update: unknown or
+ * malformed fields are dropped and sizes re-clamped, so a stale/edited file
+ * can never wedge the workbench. Used by layout persistence at startup.
+ */
+export function sanitizeLayoutData(raw: unknown): Partial<LayoutData> {
+  if (typeof raw !== "object" || raw === null) return {};
+  const p = raw as Partial<Record<keyof LayoutData, unknown>>;
+  const out: Partial<LayoutData> = {};
+  if (typeof p.sidebarVisible === "boolean") out.sidebarVisible = p.sidebarVisible;
+  if (typeof p.sidebarWidth === "number" && Number.isFinite(p.sidebarWidth)) {
+    out.sidebarWidth = clamp(p.sidebarWidth, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+  }
+  if (p.activeView === "explorer" || p.activeView === "search") {
+    out.activeView = p.activeView;
+  }
+  if (typeof p.bottomPanelVisible === "boolean") {
+    out.bottomPanelVisible = p.bottomPanelVisible;
+  }
+  if (
+    typeof p.bottomPanelHeight === "number" &&
+    Number.isFinite(p.bottomPanelHeight)
+  ) {
+    out.bottomPanelHeight = clamp(
+      p.bottomPanelHeight,
+      BOTTOM_MIN_HEIGHT,
+      BOTTOM_MAX_HEIGHT,
+    );
+  }
+  if (typeof p.panelWidth === "number" && Number.isFinite(p.panelWidth)) {
+    out.panelWidth = clamp(p.panelWidth, PANEL_MIN_WIDTH, PANEL_MAX_WIDTH);
+  }
+  if (p.panelPosition === "bottom" || p.panelPosition === "right") {
+    out.panelPosition = p.panelPosition;
+  }
+  if (
+    p.activeBottomTab === "terminal" ||
+    p.activeBottomTab === "problems" ||
+    p.activeBottomTab === "output"
+  ) {
+    out.activeBottomTab = p.activeBottomTab;
+  }
+  if (typeof p.pdfPanelVisible === "boolean") out.pdfPanelVisible = p.pdfPanelVisible;
+  if (typeof p.pdfPanelWidth === "number" && Number.isFinite(p.pdfPanelWidth)) {
+    out.pdfPanelWidth = clamp(p.pdfPanelWidth, PDF_MIN_WIDTH, PDF_MAX_WIDTH);
+  }
+  return out;
+}
 
 export const useLayoutStore = create<LayoutState>((set) => ({
   ...initialLayoutData,

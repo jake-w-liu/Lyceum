@@ -2,7 +2,7 @@
 // Enter records the selected path as the workspace's pending-open intent.
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QuickOpen } from "./QuickOpen";
 import { initialUiData, useUiStore } from "../state/uiStore";
@@ -41,6 +41,39 @@ describe("QuickOpen", () => {
 
     expect(await screen.findByText("main.ts")).toBeInTheDocument();
     expect(screen.getByText("README.md")).toBeInTheDocument();
+  });
+
+  it("shows the workspace-relative directory next to nested files", async () => {
+    render(<QuickOpen />);
+
+    expect(await screen.findByText("main.ts")).toBeInTheDocument();
+    // /w/src/main.ts → dimmed "src"; root-level README.md gets no dir span.
+    expect(screen.getByText("src")).toHaveClass("modal-item-dir");
+  });
+
+  it("closes when the overlay backdrop is clicked", async () => {
+    const { container } = render(<QuickOpen />);
+    await screen.findByText("README.md");
+
+    fireEvent.click(container.querySelector(".modal-overlay") as HTMLElement);
+
+    expect(useUiStore.getState().activeModal).toBeNull();
+  });
+
+  it("does not close when clicking inside the modal", async () => {
+    const { container } = render(<QuickOpen />);
+    await screen.findByText("README.md");
+
+    fireEvent.click(container.querySelector(".modal") as HTMLElement);
+
+    expect(useUiStore.getState().activeModal).toBe("quickOpen");
+  });
+
+  it("marks the keyboard-selected row with the styled selected class", async () => {
+    render(<QuickOpen />);
+
+    const item = (await screen.findByText("main.ts")).closest("li") as HTMLElement;
+    expect(item).toHaveClass("selected"); // first result selected by default
   });
 
   it("fuzzy-filters by the typed query", async () => {

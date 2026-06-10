@@ -13,10 +13,14 @@ import { isImagePath, isPdfPath } from "../lib/fileTypes";
 
 export function useOpenFileBridge(): void {
   const pendingOpenPath = useWorkspaceStore((s) => s.pendingOpenPath);
+  // Re-run even when the same path is requested again (e.g. a second search
+  // result in the same file at a different line).
+  const pendingOpenSeq = useWorkspaceStore((s) => s.pendingOpenSeq);
 
   useEffect(() => {
     if (!pendingOpenPath) return;
     const path = pendingOpenPath;
+    const position = useWorkspaceStore.getState().pendingOpenPosition;
 
     if (isPdfPath(path)) {
       useEditorStore.getState().openDoc({
@@ -43,24 +47,32 @@ export function useOpenFileBridge(): void {
       return;
     }
 
-    let active = true;
+    // `superseded` (not "cancelled"): when a newer open request lands while
+    // this read is in flight, the resolved file must STILL open — it just must
+    // not steal the active tab or clear the newer request's pending state.
+    let superseded = false;
     (async () => {
       try {
         const content = await readFile(path);
-        if (!active) return;
         useEditorStore.getState().openDoc({
           path,
           content,
           language: languageForPath(path),
+          activate: !superseded,
         });
+        if (!superseded && position) {
+          useEditorStore
+            .getState()
+            .setPendingReveal(path, position.line, position.column ?? 1);
+        }
       } catch (e) {
         console.error("Failed to open", path, e);
       } finally {
-        if (active) useWorkspaceStore.getState().clearPendingOpen();
+        if (!superseded) useWorkspaceStore.getState().clearPendingOpen();
       }
     })();
     return () => {
-      active = false;
+      superseded = true;
     };
-  }, [pendingOpenPath]);
+  }, [pendingOpenPath, pendingOpenSeq]);
 }

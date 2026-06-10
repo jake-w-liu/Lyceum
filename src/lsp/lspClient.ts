@@ -24,6 +24,9 @@ export interface LspSession {
    * does not advertise them. Empty until the handshake resolves.
    */
   capabilities: Record<string, unknown>;
+  /** True when this session was spawned by the automatic crash-restart below.
+   * A restarted session that dies again is NOT restarted (no crash loop). */
+  restarted: boolean;
 }
 
 const sessions = new Map<string, LspSession>();
@@ -65,6 +68,27 @@ export function setDiagnosticsSink(
   diagnosticsSink = fn;
 }
 
+/**
+ * Provider for the currently-open documents of a language, set by the Monaco
+ * integration (decouples client<->monaco). Used when a session (re)starts so
+ * already-open models are didOpen-ed: without it their didChanges are dropped
+ * (openDocs gate) while hover/completion query a doc the server never saw.
+ */
+export interface OpenLspDoc {
+  uri: string;
+  languageId: string;
+  text: string;
+}
+let openDocsProvider: ((languageId: string) => OpenLspDoc[]) | null = null;
+export function setOpenDocsProvider(
+  fn: (languageId: string) => OpenLspDoc[],
+): void {
+  openDocsProvider = fn;
+}
+
+/** Delay before the single automatic restart after an unexpected server exit. */
+const RESTART_DELAY_MS = 1000;
+
 export function getSession(languageId: string): LspSession | undefined {
   return sessions.get(languageId);
 }
@@ -74,6 +98,7 @@ export async function ensureServer(
   languageId: string,
   rootPath: string | null,
   juliaPath: string | null,
+  options?: { isRestart?: boolean },
 ): Promise<LspSession | null> {
   const existing = sessions.get(languageId);
   if (existing) return existing;
@@ -103,6 +128,7 @@ export async function ensureServer(
     unlistens,
     openDocs: new Set(),
     capabilities: {},
+    restarted: options?.isRestart === true,
   };
   sessions.set(languageId, session);
 
@@ -113,9 +139,23 @@ export async function ensureServer(
         await onLspExit(id, () => {
           useLspStatusStore.getState().setStatus(languageId, "off");
           rpc.dispose("server exited");
-          if (sessions.get(languageId) === session) {
-            sessions.delete(languageId);
-          }
+          // Only an UNEXPECTED exit still owns the registry entry: stopServer
+          // removes the session before killing, so this branch means a crash.
+          if (sessions.get(languageId) !== session) return;
+          sessions.delete(languageId);
+          // Attempt ONE automatic restart so a crashed server recovers without
+          // requiring a new file of that language to be opened. A session that
+          // was itself the restart is never restarted again (no crash loop).
+          if (session.restarted) return;
+          setTimeout(() => {
+            if (sessions.has(languageId)) return; // already restarted elsewhere
+            // Nothing of this language open anymore (e.g. editor unmounted and
+            // stopped the servers): a restart would leak a headless server.
+            if ((openDocsProvider?.(languageId) ?? []).length === 0) return;
+            void ensureServer(languageId, rootPath, juliaPath, {
+              isRestart: true,
+            }).catch(() => {});
+          }, RESTART_DELAY_MS);
         }),
       );
       // A concurrent stopServer (e.g. the editor unmounting during a cold-start
@@ -145,6 +185,15 @@ export async function ensureServer(
       session.capabilities = initResult?.capabilities ?? {};
       rpc.notify("initialized", {});
       useLspStatusStore.getState().setStatus(languageId, "ready");
+      // Tell the fresh server about every already-open document of this
+      // language. Models created AFTER the session didOpen themselves, but a
+      // session started when models already exist (a crash restart, or a slow
+      // first start racing multiple opens) must sync them here. `void`: didOpen
+      // awaits session.ready (this function), so it proceeds right after the
+      // handshake settles; awaiting it here would deadlock.
+      for (const doc of openDocsProvider?.(languageId) ?? []) {
+        void didOpen(session, doc.uri, doc.languageId, doc.text);
+      }
     } catch (e) {
       // Start/initialize failed (e.g. server binary missing OR a started server
       // that never answers initialize within the cap): tear everything down and

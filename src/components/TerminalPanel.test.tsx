@@ -42,4 +42,16 @@ describe("TerminalPanel", () => {
     await user.click(screen.getByRole("button", { name: "Close Terminal 2" }));
     expect(useTerminalStore.getState().terminals).toHaveLength(1);
   });
+
+  it("auto-creates a fresh terminal when the last one is closed", async () => {
+    const user = userEvent.setup();
+    render(<TerminalPanel />);
+    expect(useTerminalStore.getState().terminals).toHaveLength(1);
+
+    await user.click(screen.getByRole("button", { name: "Close Terminal 1" }));
+
+    // The panel never sits empty: a replacement terminal is created.
+    expect(useTerminalStore.getState().terminals).toHaveLength(1);
+    expect(screen.getByRole("tab", { name: "Terminal 2" })).toBeInTheDocument();
+  });
 });

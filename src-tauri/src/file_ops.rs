@@ -12,18 +12,51 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Monotonic counter making temp-file names unique within this process.
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// Largest file the text editor will open. Beyond this a read is refused with a
+/// clear error instead of slurping gigabytes into the webview.
+const MAX_TEXT_FILE_SIZE: u64 = 50 * 1024 * 1024;
+
+/// Largest file `read_file_bytes` will load (PDFs can be large, but a stray
+/// multi-GB artifact must not be materialized in memory twice over IPC).
+const MAX_BINARY_FILE_SIZE: u64 = 512 * 1024 * 1024;
+
+/// Render a byte count for error messages, e.g. "123.4 MiB".
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
+}
+
 /// Read a file to a string. Valid UTF-8 is returned as-is; a file that is not
 /// valid UTF-8 (e.g. Latin-1 / legacy encoding) is decoded lossily so it can
-/// still be opened and viewed rather than failing the open outright.
+/// still be opened and viewed rather than failing the open outright. Files
+/// above `MAX_TEXT_FILE_SIZE` are refused (stat'd before reading) so a huge
+/// log/dataset cannot wedge the editor.
 #[tauri::command]
 pub fn read_file(path: String) -> Result<String, String> {
-    match std::fs::read_to_string(&path) {
+    let meta = std::fs::metadata(&path).map_err(|e| format!("{path}: {e}"))?;
+    if meta.len() > MAX_TEXT_FILE_SIZE {
+        return Err(format!(
+            "{path}: file too large to open ({}, limit {})",
+            human_size(meta.len()),
+            human_size(MAX_TEXT_FILE_SIZE)
+        ));
+    }
+    // Read the bytes once and decode in place: the lossy fallback reuses the
+    // already-read buffer instead of reading the file a second time.
+    let bytes = std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
+    match String::from_utf8(bytes) {
         Ok(s) => Ok(s),
-        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
-            let bytes = std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
-            Ok(String::from_utf8_lossy(&bytes).into_owned())
-        }
-        Err(e) => Err(format!("{path}: {e}")),
+        Err(e) => Ok(String::from_utf8_lossy(e.as_bytes()).into_owned()),
     }
 }
 
@@ -92,8 +125,17 @@ pub fn app_config_path(app: tauri::AppHandle, name: String) -> Result<String, St
     Ok(dir.join(name).to_string_lossy().to_string())
 }
 
-/// Read a file's raw bytes (used by the PDF viewer, M6).
+/// Read a file's raw bytes (used by the PDF viewer, M6). Files above
+/// `MAX_BINARY_FILE_SIZE` are refused (stat'd before reading).
 fn read_file_bytes_impl(path: &str) -> Result<Vec<u8>, String> {
+    let meta = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?;
+    if meta.len() > MAX_BINARY_FILE_SIZE {
+        return Err(format!(
+            "{path}: file too large to open ({}, limit {})",
+            human_size(meta.len()),
+            human_size(MAX_BINARY_FILE_SIZE)
+        ));
+    }
     std::fs::read(path).map_err(|e| format!("{path}: {e}"))
 }
 

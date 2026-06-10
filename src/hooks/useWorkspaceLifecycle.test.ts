@@ -1,5 +1,26 @@
-import { act, renderHook } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// Native dialog plugin (used by askDiscard) and the window-close listener.
+const askMock = vi.hoisted(() => vi.fn(async () => true));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: askMock }));
+
+type CloseHandler = (event: {
+  preventDefault: () => void;
+}) => void | Promise<void>;
+const { onCloseRequestedMock, getCloseHandler } = vi.hoisted(() => {
+  let handler: CloseHandler | null = null;
+  const onCloseRequestedMock = vi.fn(async (h: CloseHandler) => {
+    handler = h;
+    return () => {
+      handler = null;
+    };
+  });
+  return { onCloseRequestedMock, getCloseHandler: () => handler };
+});
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({ onCloseRequested: onCloseRequestedMock }),
+}));
 
 import { initialEditorData, useEditorStore } from "../state/editorStore";
 import { initialGitData, useGitStore } from "../state/gitStore";
@@ -61,7 +82,11 @@ function seedWorkspaceScopedUi(root: string, dirty = false) {
 }
 
 describe("useWorkspaceLifecycle", () => {
-  beforeEach(resetStores);
+  beforeEach(() => {
+    resetStores();
+    askMock.mockReset().mockResolvedValue(true);
+    onCloseRequestedMock.mockClear();
+  });
   afterEach(() => vi.unstubAllGlobals());
 
   it("clears workspace-scoped UI when the workspace root changes", () => {
@@ -116,34 +141,92 @@ describe("useWorkspaceLifecycle", () => {
     expect(useLspStatusStore.getState().byLanguage).toEqual({});
   });
 
-  it("reverts a workspace change when dirty tabs are not discarded", () => {
+  it("reverts a workspace change when dirty tabs are not discarded", async () => {
     seedWorkspaceScopedUi("/old", true);
-    vi.stubGlobal("confirm", vi.fn(() => false));
+    askMock.mockResolvedValue(false);
     renderHook(() => useWorkspaceLifecycle());
 
-    act(() => {
+    await act(async () => {
       useWorkspaceStore.getState().openWorkspace("/new");
     });
 
-    expect(confirm).toHaveBeenCalledWith(
+    expect(askMock).toHaveBeenCalledWith(
       "Discard unsaved changes before switching folders?",
+      expect.anything(),
     );
     expect(useWorkspaceStore.getState().rootPath).toBe("/old");
     expect(useEditorStore.getState().docs).toHaveLength(1);
     expect(useEditorStore.getState().docs[0].content).toBe("dirty");
   });
 
-  it("clears workspace-scoped UI when dirty tabs are explicitly discarded", () => {
+  it("clears workspace-scoped UI when dirty tabs are explicitly discarded", async () => {
     seedWorkspaceScopedUi("/old", true);
-    vi.stubGlobal("confirm", vi.fn(() => true));
+    askMock.mockResolvedValue(true);
     renderHook(() => useWorkspaceLifecycle());
 
-    act(() => {
+    await act(async () => {
       useWorkspaceStore.getState().openWorkspace("/new");
     });
 
-    expect(useWorkspaceStore.getState().rootPath).toBe("/new");
+    await waitFor(() =>
+      expect(useWorkspaceStore.getState().rootPath).toBe("/new"),
+    );
     expect(useEditorStore.getState().docs).toEqual([]);
     expect(usePreviewStore.getState().pdfPath).toBeNull();
+  });
+
+  describe("window close guard", () => {
+    it("lets a clean window close without prompting", async () => {
+      seedWorkspaceScopedUi("/old", false);
+      renderHook(() => useWorkspaceLifecycle());
+      await waitFor(() => expect(getCloseHandler()).not.toBeNull());
+
+      const preventDefault = vi.fn();
+      await act(async () => {
+        await getCloseHandler()!({ preventDefault });
+      });
+
+      expect(askMock).not.toHaveBeenCalled();
+      expect(preventDefault).not.toHaveBeenCalled();
+    });
+
+    it("prevents the close when discarding dirty docs is declined", async () => {
+      seedWorkspaceScopedUi("/old", true);
+      askMock.mockResolvedValue(false);
+      renderHook(() => useWorkspaceLifecycle());
+      await waitFor(() => expect(getCloseHandler()).not.toBeNull());
+
+      const preventDefault = vi.fn();
+      await act(async () => {
+        await getCloseHandler()!({ preventDefault });
+      });
+
+      expect(askMock).toHaveBeenCalledWith(
+        "Discard unsaved changes and close the window?",
+        expect.anything(),
+      );
+      expect(preventDefault).toHaveBeenCalledTimes(1);
+    });
+
+    it("allows the close when the discard is confirmed", async () => {
+      seedWorkspaceScopedUi("/old", true);
+      askMock.mockResolvedValue(true);
+      renderHook(() => useWorkspaceLifecycle());
+      await waitFor(() => expect(getCloseHandler()).not.toBeNull());
+
+      const preventDefault = vi.fn();
+      await act(async () => {
+        await getCloseHandler()!({ preventDefault });
+      });
+
+      expect(preventDefault).not.toHaveBeenCalled();
+    });
+
+    it("detaches the close listener on unmount", async () => {
+      const { unmount } = renderHook(() => useWorkspaceLifecycle());
+      await waitFor(() => expect(getCloseHandler()).not.toBeNull());
+      unmount();
+      expect(getCloseHandler()).toBeNull();
+    });
   });
 });

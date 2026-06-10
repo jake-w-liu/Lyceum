@@ -98,9 +98,9 @@ describe("focusAdjacentTab", () => {
 });
 
 describe("closeActiveTab", () => {
-  it("closes the active tab", () => {
+  it("closes the active tab", async () => {
     get().openDoc({ path: "/a", content: "", language: "plaintext" });
-    closeActiveTab();
+    await closeActiveTab();
     expect(get().docs).toHaveLength(0);
   });
 });

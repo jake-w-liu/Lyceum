@@ -15,6 +15,61 @@ export function ContextMenu() {
   const menuRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ left: x, top: y });
 
+  // Capture the element that had focus when the menu opened, and restore it on
+  // close/unmount: the focused menu item unmounts, which would otherwise drop
+  // focus to <body> and strand keyboard users. Declared before the
+  // focus-first-item effect so the capture happens before focus moves.
+  useEffect(() => {
+    if (!open) return;
+    const invoker =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    return () => {
+      if (invoker?.isConnected) invoker.focus();
+    };
+  }, [open]);
+
+  // Focus the first enabled item when the menu opens so keyboard users can
+  // navigate immediately (Enter then activates the focused item natively).
+  useEffect(() => {
+    if (!open) return;
+    const first = menuRef.current?.querySelector<HTMLButtonElement>(
+      ".context-menu-item:not(:disabled)",
+    );
+    first?.focus();
+  }, [open, items]);
+
+  // Roving focus: ArrowDown/ArrowUp move through enabled items with wrap;
+  // Home/End jump to the first/last. Enter is the button's native activation.
+  function onMenuKeyDown(e: React.KeyboardEvent) {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
+    const menu = menuRef.current;
+    if (!menu) return;
+    const focusable = Array.from(
+      menu.querySelectorAll<HTMLButtonElement>(
+        ".context-menu-item:not(:disabled)",
+      ),
+    );
+    if (focusable.length === 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const current = focusable.indexOf(
+      document.activeElement as HTMLButtonElement,
+    );
+    let next: number;
+    if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = focusable.length - 1;
+    else if (e.key === "ArrowDown")
+      next = current < 0 ? 0 : (current + 1) % focusable.length;
+    else
+      next =
+        current < 0
+          ? focusable.length - 1
+          : (current - 1 + focusable.length) % focusable.length;
+    focusable[next].focus();
+  }
+
   // Re-clamp whenever the menu opens at a new point or its items change. Start at
   // the click point, then flip back inside the viewport if it would overflow.
   useLayoutEffect(() => {
@@ -75,6 +130,7 @@ export function ContextMenu() {
         role="menu"
         style={{ left: pos.left, top: pos.top }}
         onMouseDown={(e) => e.stopPropagation()}
+        onKeyDown={onMenuKeyDown}
       >
         {items.map((item, i) => (
           <button

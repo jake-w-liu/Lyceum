@@ -1,26 +1,41 @@
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
 use notify::event::{EventKind, MetadataKind, ModifyKind};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 const WORKSPACE_FS_CHANGE_EVENT: &str = "workspace:fs-change";
 
+/// Active watchers keyed by window label: each window owns at most one watcher,
+/// and watching/unwatching in one window never disturbs another window's.
 #[derive(Default)]
 pub struct WorkspaceWatchManager {
-    active: Mutex<Option<ActiveWatcher>>,
+    active: Mutex<HashMap<String, ActiveWatcher>>,
 }
 
 impl WorkspaceWatchManager {
-    /// Drop the active watcher (called on app exit). Dropping the
+    /// Drop all active watchers (called on app exit). Dropping a
     /// `RecommendedWatcher` stops its notify worker threads, mirroring the other
     /// managers' `shutdown_all()` so nothing emits during teardown.
     pub fn shutdown_all(&self) {
         if let Ok(mut active) = self.active.lock() {
-            *active = None;
+            active.clear();
         }
+    }
+
+    /// Drop the destroyed window's watcher (if any), stopping its notify worker
+    /// threads and releasing its fds. The entry is removed under the lock but
+    /// dropped after the guard is released, since dropping a
+    /// `RecommendedWatcher` can block while its worker threads shut down.
+    pub fn remove_window(&self, label: &str) {
+        let removed = match self.active.lock() {
+            Ok(mut active) => active.remove(label),
+            Err(_) => None,
+        };
+        drop(removed);
     }
 }
 
@@ -41,16 +56,29 @@ pub struct WorkspaceFsEvent {
 #[tauri::command]
 pub fn watch_workspace(
     app: AppHandle,
+    window: tauri::Window,
     state: State<'_, WorkspaceWatchManager>,
     root: String,
 ) -> Result<(), String> {
     let root_path = canonical_dir(&root)?;
+    // Widen the asset protocol scope to the opened workspace. The static config
+    // scope is empty, so preview `asset:` URLs can only reach folders the user
+    // actually opened (and workspaces outside $HOME, e.g. /tmp, work too).
+    // A failure here breaks HTML preview (`asset:` URLs stay out of scope) but
+    // must not break watching, so log it and continue.
+    if let Err(err) = app.asset_protocol_scope().allow_directory(&root_path, true) {
+        eprintln!(
+            "failed to add {} to the asset protocol scope (HTML preview may not load): {err}",
+            root_path.display()
+        );
+    }
+    let label = window.label().to_string();
     let mut active = state
         .active
         .lock()
         .map_err(|_| "workspace watcher lock poisoned".to_string())?;
     if active
-        .as_ref()
+        .get(&label)
         .is_some_and(|watcher| watcher.root == root_path)
     {
         return Ok(());
@@ -60,6 +88,7 @@ pub fn watch_workspace(
     let watched_root = root_path.clone();
     let requested_root = PathBuf::from(&root);
     let app_for_events = app.clone();
+    let label_for_events = label.clone();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         let Ok(event) = event else { return };
         let Some(paths) = workspace_event_paths(&watched_root, &requested_root, &event) else {
@@ -70,31 +99,40 @@ pub fn watch_workspace(
             paths,
             kind: format!("{:?}", event.kind),
         };
-        let _ = app_for_events.emit(WORKSPACE_FS_CHANGE_EVENT, payload);
+        let _ = app_for_events.emit_to(
+            label_for_events.as_str(),
+            WORKSPACE_FS_CHANGE_EVENT,
+            payload,
+        );
     })
     .map_err(|e| format!("watcher setup failed: {e}"))?;
 
     watcher
         .watch(&root_path, RecursiveMode::Recursive)
         .map_err(|e| format!("{}: {e}", root_path.display()))?;
-    *active = Some(ActiveWatcher {
-        root: root_path,
-        requested_root: root,
-        _watcher: watcher,
-    });
+    active.insert(
+        label,
+        ActiveWatcher {
+            root: root_path,
+            requested_root: root,
+            _watcher: watcher,
+        },
+    );
     Ok(())
 }
 
 #[tauri::command]
 pub fn unwatch_workspace(
+    window: tauri::Window,
     state: State<'_, WorkspaceWatchManager>,
     root: Option<String>,
 ) -> Result<(), String> {
+    let label = window.label();
     let mut active = state
         .active
         .lock()
         .map_err(|_| "workspace watcher lock poisoned".to_string())?;
-    let should_clear = match (active.as_ref(), root.as_deref()) {
+    let should_clear = match (active.get(label), root.as_deref()) {
         (None, _) => false,
         (Some(_), None) => true,
         (Some(watcher), Some(root)) => {
@@ -106,7 +144,7 @@ pub fn unwatch_workspace(
         }
     };
     if should_clear {
-        *active = None;
+        active.remove(label);
     }
     Ok(())
 }

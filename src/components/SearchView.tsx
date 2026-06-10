@@ -1,9 +1,10 @@
 // Workspace search view (Cmd/Ctrl+Shift+F). Debounced content search over the
-// open folder via the Rust `search_workspace` command; clicking a result opens
-// the file. Lives in the sidebar's "search" activity view.
+// open folder via the Rust `search_workspace` command; clicking a result (or
+// ArrowUp/Down + Enter from the input, QuickOpen-style) opens the file at the
+// match's line/column. Lives in the sidebar's "search" activity view.
 
-import { useEffect, useRef } from "react";
-import { useSearchStore } from "../state/searchStore";
+import { useEffect, useRef, useState } from "react";
+import { useSearchStore, type SearchMatch } from "../state/searchStore";
 import { baseName, useWorkspaceStore } from "../state/workspaceStore";
 import { searchWorkspace } from "../lib/ipc";
 
@@ -18,11 +19,15 @@ export function SearchView() {
   // Monotonic request id: only the latest in-flight search may write state, so a
   // slow earlier response can't clobber newer results (out-of-order race).
   const seqRef = useRef(0);
+  const [error, setError] = useState<string | null>(null);
+  const [activeIndex, setActiveIndex] = useState(0);
 
   useEffect(() => {
     if (timer.current) clearTimeout(timer.current);
     const trimmed = query.trim();
     const seq = ++seqRef.current;
+    setError(null);
+    setActiveIndex(0);
     if (!rootPath || trimmed.length < 2) {
       // Invalidate any in-flight search so it can't later overwrite the cleared list.
       useSearchStore.getState().setResults([]);
@@ -38,8 +43,11 @@ export function SearchView() {
         .then((r) => {
           if (seq === seqRef.current) useSearchStore.getState().setResults(r);
         })
-        .catch(() => {
-          if (seq === seqRef.current) useSearchStore.getState().setResults([]);
+        .catch((e) => {
+          if (seq === seqRef.current) {
+            useSearchStore.getState().setResults([]);
+            setError(String(e));
+          }
         })
         .finally(() => {
           if (seq === seqRef.current) useSearchStore.getState().setSearching(false);
@@ -52,13 +60,35 @@ export function SearchView() {
     };
   }, [query, rootPath]);
 
-  const status = searching
-    ? "Searching…"
-    : results.length > 0
-      ? `${results.length} result${results.length === 1 ? "" : "s"}`
-      : query.trim().length >= 2
-        ? "No results"
-        : "";
+  const openResult = (m: SearchMatch) =>
+    useWorkspaceStore
+      .getState()
+      .requestOpenFile(m.path, { line: m.line, column: m.column });
+
+  // QuickOpen-style keyboard navigation from the search input.
+  function onInputKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setActiveIndex((i) => Math.min(i + 1, Math.max(results.length - 1, 0)));
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setActiveIndex((i) => Math.max(i - 1, 0));
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      const m = results[activeIndex];
+      if (m) openResult(m);
+    }
+  }
+
+  const status = error
+    ? `Search failed: ${error}`
+    : searching
+      ? "Searching…"
+      : results.length > 0
+        ? `${results.length} result${results.length === 1 ? "" : "s"}`
+        : query.trim().length >= 2
+          ? "No results"
+          : "";
 
   return (
     <div className="search-view">
@@ -69,15 +99,28 @@ export function SearchView() {
         value={query}
         autoFocus
         onChange={(e) => useSearchStore.getState().setQuery(e.target.value)}
+        onKeyDown={onInputKeyDown}
       />
-      <div className="search-status">{status}</div>
-      <ul className="search-results">
+      <div className="search-status" role={error ? "alert" : undefined}>
+        {status}
+      </div>
+      <ul className="search-results" role="listbox" aria-label="Search results">
         {results.map((m, i) => (
           <li
             key={`${m.path}:${m.line}:${m.column}:${i}`}
-            className="search-result"
+            className={"search-result" + (i === activeIndex ? " active" : "")}
             title={`${m.path}:${m.line}`}
-            onClick={() => useWorkspaceStore.getState().requestOpenFile(m.path)}
+            role="option"
+            aria-selected={i === activeIndex}
+            tabIndex={0}
+            onMouseEnter={() => setActiveIndex(i)}
+            onClick={() => openResult(m)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                openResult(m);
+              }
+            }}
           >
             <span className="search-result-loc">
               {baseName(m.path)}:{m.line}

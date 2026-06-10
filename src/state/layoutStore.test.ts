@@ -9,6 +9,8 @@ import {
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
   initialLayoutData,
+  persistedLayoutData,
+  sanitizeLayoutData,
   useLayoutStore,
 } from "./layoutStore";
 
@@ -153,6 +155,44 @@ describe("layoutStore", () => {
       expect(get().pdfPanelWidth).toBe(PDF_MIN_WIDTH);
       get().setPdfPanelWidth(99999);
       expect(get().pdfPanelWidth).toBe(PDF_MAX_WIDTH);
+    });
+  });
+
+  describe("layout persistence helpers", () => {
+    it("persistedLayoutData captures layout but not the transient editorPreview", () => {
+      get().setSidebarWidth(320);
+      get().setPanelPosition("right");
+      get().toggleEditorPreview();
+
+      const data = persistedLayoutData(get());
+      expect(data.sidebarWidth).toBe(320);
+      expect(data.panelPosition).toBe("right");
+      expect("editorPreview" in data).toBe(false);
+    });
+
+    it("sanitizeLayoutData round-trips persisted data", () => {
+      get().setSidebarWidth(320);
+      get().setPanelPosition("right");
+      get().showBottomTab("output");
+
+      const restored = sanitizeLayoutData(
+        JSON.parse(JSON.stringify(persistedLayoutData(get()))),
+      );
+      expect(restored).toEqual(persistedLayoutData(get()));
+    });
+
+    it("sanitizeLayoutData drops malformed fields and clamps sizes", () => {
+      expect(sanitizeLayoutData(null)).toEqual({});
+      expect(sanitizeLayoutData("junk")).toEqual({});
+      expect(
+        sanitizeLayoutData({
+          sidebarWidth: 99999,
+          panelPosition: "left",
+          activeBottomTab: "nope",
+          bottomPanelVisible: "yes",
+          pdfPanelWidth: Number.NaN,
+        }),
+      ).toEqual({ sidebarWidth: SIDEBAR_MAX_WIDTH });
     });
   });
 });

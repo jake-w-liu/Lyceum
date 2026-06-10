@@ -56,18 +56,12 @@ struct OutputLine {
     line: String,
 }
 
-/// Return usable installed LaTeX tools in Lyceum's priority order.
-#[tauri::command]
-pub fn resolve_latex_tools() -> Vec<LatexToolDto> {
-    let path = process_path();
-    resolve_latex_tools_impl(&path)
-}
-
 /// Compile one concrete `.tex` file. The frontend must save the editor buffer
 /// before invoking this command.
 #[tauri::command]
 pub fn run_latex_build(
     app: AppHandle,
+    window: tauri::Window,
     state: State<RunManager>,
     id: String,
     tex_path: String,
@@ -77,9 +71,11 @@ pub fn run_latex_build(
     let plan = plan_latex_build_impl(Path::new(&tex_path), &configured_command, &path)?;
     let removed_stale_pdf = remove_stale_pdf(&plan.pdf_path)?;
 
+    let label = window.label().to_string();
     let out_event = format!("build:output:{id}");
     emit_output(
         &app,
+        &label,
         &out_event,
         "stdout",
         format!("$ {}   (cwd: {})", plan.command, plan.cwd.display()),
@@ -87,6 +83,7 @@ pub fn run_latex_build(
     if removed_stale_pdf {
         emit_output(
             &app,
+            &label,
             &out_event,
             "stdout",
             format!("[latex] removed stale {}", plan.pdf_path.display()),
@@ -108,8 +105,9 @@ pub fn run_latex_build(
 
     julia::stream_child(
         app,
+        label,
         child,
-        id.clone(),
+        julia::run_key(&window, &id),
         state.runs.clone(),
         out_event,
         format!("build:exit:{id}"),
@@ -264,8 +262,9 @@ fn remove_stale_pdf(path: &Path) -> Result<bool, String> {
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
-fn emit_output(app: &AppHandle, event: &str, stream: &str, line: String) {
-    let _ = app.emit(
+fn emit_output(app: &AppHandle, label: &str, event: &str, stream: &str, line: String) {
+    let _ = app.emit_to(
+        label,
         event,
         OutputLine {
             stream: stream.to_string(),

@@ -3,7 +3,8 @@
 // the produced PDF as an editor tab.
 
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { type UnlistenFn } from "@tauri-apps/api/event";
+import { listenScoped } from "./windowEvents";
 import { useSettingsStore } from "../state/settingsStore";
 import { useWorkspaceStore } from "../state/workspaceStore";
 import {
@@ -12,7 +13,12 @@ import {
   useOutputStore,
 } from "../state/outputStore";
 import { useLayoutStore } from "../state/layoutStore";
-import { getActiveDoc, isTextDoc, useEditorStore } from "../state/editorStore";
+import {
+  flushPendingEdits,
+  getActiveDoc,
+  isTextDoc,
+  useEditorStore,
+} from "../state/editorStore";
 import { useTreeStore } from "../state/treeStore";
 import { writeFile } from "./ipc";
 import { isTexSourcePath } from "./fileTypes";
@@ -42,6 +48,8 @@ export async function runLatexBuild(
 ): Promise<void> {
   // Refuse a second run while one is in progress (shared Output panel).
   if (useOutputStore.getState().running) return;
+  // Commit any debounced editor->store write so we build the latest buffer.
+  flushPendingEdits();
   const configuredCommand =
     useSettingsStore.getState().settings.latexBuildCommand;
   const editor = useEditorStore.getState();
@@ -67,6 +75,23 @@ export async function runLatexBuild(
     out.append("No latexBuildCommand configured (see settings).");
     return;
   }
+  const id = `build-${(buildSeq += 1)}`;
+  let pdfPathForSuccess = pdfPathForTexPath(targetPath);
+  let commandForMessages = configuredCommand;
+  let planResolved = false;
+  let pendingExitCode: number | null = null;
+  let handledExit = false;
+  // Claim the run synchronously BEFORE the first await: the `running` guard at
+  // the top only prevents re-entry once this is set, so claiming after the
+  // (async) save would let a double-click start two latexmk builds.
+  out.setRunning(true);
+  out.setRunId(id);
+  const releaseRun = () => {
+    const store = useOutputStore.getState();
+    store.setRunning(false);
+    store.setRunId(null);
+  };
+
   if (targetDoc) {
     try {
       await writeFile(targetDoc.path, targetDoc.content);
@@ -75,28 +100,13 @@ export async function runLatexBuild(
       useEditorStore.getState().markSaved(targetDoc.path, targetDoc.content);
     } catch (e) {
       out.append(`failed to save ${targetDoc.name}: ${String(e)}`);
+      releaseRun();
       return;
     }
   }
 
-  const id = `build-${(buildSeq += 1)}`;
-  let pdfPathForSuccess = pdfPathForTexPath(targetPath);
-  let commandForMessages = configuredCommand;
-  let planResolved = false;
-  let pendingExitCode: number | null = null;
-  let handledExit = false;
-  out.setRunning(true);
-  out.setRunId(id);
-
-  const offData = await listen<{ stream: string; line: string }>(
-    `build:output:${id}`,
-    (event) =>
-      appendOutputBuffered(
-        event.payload.stream === "stderr"
-          ? `[stderr] ${event.payload.line}`
-          : event.payload.line,
-      ),
-  );
+  let offData: UnlistenFn | null = null;
+  let offExit: UnlistenFn | null = null;
   const handleExit = (exitCode: number) => {
     if (handledExit) return;
     handledExit = true;
@@ -108,10 +118,9 @@ export async function runLatexBuild(
       exitCode,
     );
     if (missingToolMessage) store.append(missingToolMessage);
-    store.setRunning(false);
-    store.setRunId(null);
-    offData();
-    offExit();
+    releaseRun();
+    offData?.();
+    offExit?.();
     if (exitCode === 0) {
       useTreeStore.getState().refresh();
       store.append(`[latex] wrote ${pdfPathForSuccess}`);
@@ -122,12 +131,21 @@ export async function runLatexBuild(
       }
     }
   };
-  const offExit = await listen<number>(`build:exit:${id}`, (event) => {
-    pendingExitCode = event.payload;
-    if (planResolved) handleExit(event.payload);
-  });
-
   try {
+    offData = await listenScoped<{ stream: string; line: string }>(
+      `build:output:${id}`,
+      (event) =>
+        appendOutputBuffered(
+          event.payload.stream === "stderr"
+            ? `[stderr] ${event.payload.line}`
+            : event.payload.line,
+        ),
+    );
+    offExit = await listenScoped<number>(`build:exit:${id}`, (event) => {
+      pendingExitCode = event.payload;
+      if (planResolved) handleExit(event.payload);
+    });
+
     const plan = await invoke<LatexBuildPlan>("run_latex_build", {
       id,
       texPath: targetPath,
@@ -143,12 +161,12 @@ export async function runLatexBuild(
     planResolved = true;
     if (pendingExitCode !== null) handleExit(pendingExitCode);
   } catch (e) {
-    const store = useOutputStore.getState();
-    store.append(cleanInvokeError(e));
-    store.setRunning(false);
-    store.setRunId(null);
-    offData();
-    offExit();
+    // Covers listen() failing (not inside Tauri) and the build invoke failing:
+    // surface the error and release the run claim on every failure path.
+    useOutputStore.getState().append(cleanInvokeError(e));
+    releaseRun();
+    offData?.();
+    offExit?.();
   }
 }
 

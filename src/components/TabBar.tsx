@@ -2,6 +2,7 @@
 // indicator, an unsaved (dirty) dot, and a per-tab close button. Reads and
 // drives editor state via useEditorStore.
 
+import { useEffect, useRef } from "react";
 import { Icon } from "./Icon";
 import {
   isInlinePreviewPath,
@@ -32,6 +33,23 @@ export function TabBar() {
   const toggleEditorPreview = useLayoutStore((s) => s.toggleEditorPreview);
   const outputRunning = useOutputStore((s) => s.running);
 
+  const tabListRef = useRef<HTMLDivElement>(null);
+
+  // Keep the active tab in view when activation happens off-screen (e.g. via
+  // quick open or Ctrl+Tab) in an overflowing tab strip.
+  useEffect(() => {
+    if (!activePath) return;
+    tabListRef.current
+      ?.querySelector(".tab.active")
+      ?.scrollIntoView?.({ inline: "nearest", block: "nearest" });
+  }, [activePath]);
+
+  // Confirm-dirty-then-close shared by the close button, middle-click, and the
+  // tab context menu. `confirmDiscard` is async (native dialog).
+  async function closeWithConfirm(path: string) {
+    if (await confirmDiscard(path)) closeDoc(path);
+  }
+
   const activeDoc = docs.find((d) => d.path === activePath);
   const canPreview = !!activeDoc && isInlinePreviewPath(activeDoc.path);
   const canLatexPreview =
@@ -46,25 +64,28 @@ export function TabBar() {
     const items: ContextMenuItem[] = [
       {
         label: "Close",
-        run: () => {
-          if (confirmDiscard(doc.path)) store.closeDoc(doc.path);
-        },
+        run: () => void closeWithConfirm(doc.path),
       },
       {
         label: "Close Others",
-        run: () => store.closeOtherDocs(doc.path),
+        run: () => void store.closeOtherDocs(doc.path),
         separatorBefore: true,
       },
-      { label: "Close to the Right", run: () => store.closeDocsToRight(doc.path) },
-      { label: "Close Saved", run: () => store.closeSavedDocs() },
-      { label: "Close All", run: () => store.closeAllDocs() },
+      { label: "Close to the Right", run: () => void store.closeDocsToRight(doc.path) },
+      { label: "Close Saved", run: () => void store.closeSavedDocs() },
+      { label: "Close All", run: () => void store.closeAllDocs() },
     ];
     useContextMenuStore.getState().openMenu(e.clientX, e.clientY, items);
   }
 
   return (
     <div className="tab-bar">
-      <div className="tab-list" role="tablist" aria-label="Open editors">
+      <div
+        className="tab-list"
+        role="tablist"
+        aria-label="Open editors"
+        ref={tabListRef}
+      >
         {docs.map((doc) => {
           const active = doc.path === activePath;
           return (
@@ -72,6 +93,14 @@ export function TabBar() {
               className={"tab" + (active ? " active" : "")}
               key={doc.path}
               onContextMenu={(e) => openTabMenu(e, doc)}
+              // Middle-click closes the tab (VS Code behavior), with the same
+              // dirty-confirm path as the close button.
+              onAuxClick={(e) => {
+                if (e.button === 1) {
+                  e.preventDefault();
+                  void closeWithConfirm(doc.path);
+                }
+              }}
             >
               <button
                 type="button"
@@ -92,9 +121,7 @@ export function TabBar() {
                 type="button"
                 className="tab-close icon-button"
                 aria-label={`Close ${doc.name}`}
-                onClick={() => {
-                  if (confirmDiscard(doc.path)) closeDoc(doc.path);
-                }}
+                onClick={() => void closeWithConfirm(doc.path)}
               >
                 <Icon name="close" size={12} />
               </button>
@@ -111,7 +138,7 @@ export function TabBar() {
           title="Toggle Preview (⌘/Ctrl+Shift+V)"
           onClick={() => toggleEditorPreview()}
         >
-          <Icon name={previewing ? "settings" : "preview"} size={14} />
+          <Icon name={previewing ? "edit" : "preview"} size={14} />
           <span>{previewing ? "Edit" : "Preview"}</span>
         </button>
       )}

@@ -32,6 +32,32 @@ describe("commandRegistry", () => {
     expect(run).toHaveBeenCalledTimes(1);
   });
 
+  it("execute contains a rejecting command and logs the command id", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    commandRegistry.register({
+      id: "boom.async",
+      title: "Boom",
+      run: async () => {
+        throw new Error("nope");
+      },
+    });
+    commandRegistry.register({
+      id: "boom.sync",
+      title: "Boom Sync",
+      run: () => {
+        throw new Error("sync nope");
+      },
+    });
+
+    await expect(commandRegistry.execute("boom.async")).resolves.toBeUndefined();
+    await expect(commandRegistry.execute("boom.sync")).resolves.toBeUndefined();
+
+    expect(error).toHaveBeenCalledTimes(2);
+    expect(String(error.mock.calls[0][0])).toContain("boom.async");
+    expect(String(error.mock.calls[1][0])).toContain("boom.sync");
+    error.mockRestore();
+  });
+
   it("execute on an unknown id does not throw and warns", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     await expect(commandRegistry.execute("nope")).resolves.toBeUndefined();

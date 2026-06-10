@@ -41,7 +41,12 @@ export function useCommandKeybindings(): void {
       // While a modal (Command Palette / Quick Open) owns the keyboard, only let
       // the dismiss command through — otherwise chords like Cmd+S / Cmd+W /
       // Cmd+Enter fire editor commands while the user is typing in the modal.
-      if (ctx.modalOpen && id !== "workbench.dismiss") return;
+      // The chord is still consumed (preventDefault) so the WebView default
+      // (e.g. Cmd+P print, Cmd+S save-page) can't fire either.
+      if (ctx.modalOpen && id !== "workbench.dismiss") {
+        e.preventDefault();
+        return;
+      }
       e.preventDefault();
       void commandRegistry.execute(id);
     };

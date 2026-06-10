@@ -6,13 +6,18 @@ import type { DirEntry } from "../lib/ipc";
 import { initialTreeData, useTreeStore } from "../state/treeStore";
 import { initialEditorData, useEditorStore } from "../state/editorStore";
 
+// Native confirm/alert dialogs (Tauri plugin). `ask` defaults to confirming.
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  ask: vi.fn(async () => true),
+  message: vi.fn(async () => {}),
+}));
+
 vi.mock("../lib/ipc", () => ({
   readDirectory: vi.fn(),
   createFile: vi.fn(async () => {}),
   createDirectory: vi.fn(async () => {}),
   renamePath: vi.fn(async () => {}),
   movePaths: vi.fn(async () => []),
-  deletePath: vi.fn(async () => {}),
   movePathsToTrash: vi.fn(async () => ({
     id: "batch-1",
     items: [
@@ -36,6 +41,7 @@ import {
   renamePath,
   restoreTrashBatch,
 } from "../lib/ipc";
+import { ask, message } from "@tauri-apps/plugin-dialog";
 
 const ROOT = "/ws";
 const dir = (name: string, parent = ROOT): DirEntry => ({
@@ -84,6 +90,9 @@ beforeEach(() => {
   });
   vi.mocked(restoreTrashBatch).mockClear();
   vi.mocked(redoTrashBatch).mockClear();
+  vi.mocked(ask).mockClear();
+  vi.mocked(ask).mockResolvedValue(true);
+  vi.mocked(message).mockClear();
 });
 
 describe("Explorer", () => {
@@ -191,7 +200,6 @@ describe("Explorer", () => {
   });
 
   it("rejects create names that would escape the workspace", async () => {
-    const alertSpy = vi.spyOn(window, "alert").mockImplementation(() => {});
     render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
     await screen.findByText("src");
     await userEvent.click(screen.getByRole("button", { name: "New File" }));
@@ -201,14 +209,12 @@ describe("Explorer", () => {
 
     expect(createFile).not.toHaveBeenCalled();
     expect(createDirectory).not.toHaveBeenCalled();
-    expect(alertSpy).toHaveBeenCalledWith(
+    expect(message).toHaveBeenCalledWith(
       expect.stringContaining("not a path"),
     );
-    alertSpy.mockRestore();
   });
 
   it("rejects rename names that contain path separators", async () => {
-    const alertSpy = vi.spyOn(window, "alert").mockImplementation(() => {});
     render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
     await screen.findByText("README.md");
     await userEvent.click(screen.getByRole("button", { name: "Rename README.md" }));
@@ -218,10 +224,9 @@ describe("Explorer", () => {
     await userEvent.type(input, "nested/README.md{Enter}");
 
     expect(renamePath).not.toHaveBeenCalled();
-    expect(alertSpy).toHaveBeenCalledWith(
+    expect(message).toHaveBeenCalledWith(
       expect.stringContaining("not a path"),
     );
-    alertSpy.mockRestore();
   });
 
   it("updates open editor tabs when a file is renamed", async () => {
@@ -241,6 +246,33 @@ describe("Explorer", () => {
     expect(renamePath).toHaveBeenCalledWith("/ws/README.md", "/ws/NOTES.md");
     expect(useEditorStore.getState().docs[0].path).toBe("/ws/NOTES.md");
     expect(useEditorStore.getState().activePath).toBe("/ws/NOTES.md");
+  });
+
+  it("does not steal focus from an inline input opened during a refresh", async () => {
+    const refreshed = deferred<DirEntry[]>();
+    render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await screen.findByText("README.md");
+    // The rename triggers a refresh; keep the refreshed root read pending so
+    // an inline create input can open while the focus restore is in flight.
+    vi.mocked(readDirectory).mockImplementation(async (p: string) =>
+      p === ROOT ? refreshed.promise : [],
+    );
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Rename README.md" }),
+    );
+    const renameInput = screen.getByLabelText("New name");
+    await userEvent.clear(renameInput);
+    await userEvent.type(renameInput, "NOTES.md{Enter}");
+
+    await userEvent.click(screen.getByRole("button", { name: "New File" }));
+    const createInput = screen.getByLabelText("New file name");
+    await waitFor(() => expect(createInput).toHaveFocus());
+
+    refreshed.resolve([dir("src"), file("NOTES.md")]);
+    expect(await screen.findByText("NOTES.md")).toBeInTheDocument();
+    // The resolving focus restore must not blur (commit/cancel) the input.
+    expect(createInput).toHaveFocus();
   });
 
   it("moves a dragged file into a folder", async () => {
@@ -426,7 +458,6 @@ describe("Explorer", () => {
   });
 
   it("moves selected entries to undoable trash after confirmation", async () => {
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
     await screen.findByText("README.md");
     fireEvent.click(screen.getByRole("treeitem", { name: "README.md" }), {
@@ -434,13 +465,52 @@ describe("Explorer", () => {
     });
     await userEvent.click(screen.getByRole("button", { name: "Delete Selected" }));
 
-    expect(movePathsToTrash).toHaveBeenCalledWith(ROOT, ["/ws/README.md"]);
+    await waitFor(() =>
+      expect(movePathsToTrash).toHaveBeenCalledWith(ROOT, ["/ws/README.md"]),
+    );
+    expect(ask).toHaveBeenCalledWith(expect.stringContaining("Trash"), {
+      title: "Delete",
+      kind: "warning",
+    });
     expect(useTreeStore.getState().deleteUndoStack).toHaveLength(1);
-    confirmSpy.mockRestore();
+  });
+
+  it("falls back to window.confirm when the dialog plugin rejects", async () => {
+    vi.mocked(ask).mockRejectedValue(new Error("not in tauri"));
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    try {
+      render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+      await screen.findByText("README.md");
+      fireEvent.click(screen.getByRole("treeitem", { name: "README.md" }), {
+        metaKey: true,
+      });
+      await userEvent.click(
+        screen.getByRole("button", { name: "Delete Selected" }),
+      );
+
+      await waitFor(() =>
+        expect(movePathsToTrash).toHaveBeenCalledWith(ROOT, ["/ws/README.md"]),
+      );
+      expect(confirmSpy).toHaveBeenCalled();
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it("does not delete when the confirmation is declined", async () => {
+    vi.mocked(ask).mockResolvedValue(false);
+    render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await screen.findByText("README.md");
+    fireEvent.click(screen.getByRole("treeitem", { name: "README.md" }), {
+      metaKey: true,
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Delete Selected" }));
+
+    await waitFor(() => expect(ask).toHaveBeenCalled());
+    expect(movePathsToTrash).not.toHaveBeenCalled();
   });
 
   it("uses a selected batch when deleting from a selected row action", async () => {
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     vi.mocked(movePathsToTrash).mockResolvedValue({
       id: "batch-2",
       items: [
@@ -467,21 +537,22 @@ describe("Explorer", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Delete README.md" }));
 
-    expect(movePathsToTrash).toHaveBeenCalledWith(ROOT, [
-      "/ws/src",
-      "/ws/README.md",
-    ]);
-    confirmSpy.mockRestore();
+    await waitFor(() =>
+      expect(movePathsToTrash).toHaveBeenCalledWith(ROOT, [
+        "/ws/src",
+        "/ws/README.md",
+      ]),
+    );
   });
 
   it("undoes and redoes delete batches from Explorer keyboard shortcuts", async () => {
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     const { container } = render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
     await screen.findByText("README.md");
     fireEvent.click(screen.getByRole("treeitem", { name: "README.md" }), {
       metaKey: true,
     });
     await userEvent.click(screen.getByRole("button", { name: "Delete Selected" }));
+    await waitFor(() => expect(movePathsToTrash).toHaveBeenCalled());
     const explorer = container.querySelector(".explorer") as HTMLElement;
 
     fireEvent.keyDown(explorer, { key: "z", metaKey: true });
@@ -505,6 +576,42 @@ describe("Explorer", () => {
         },
       ]),
     );
-    confirmSpy.mockRestore();
+  });
+
+  it("navigates rows with arrow keys and opens a file with Enter", async () => {
+    const onOpenFile = vi.fn();
+    const { container } = render(
+      <Explorer rootPath={ROOT} onOpenFile={onOpenFile} />,
+    );
+    await screen.findByText("README.md");
+    const tree = container.querySelector(".tree") as HTMLElement;
+
+    // Home selects the first row (src); ArrowDown moves to README.md.
+    fireEvent.keyDown(tree, { key: "Home" });
+    expect(screen.getByRole("treeitem", { name: "src" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    fireEvent.keyDown(tree, { key: "ArrowDown" });
+    expect(screen.getByRole("treeitem", { name: "README.md" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+
+    fireEvent.keyDown(tree, { key: "Enter" });
+    expect(onOpenFile).toHaveBeenCalledWith("/ws/README.md");
+  });
+
+  it("expands and collapses a directory with ArrowRight/ArrowLeft", async () => {
+    const { container } = render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await screen.findByText("src");
+    const tree = container.querySelector(".tree") as HTMLElement;
+
+    fireEvent.keyDown(tree, { key: "Home" }); // select "src"
+    fireEvent.keyDown(tree, { key: "ArrowRight" });
+    expect(await screen.findByText("main.tsx")).toBeInTheDocument();
+
+    fireEvent.keyDown(tree, { key: "ArrowLeft" });
+    expect(screen.queryByText("main.tsx")).not.toBeInTheDocument();
   });
 });

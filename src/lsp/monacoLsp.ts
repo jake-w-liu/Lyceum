@@ -4,9 +4,47 @@
 // (smoke-tested); the protocol/RPC layers underneath are unit-tested.
 
 import type * as Monaco from "monaco-editor";
-import { getSession, setDiagnosticsSink } from "./lspClient";
+import { getSession, setDiagnosticsSink, setOpenDocsProvider } from "./lspClient";
 import { LSP_SERVERS } from "./servers";
 import { uriToPath } from "./lspProtocol";
+
+// --- Rename aliasing -------------------------------------------------------
+// Monaco model URIs are immutable, but an open file can be renamed/moved (the
+// model object is re-keyed to preserve undo history). The LSP server is told
+// didClose(oldUri)/didOpen(newUri), so from then on ALL traffic for that model
+// must use the new URI, and diagnostics published for the new URI must route
+// back to the (old-URI) model.
+type AliasableModel = Pick<Monaco.editor.ITextModel, "uri" | "isDisposed">;
+
+/** model URI (immutable) -> current LSP document URI after renames. */
+const lspUriByModelUri = new Map<string, string>();
+/** current fs path (from the LSP uri) -> the model that represents it. */
+const modelByLspPath = new Map<string, Monaco.editor.ITextModel>();
+
+/** The URI to use for LSP traffic about this model (its rename alias, if any). */
+export function lspUriForModel(model: AliasableModel): string {
+  const uri = model.uri.toString();
+  return lspUriByModelUri.get(uri) ?? uri;
+}
+
+/** Route a model's LSP traffic through `lspUri` from now on (file renamed). */
+export function setLspUriOverride(
+  model: Monaco.editor.ITextModel,
+  lspUri: string,
+): void {
+  modelByLspPath.delete(uriToPath(lspUriForModel(model)));
+  lspUriByModelUri.set(model.uri.toString(), lspUri);
+  modelByLspPath.set(uriToPath(lspUri), model);
+}
+
+/** Drop a model's rename alias (model closed/disposed). */
+export function clearLspUriOverride(model: AliasableModel): void {
+  const uri = model.uri.toString();
+  const current = lspUriByModelUri.get(uri);
+  if (current === undefined) return;
+  modelByLspPath.delete(uriToPath(current));
+  lspUriByModelUri.delete(uri);
+}
 
 interface LspPosition {
   line: number;
@@ -62,11 +100,34 @@ export function attachMonacoLsp(monaco: typeof Monaco): void {
   if (attached) return;
   attached = true;
 
+  // Already-open documents per language, for didOpen-on-(re)start (lspClient).
+  setOpenDocsProvider((languageId) =>
+    monaco.editor
+      .getModels()
+      .filter((m) => !m.isDisposed() && m.getLanguageId() === languageId)
+      .map((m) => ({
+        uri: lspUriForModel(m),
+        languageId,
+        text: m.getValue(),
+      })),
+  );
+
   setDiagnosticsSink((uri, diagnostics) => {
     const target = uriToPath(uri);
-    const model = monaco.editor
-      .getModels()
-      .find((m) => uriToPath(m.uri.toString()) === target);
+    // Renamed models are found via their alias; un-renamed ones by their own
+    // URI (excluding aliased models so diagnostics for a path's OLD name can't
+    // land on the model that moved away from it).
+    const aliased = modelByLspPath.get(target);
+    const model =
+      aliased && !aliased.isDisposed()
+        ? aliased
+        : monaco.editor
+            .getModels()
+            .find(
+              (m) =>
+                !lspUriByModelUri.has(m.uri.toString()) &&
+                uriToPath(m.uri.toString()) === target,
+            );
     if (!model) return;
     const markers = (diagnostics as LspDiagnostic[]).map((d) => ({
       severity: severityToMonaco(monaco, d.severity),
@@ -84,11 +145,11 @@ export function attachMonacoLsp(monaco: typeof Monaco): void {
 
     monaco.languages.registerHoverProvider(lang, {
       async provideHover(model, position) {
-        const rpc = rpcWithCap(lang, "hoverProvider");
+        const rpc = rpcWithCap(lang, "hoverProvider", model);
         if (!rpc) return null;
         try {
           const res = await rpc.request<LspHover | null>("textDocument/hover", {
-            textDocument: { uri: model.uri.toString() },
+            textDocument: { uri: lspUriForModel(model) },
             position: toLspPosition(position),
           });
           const value = res ? hoverToMarkdown(res.contents) : "";
@@ -101,13 +162,13 @@ export function attachMonacoLsp(monaco: typeof Monaco): void {
 
     monaco.languages.registerDefinitionProvider(lang, {
       async provideDefinition(model, position) {
-        const rpc = rpcWithCap(lang, "definitionProvider");
+        const rpc = rpcWithCap(lang, "definitionProvider", model);
         if (!rpc) return null;
         try {
           const res = await rpc.request<LspLocation | LspLocation[] | null>(
             "textDocument/definition",
             {
-              textDocument: { uri: model.uri.toString() },
+              textDocument: { uri: lspUriForModel(model) },
               position: toLspPosition(position),
             },
           );
@@ -120,13 +181,13 @@ export function attachMonacoLsp(monaco: typeof Monaco): void {
 
     monaco.languages.registerReferenceProvider(lang, {
       async provideReferences(model, position, context) {
-        const rpc = rpcWithCap(lang, "referencesProvider");
+        const rpc = rpcWithCap(lang, "referencesProvider", model);
         if (!rpc) return null;
         try {
           const res = await rpc.request<LspLocation[] | null>(
             "textDocument/references",
             {
-              textDocument: { uri: model.uri.toString() },
+              textDocument: { uri: lspUriForModel(model) },
               position: toLspPosition(position),
               context: { includeDeclaration: context.includeDeclaration },
             },
@@ -144,7 +205,7 @@ export function attachMonacoLsp(monaco: typeof Monaco): void {
       // — otherwise '.'/':' never auto-open the completion widget.
       triggerCharacters: [".", ":", ">", "@"],
       async provideCompletionItems(model, position) {
-        const rpc = rpcWithCap(lang, "completionProvider");
+        const rpc = rpcWithCap(lang, "completionProvider", model);
         if (!rpc) return { suggestions: [] };
         const word = model.getWordUntilPosition(position);
         const range = {
@@ -157,7 +218,7 @@ export function attachMonacoLsp(monaco: typeof Monaco): void {
           const res = await rpc.request<
             LspCompletionItem[] | { items: LspCompletionItem[] } | null
           >("textDocument/completion", {
-            textDocument: { uri: model.uri.toString() },
+            textDocument: { uri: lspUriForModel(model) },
             position: toLspPosition(position),
           });
           const items = Array.isArray(res) ? res : (res?.items ?? []);
@@ -178,13 +239,13 @@ export function attachMonacoLsp(monaco: typeof Monaco): void {
 
     monaco.languages.registerDocumentSymbolProvider(lang, {
       async provideDocumentSymbols(model) {
-        const rpc = rpcWithCap(lang, "documentSymbolProvider");
+        const rpc = rpcWithCap(lang, "documentSymbolProvider", model);
         if (!rpc) return [];
         try {
           const res = await rpc.request<
             LspDocumentSymbol[] | LspSymbolInformation[] | null
           >("textDocument/documentSymbol", {
-            textDocument: { uri: model.uri.toString() },
+            textDocument: { uri: lspUriForModel(model) },
           });
           return toMonacoSymbols(res ?? []);
         } catch {
@@ -195,13 +256,13 @@ export function attachMonacoLsp(monaco: typeof Monaco): void {
 
     monaco.languages.registerRenameProvider(lang, {
       async provideRenameEdits(model, position, newName) {
-        const rpc = rpcWithCap(lang, "renameProvider");
+        const rpc = rpcWithCap(lang, "renameProvider", model);
         if (!rpc) return { edits: [] };
         try {
           const res = await rpc.request<LspWorkspaceEdit | null>(
             "textDocument/rename",
             {
-              textDocument: { uri: model.uri.toString() },
+              textDocument: { uri: lspUriForModel(model) },
               position: toLspPosition(position),
               newName,
             },
@@ -215,13 +276,13 @@ export function attachMonacoLsp(monaco: typeof Monaco): void {
 
     monaco.languages.registerDocumentFormattingEditProvider(lang, {
       async provideDocumentFormattingEdits(model) {
-        const rpc = rpcWithCap(lang, "documentFormattingProvider");
+        const rpc = rpcWithCap(lang, "documentFormattingProvider", model);
         if (!rpc) return [];
         try {
           const res = await rpc.request<LspTextEdit[] | null>(
             "textDocument/formatting",
             {
-              textDocument: { uri: model.uri.toString() },
+              textDocument: { uri: lspUriForModel(model) },
               options: { tabSize: model.getOptions().tabSize, insertSpaces: true },
             },
           );
@@ -239,11 +300,13 @@ export function attachMonacoLsp(monaco: typeof Monaco): void {
 
 // Return the session's RPC client only if the server advertised `cap` in its
 // initialize result (capabilities is empty until the handshake resolves, so
-// providers correctly stay inert until then). Avoids issuing requests for
-// features the server can't service.
-function rpcWithCap(lang: string, cap: string) {
+// providers correctly stay inert until then) AND the document is open on the
+// server (didOpen sent). Requests about a doc the server never saw are an LSP
+// protocol violation — e.g. right after a restart, before the re-didOpen lands.
+function rpcWithCap(lang: string, cap: string, model: AliasableModel) {
   const session = getSession(lang);
   if (!session || !session.capabilities[cap]) return null;
+  if (!session.openDocs.has(lspUriForModel(model))) return null;
   return session.rpc;
 }
 

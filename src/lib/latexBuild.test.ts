@@ -253,6 +253,48 @@ describe("runLatexBuild", () => {
     );
   });
 
+  it("claims the run before the async save so a double-click starts one build", async () => {
+    const pendingWrite = deferred<void>();
+    writeFileMock.mockReturnValue(pendingWrite.promise);
+    useWorkspaceStore.getState().openWorkspace("/w");
+    useEditorStore.getState().openDoc({
+      path: "/w/main.tex",
+      content: "\\documentclass{article}",
+      language: "latex",
+    });
+
+    // Second call arrives while the first is still awaiting the file save.
+    const first = runLatexBuild();
+    const second = runLatexBuild();
+    pendingWrite.resolve(undefined);
+    await Promise.all([first, second]);
+
+    expect(
+      invokeMock.mock.calls.filter(([cmd]) => cmd === "run_latex_build"),
+    ).toHaveLength(1);
+  });
+
+  it("releases the run claim when the pre-build save fails", async () => {
+    writeFileMock.mockRejectedValue(new Error("disk full"));
+    useWorkspaceStore.getState().openWorkspace("/w");
+    useEditorStore.getState().openDoc({
+      path: "/w/main.tex",
+      content: "\\documentclass{article}",
+      language: "latex",
+    });
+
+    await runLatexBuild();
+
+    expect(useOutputStore.getState().running).toBe(false);
+    expect(useOutputStore.getState().runId).toBeNull();
+    expect(
+      useOutputStore
+        .getState()
+        .lines.some((line) => line.includes("failed to save main.tex")),
+    ).toBe(true);
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
   it("surfaces Rust builder preflight errors", async () => {
     invokeMock.mockRejectedValue(new Error("No LaTeX compiler was found"));
     useWorkspaceStore.getState().openWorkspace("/w");

@@ -3,7 +3,13 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// confirmDiscard uses the native dialog plugin (window.confirm is unreliable in
+// Tauri WebViews); mock it so dirty-close prompts are deterministic in jsdom.
+const askMock = vi.hoisted(() => vi.fn(async () => true));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: askMock }));
+
 import {
+  confirmDiscard,
   getActiveDoc,
   initialEditorData,
   isDirty,
@@ -12,6 +18,7 @@ import {
 
 beforeEach(() => {
   useEditorStore.setState(initialEditorData, false);
+  askMock.mockReset().mockResolvedValue(true);
 });
 
 describe("editorStore", () => {
@@ -219,47 +226,141 @@ describe("editorStore", () => {
     };
     const paths = () => useEditorStore.getState().docs.map((d) => d.path);
 
-    it("closeOtherDocs keeps only the given tab", () => {
+    it("closeOtherDocs keeps only the given tab", async () => {
       openThree();
-      useEditorStore.getState().closeOtherDocs("/b.ts");
+      await useEditorStore.getState().closeOtherDocs("/b.ts");
       expect(paths()).toEqual(["/b.ts"]);
       expect(useEditorStore.getState().activePath).toBe("/b.ts");
     });
 
-    it("closeDocsToRight closes tabs after the given one", () => {
+    it("closeDocsToRight closes tabs after the given one", async () => {
       openThree(); // active is /c.ts
-      useEditorStore.getState().closeDocsToRight("/a.ts");
+      await useEditorStore.getState().closeDocsToRight("/a.ts");
       expect(paths()).toEqual(["/a.ts"]);
       // Active /c.ts was closed; nearest survivor is /a.ts.
       expect(useEditorStore.getState().activePath).toBe("/a.ts");
     });
 
-    it("closeAllDocs clears everything (clean docs never prompt)", () => {
-      const confirmSpy = vi.spyOn(globalThis, "confirm");
+    it("closeAllDocs clears everything (clean docs never prompt)", async () => {
       openThree();
-      useEditorStore.getState().closeAllDocs();
+      await useEditorStore.getState().closeAllDocs();
       expect(paths()).toEqual([]);
       expect(useEditorStore.getState().activePath).toBeNull();
-      expect(confirmSpy).not.toHaveBeenCalled();
+      expect(askMock).not.toHaveBeenCalled();
     });
 
-    it("closeSavedDocs closes clean tabs and keeps dirty ones", () => {
+    it("closeSavedDocs closes clean tabs and keeps dirty ones", async () => {
       openThree();
       useEditorStore.getState().updateContent("/b.ts", "b dirty");
-      useEditorStore.getState().closeSavedDocs();
+      await useEditorStore.getState().closeSavedDocs();
       expect(paths()).toEqual(["/b.ts"]);
       expect(useEditorStore.getState().activePath).toBe("/b.ts");
+      expect(askMock).not.toHaveBeenCalled();
     });
 
-    it("a cancelled discard confirmation spares only that dirty tab", () => {
-      vi.spyOn(globalThis, "confirm").mockReturnValue(false);
+    it("a cancelled discard confirmation spares only that dirty tab", async () => {
+      askMock.mockResolvedValue(false);
       const store = useEditorStore.getState();
       store.openDoc({ path: "/a.ts", content: "a", language: "typescript" });
       store.openDoc({ path: "/b.ts", content: "b", language: "typescript" });
       store.updateContent("/a.ts", "a dirty"); // dirty → will prompt
-      store.closeAllDocs();
+      await store.closeAllDocs();
       // /a.ts kept (discard declined); clean /b.ts closed without a prompt.
       expect(paths()).toEqual(["/a.ts"]);
+      expect(askMock).toHaveBeenCalledTimes(1);
+      expect(askMock).toHaveBeenCalledWith(
+        "Discard unsaved changes to a.ts?",
+        expect.anything(),
+      );
     });
+  });
+
+  describe("confirmDiscard", () => {
+    afterEach(() => vi.restoreAllMocks());
+
+    it("resolves true without prompting for clean or unknown docs", async () => {
+      useEditorStore
+        .getState()
+        .openDoc({ path: "/a.ts", content: "a", language: "typescript" });
+      await expect(confirmDiscard("/a.ts")).resolves.toBe(true);
+      await expect(confirmDiscard("/missing.ts")).resolves.toBe(true);
+      expect(askMock).not.toHaveBeenCalled();
+    });
+
+    it("prompts for dirty docs and returns the user's answer", async () => {
+      const store = useEditorStore.getState();
+      store.openDoc({ path: "/a.ts", content: "a", language: "typescript" });
+      store.updateContent("/a.ts", "dirty");
+
+      askMock.mockResolvedValueOnce(false);
+      await expect(confirmDiscard("/a.ts")).resolves.toBe(false);
+      askMock.mockResolvedValueOnce(true);
+      await expect(confirmDiscard("/a.ts")).resolves.toBe(true);
+    });
+
+    it("falls back to window.confirm when the dialog plugin is unavailable", async () => {
+      const store = useEditorStore.getState();
+      store.openDoc({ path: "/a.ts", content: "a", language: "typescript" });
+      store.updateContent("/a.ts", "dirty");
+      askMock.mockRejectedValueOnce(new Error("not in tauri"));
+      vi.stubGlobal("confirm", vi.fn(() => true));
+      await expect(confirmDiscard("/a.ts")).resolves.toBe(true);
+      expect(confirm).toHaveBeenCalledWith("Discard unsaved changes to a.ts?");
+      vi.unstubAllGlobals();
+    });
+  });
+
+  it("moveDocPaths records the applied per-doc moves for model re-keying", () => {
+    const store = useEditorStore.getState();
+    store.openDoc({ path: "/w/src/main.ts", content: "m", language: "typescript" });
+    store.openDoc({ path: "/w/other.ts", content: "o", language: "typescript" });
+
+    store.moveDocPaths([{ from: "/w/src", to: "/w/lib" }]);
+
+    const moves = useEditorStore.getState().lastDocMoves;
+    expect(moves?.moves).toEqual([
+      { from: "/w/src/main.ts", to: "/w/lib/main.ts" },
+    ]);
+    expect(moves?.seq).toBe(1);
+
+    // A move that touches no open doc keeps the previous record.
+    store.moveDocPaths([{ from: "/w/unrelated", to: "/w/elsewhere" }]);
+    expect(useEditorStore.getState().lastDocMoves?.seq).toBe(1);
+  });
+
+  it("openDoc with activate:false adds the doc without stealing focus", () => {
+    const store = useEditorStore.getState();
+    store.openDoc({ path: "/a.ts", content: "a", language: "typescript" });
+    store.openDoc({
+      path: "/b.ts",
+      content: "b",
+      language: "typescript",
+      activate: false,
+    });
+
+    const state = useEditorStore.getState();
+    expect(state.docs.map((d) => d.path)).toEqual(["/a.ts", "/b.ts"]);
+    expect(state.activePath).toBe("/a.ts");
+
+    // Re-opening an existing doc without activate keeps the current tab too.
+    store.openDoc({
+      path: "/b.ts",
+      content: "IGNORED",
+      language: "typescript",
+      activate: false,
+    });
+    expect(useEditorStore.getState().activePath).toBe("/a.ts");
+  });
+
+  it("setPendingReveal records and clearPendingReveal clears the target", () => {
+    const store = useEditorStore.getState();
+    store.setPendingReveal("/a.ts", 12, 4);
+    expect(useEditorStore.getState().pendingReveal).toEqual({
+      path: "/a.ts",
+      line: 12,
+      column: 4,
+    });
+    store.clearPendingReveal();
+    expect(useEditorStore.getState().pendingReveal).toBeNull();
   });
 });

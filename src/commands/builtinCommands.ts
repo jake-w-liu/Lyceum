@@ -6,16 +6,22 @@ import { commandRegistry } from "./commandRegistry";
 import { useLayoutStore } from "../state/layoutStore";
 import { useUiStore } from "../state/uiStore";
 import { useWorkspaceStore } from "../state/workspaceStore";
-import { pickFolder } from "../lib/ipc";
+import { pickFolder, quitApp } from "../lib/ipc";
 import {
   closeActiveTab,
   focusAdjacentTab,
   saveActiveDoc,
   saveAllDocs,
 } from "../hooks/useEditorKeybindings";
+import { hasDirtyWorkspaceDocs } from "../hooks/useWorkspaceLifecycle";
 import { THEME_LABELS, THEME_ORDER, useThemeStore } from "../state/themeStore";
 import { useTerminalStore } from "../state/terminalStore";
-import { getActiveDoc, useEditorStore } from "../state/editorStore";
+import {
+  askDiscard,
+  flushPendingEdits,
+  getActiveDoc,
+  useEditorStore,
+} from "../state/editorStore";
 import { usePreviewStore } from "../state/previewStore";
 import { newWindow } from "../lib/ipc";
 import { runActiveJulia } from "../lib/julia";
@@ -48,6 +54,22 @@ export function registerBuiltinCommands(): void {
     title: "New Window",
     category: "Window",
     run: () => newWindow(),
+  });
+  // Quit via the native menu (the Rust menu handler emits menu id "quit").
+  // Mirrors the window-close guard: confirm discarding unsaved changes first.
+  commandRegistry.register({
+    id: "quit",
+    title: "Quit Lyceum",
+    category: "Window",
+    run: async () => {
+      if (
+        hasDirtyWorkspaceDocs() &&
+        !(await askDiscard("Discard unsaved changes and quit?"))
+      ) {
+        return;
+      }
+      await quitApp();
+    },
   });
   commandRegistry.register({
     id: "quickOpen.show",
@@ -203,7 +225,12 @@ export function registerBuiltinCommands(): void {
     id: "editor.run",
     title: "Run File or Selection (Julia)",
     category: "Run",
-    run: () => runActiveJulia(),
+    run: () => {
+      // runActiveJulia saves the buffer before running; make sure the store
+      // holds the latest editor content first.
+      flushPendingEdits();
+      return runActiveJulia();
+    },
   });
   commandRegistry.register({
     id: "run.stop",

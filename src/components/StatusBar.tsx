@@ -4,6 +4,8 @@
 import { useEffect, useState } from "react";
 import { getAppInfo, type AppInfo } from "../lib/ipc";
 import { getActiveDoc, useEditorStore } from "../state/editorStore";
+import { baseName, useWorkspaceStore } from "../state/workspaceStore";
+import { useStatusStore } from "../state/statusStore";
 import { useLspStatusStore, type LspStatus } from "../state/lspStatusStore";
 import { useOutputStore } from "../state/outputStore";
 import { useLayoutStore } from "../state/layoutStore";
@@ -32,6 +34,11 @@ export function StatusBar() {
   // Select only the primitive we render, so editing (which replaces the active
   // doc object every keystroke) doesn't re-render the status bar.
   const language = useEditorStore((s) => getActiveDoc(s)?.language ?? "plaintext");
+  const rootPath = useWorkspaceStore((s) => s.rootPath);
+  // Live cursor position from the isolated status store (cursor moves only
+  // re-render this component, not the rest of the app).
+  const line = useStatusStore((s) => s.line);
+  const column = useStatusStore((s) => s.column);
   const lspByLanguage = useLspStatusStore((s) => s.byLanguage);
   const lspStatus = serverForLanguage(language)
     ? (lspByLanguage[language] ?? "off")
@@ -42,7 +49,9 @@ export function StatusBar() {
     <footer className="status-bar" aria-label="Status Bar">
       <div className="status-bar-left">
         <span className="status-item">Lyceum</span>
-        <span className="status-item">No folder opened</span>
+        <span className="status-item" title={rootPath ?? undefined}>
+          {rootPath ? baseName(rootPath) : "No folder opened"}
+        </span>
         {running && (
           <button
             type="button"
@@ -62,7 +71,9 @@ export function StatusBar() {
             {language} LSP: {LSP_LABEL[lspStatus]}
           </span>
         )}
-        <span className="status-item">Ln 1, Col 1</span>
+        <span className="status-item">
+          Ln {line}, Col {column}
+        </span>
         <span className="status-item">UTF-8</span>
         <span className="status-item">{language}</span>
         {info && (

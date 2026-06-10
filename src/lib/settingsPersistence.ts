@@ -1,10 +1,15 @@
-// Settings & workspace persistence (M10). Settings and the last workspace are
-// stored as JSON in the OS app-config dir (path resolved by the Rust
+// Settings & workspace persistence (M10). Settings, the last workspace, and
+// the workbench layout are stored as JSON in the OS app-config dir (path resolved by the Rust
 // `app_config_path` command; written via `write_file`, which creates parent
 // dirs). Loading degrades gracefully to defaults when no file exists.
 
 import { invoke } from "@tauri-apps/api/core";
 import { readFile, writeFile } from "./ipc";
+import {
+  persistedLayoutData,
+  sanitizeLayoutData,
+  useLayoutStore,
+} from "../state/layoutStore";
 import { mergeSettings, useSettingsStore } from "../state/settingsStore";
 import { useThemeStore } from "../state/themeStore";
 import { useWorkspaceStore } from "../state/workspaceStore";
@@ -12,6 +17,7 @@ import { parseUserKeybindings, useKeymapStore } from "../state/keymapStore";
 
 const SETTINGS_FILE = "settings.json";
 const WORKSPACE_FILE = "workspace.json";
+const LAYOUT_FILE = "layout.json";
 
 function configPath(name: string): Promise<string> {
   return invoke<string>("app_config_path", { name });
@@ -77,6 +83,29 @@ export async function saveSettings(): Promise<void> {
   }
 }
 
+/** Restore the persisted workbench layout (sidebar/panel sizes, visibility,
+ *  dock position). Unknown/invalid fields fall back to the defaults. */
+export async function loadLayout(): Promise<void> {
+  try {
+    const raw = JSON.parse(await readConfigFile(LAYOUT_FILE));
+    const data = sanitizeLayoutData(raw);
+    if (Object.keys(data).length > 0) useLayoutStore.setState(data);
+  } catch {
+    // No layout file yet (or not in Tauri) — keep defaults.
+  }
+}
+
+export async function saveLayout(): Promise<void> {
+  try {
+    await writeFile(
+      await configPath(LAYOUT_FILE),
+      JSON.stringify(persistedLayoutData(useLayoutStore.getState()), null, 2),
+    );
+  } catch (e) {
+    console.error("Failed to save layout", e);
+  }
+}
+
 async function saveLastWorkspace(path: string | null): Promise<void> {
   try {
     await writeFile(
@@ -117,6 +146,7 @@ export async function openLaunchDir(): Promise<void> {
 }
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
+let layoutSaveTimer: ReturnType<typeof setTimeout> | null = null;
 let persistenceInitialized = false;
 
 /** Subscribe stores so changes are persisted (debounced) and theme stays synced. */
@@ -126,6 +156,14 @@ export function initSettingsPersistence(): void {
   useSettingsStore.subscribe(() => {
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(() => void saveSettings(), 400);
+  });
+  // Restore the persisted layout first, then subscribe — so the restore itself
+  // doesn't immediately re-save what was just read.
+  void loadLayout().finally(() => {
+    useLayoutStore.subscribe(() => {
+      if (layoutSaveTimer) clearTimeout(layoutSaveTimer);
+      layoutSaveTimer = setTimeout(() => void saveLayout(), 400);
+    });
   });
   // Theme changed via the palette → reflect into settings (which persists it).
   useThemeStore.subscribe((s) => {
@@ -145,6 +183,11 @@ export function initSettingsPersistence(): void {
         clearTimeout(saveTimer);
         saveTimer = null;
         void saveSettings();
+      }
+      if (layoutSaveTimer) {
+        clearTimeout(layoutSaveTimer);
+        layoutSaveTimer = null;
+        void saveLayout();
       }
     });
   }

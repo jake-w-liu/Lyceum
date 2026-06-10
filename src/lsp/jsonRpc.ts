@@ -89,11 +89,24 @@ export function createRpcClient(transport: JsonRpcTransport): RpcClient {
 
     // Server -> client *request* (has both id and method): it expects a
     // response. Dropping it (the old behavior) hangs servers that send
-    // registerCapability / configuration / progress-create. Answer with a
-    // neutral result so the server proceeds.
+    // registerCapability / configuration / progress-create. Answer with the
+    // method's spec-shaped "decline" result so the server proceeds:
+    //  - workspace/configuration expects ONE value per requested item (an
+    //    array); replying `null` makes spec-strict servers choke.
+    //  - workspace/applyEdit expects an ApplyWorkspaceEditResult.
+    //  - everything else (registerCapability, workDoneProgress/create, ...)
+    //    accepts a null/void result.
     if (hasId && typeof message.method === "string") {
+      let result: unknown = null;
+      if (message.method === "workspace/configuration") {
+        const items = (message.params as { items?: unknown[] } | undefined)
+          ?.items;
+        result = Array.isArray(items) ? items.map(() => null) : [];
+      } else if (message.method === "workspace/applyEdit") {
+        result = { applied: false };
+      }
       transport.send(
-        JSON.stringify({ jsonrpc: "2.0", id: message.id, result: null }),
+        JSON.stringify({ jsonrpc: "2.0", id: message.id, result }),
       );
       return;
     }

@@ -10,12 +10,11 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 }));
 
 import {
-  deleteFileIfExists,
   getAppInfo,
   movePaths,
   pickFolder,
+  quitApp,
   readFileBytes,
-  resolveLatexTools,
 } from "./ipc";
 
 beforeEach(() => {
@@ -64,15 +63,13 @@ describe("readFileBytes", () => {
   });
 });
 
-describe("deleteFileIfExists", () => {
-  it("invokes the file-only delete command and returns whether a file was removed", async () => {
-    invokeMock.mockResolvedValue(true);
+describe("quitApp", () => {
+  it("invokes the backend quit command", async () => {
+    invokeMock.mockResolvedValue(undefined);
 
-    await expect(deleteFileIfExists("/w/main.pdf")).resolves.toBe(true);
+    await quitApp();
 
-    expect(invokeMock).toHaveBeenCalledWith("delete_file_if_exists", {
-      path: "/w/main.pdf",
-    });
+    expect(invokeMock).toHaveBeenCalledWith("quit_app");
   });
 });
 
@@ -90,18 +87,5 @@ describe("movePaths", () => {
       paths: ["/w/a.txt"],
       destinationDir: "/w/src",
     });
-  });
-});
-
-describe("resolveLatexTools", () => {
-  it("invokes the LaTeX tool inventory command", async () => {
-    const tools = [
-      { tool: "tectonic", path: "/usr/local/bin/tectonic", source: "path" },
-    ];
-    invokeMock.mockResolvedValue(tools);
-
-    await expect(resolveLatexTools()).resolves.toEqual(tools);
-
-    expect(invokeMock).toHaveBeenCalledWith("resolve_latex_tools");
   });
 });

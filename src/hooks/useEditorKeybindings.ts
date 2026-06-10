@@ -1,5 +1,5 @@
 // Editor keybindings (M3): save (mod+S), close tab (mod+W), and cycle tabs
-// (mod+Tab / mod+Shift+Tab). Like useLayoutKeybindings this is a small focused
+// (ctrl+Tab / ctrl+Shift+Tab). Like useLayoutKeybindings this is a small focused
 // handler; M4 folds it into the command/keybinding registry. The save/cycle
 // helpers are exported so they can be unit-tested without the DOM.
 
@@ -7,6 +7,7 @@ import { useEffect } from "react";
 import { isMac } from "./useLayoutKeybindings";
 import {
   confirmDiscard,
+  flushPendingEdits,
   getActiveDoc,
   isDirty,
   isTextDoc,
@@ -17,6 +18,8 @@ import { writeFile } from "../lib/ipc";
 
 /** Persist the active document to disk and mark it saved. No-op if none open. */
 export async function saveActiveDoc(): Promise<void> {
+  // Commit any debounced editor->store write so we save the latest buffer.
+  flushPendingEdits();
   const doc = getActiveDoc(useEditorStore.getState());
   if (!doc || !isTextDoc(doc)) return;
   try {
@@ -38,6 +41,7 @@ export async function saveActiveDoc(): Promise<void> {
  * as saveActiveDoc). Refreshes git decorations once after the batch.
  */
 export async function saveAllDocs(): Promise<void> {
+  flushPendingEdits();
   const dirty = useEditorStore
     .getState()
     .docs.filter((doc) => isTextDoc(doc) && isDirty(doc));
@@ -66,21 +70,25 @@ export function focusAdjacentTab(dir: 1 | -1): void {
 }
 
 /** Close the active tab, if any. Prompts before discarding unsaved changes. */
-export function closeActiveTab(): void {
-  const { activePath, closeDoc } = useEditorStore.getState();
-  if (activePath && confirmDiscard(activePath)) closeDoc(activePath);
+export async function closeActiveTab(): Promise<void> {
+  const { activePath } = useEditorStore.getState();
+  if (activePath && (await confirmDiscard(activePath))) {
+    useEditorStore.getState().closeDoc(activePath);
+  }
 }
 
 export function useEditorKeybindings(): void {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      const mod = isMac() ? e.metaKey : e.ctrlKey;
-      if (!mod) return;
-      if (e.code === "Tab") {
+      // Tab cycling uses Ctrl on EVERY platform (VS Code convention): on macOS
+      // Cmd+Tab is the OS app switcher and never reaches the WebView.
+      if (e.code === "Tab" && e.ctrlKey && !e.metaKey && !e.altKey) {
         e.preventDefault();
         focusAdjacentTab(e.shiftKey ? -1 : 1);
         return;
       }
+      const mod = isMac() ? e.metaKey : e.ctrlKey;
+      if (!mod) return;
       if (e.shiftKey || e.altKey) return;
       const key = e.key.toLowerCase();
       if (key === "s") {
@@ -88,7 +96,7 @@ export function useEditorKeybindings(): void {
         void saveActiveDoc();
       } else if (key === "w") {
         e.preventDefault();
-        closeActiveTab();
+        void closeActiveTab();
       }
     };
     window.addEventListener("keydown", onKeyDown);

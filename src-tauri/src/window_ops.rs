@@ -66,6 +66,14 @@ pub fn new_window(app: AppHandle) -> Result<(), String> {
     open_new_window(&app).map(|_| ())
 }
 
+/// Exit the application. Invoked by the frontend after its own dirty-check when
+/// the user picks Quit from the menu (or presses Cmd/Ctrl+Q). `app.exit` fires
+/// `RunEvent::ExitRequested`, so the managers' `shutdown_all` cleanup still runs.
+#[tauri::command]
+pub fn quit_app(app: AppHandle) {
+    app.exit(0);
+}
+
 #[cfg(test)]
 mod tests {
     use super::{next_available_window_label, window_label};

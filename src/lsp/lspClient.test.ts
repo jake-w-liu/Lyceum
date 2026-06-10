@@ -19,6 +19,8 @@ import {
   didClose,
   didOpen,
   ensureServer,
+  getSession,
+  setOpenDocsProvider,
   stopServer,
 } from "./lspClient";
 import { initialLspStatusData, useLspStatusStore } from "../state/lspStatusStore";
@@ -101,6 +103,66 @@ describe("ensureServer", () => {
     expect(sentMethods(lspSendMock.mock.calls)).not.toContain(
       "textDocument/didChange",
     );
+  });
+
+  it("didOpens already-open documents when a session becomes ready", async () => {
+    setOpenDocsProvider(() => [
+      { uri: "file:///w/existing.jl", languageId: "julia", text: "x = 1" },
+    ]);
+    try {
+      const session = await ensureServer("julia", "/w", null);
+      await session?.ready;
+      // Let the void didOpen continuations run.
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const opens = lspSendMock.mock.calls
+        .map(([, raw]) => JSON.parse(raw as string))
+        .filter((m) => m.method === "textDocument/didOpen");
+      expect(opens).toHaveLength(1);
+      expect(opens[0].params.textDocument.uri).toBe("file:///w/existing.jl");
+      expect(session?.openDocs.has("file:///w/existing.jl")).toBe(true);
+    } finally {
+      setOpenDocsProvider(() => []);
+    }
+  });
+
+  it("auto-restarts once after an unexpected exit, but never loops", async () => {
+    vi.useFakeTimers();
+    const exitCallbacks = new Map<string, () => void>();
+    onLspExitMock.mockReset().mockImplementation(async (id, cb) => {
+      exitCallbacks.set(id as string, cb as () => void);
+      return () => {};
+    });
+    setOpenDocsProvider(() => [
+      { uri: "file:///w/a.jl", languageId: "julia", text: "x" },
+    ]);
+    try {
+      const session = await ensureServer("julia", "/w", null);
+      await session?.ready;
+      expect(lspStartMock).toHaveBeenCalledTimes(1);
+
+      // Unexpected exit (session still registered) -> one automatic restart
+      // after a short delay.
+      exitCallbacks.get(session!.id)!();
+      expect(getSession("julia")).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(lspStartMock).toHaveBeenCalledTimes(2);
+
+      const restarted = getSession("julia");
+      expect(restarted).toBeDefined();
+      expect(restarted?.id).not.toBe(session?.id);
+      await restarted?.ready;
+
+      // The restarted session dying again must NOT spawn a third server.
+      exitCallbacks.get(restarted!.id)!();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(lspStartMock).toHaveBeenCalledTimes(2);
+      expect(getSession("julia")).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+      setOpenDocsProvider(() => []);
+    }
   });
 
   it("a stop during the startup handshake neither starts the server nor leaks listeners", async () => {

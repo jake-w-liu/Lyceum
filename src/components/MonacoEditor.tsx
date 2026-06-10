@@ -17,12 +17,22 @@ import JsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
 import CssWorker from "monaco-editor/esm/vs/language/css/css.worker?worker";
 import HtmlWorker from "monaco-editor/esm/vs/language/html/html.worker?worker";
 import TsWorker from "monaco-editor/esm/vs/language/typescript/ts.worker?worker";
-import { isTextDoc, useEditorStore } from "../state/editorStore";
+import {
+  isTextDoc,
+  setPendingEditsFlusher,
+  useEditorStore,
+} from "../state/editorStore";
 import { useWorkspaceStore } from "../state/workspaceStore";
+import { useStatusStore } from "../state/statusStore";
 import { useSettingsStore, type Settings } from "../state/settingsStore";
 import { monacoThemeFor, useThemeStore } from "../state/themeStore";
 import { registerLanguages } from "../editor/monacoLanguages";
-import { attachMonacoLsp } from "../lsp/monacoLsp";
+import {
+  attachMonacoLsp,
+  clearLspUriOverride,
+  lspUriForModel,
+  setLspUriOverride,
+} from "../lsp/monacoLsp";
 import {
   didChange,
   didClose,
@@ -39,6 +49,37 @@ import { setActiveEditor } from "../lib/editorBridge";
 let lspChangeVersion = 1;
 // Coalesce per-keystroke edits into one LSP didChange notification.
 const LSP_DIDCHANGE_DEBOUNCE_MS = 150;
+// Coalesce per-keystroke editor->store content writes (each one copies the
+// whole document; a 10 MB file would otherwise produce tens of MB/s garbage).
+const STORE_WRITE_DEBOUNCE_MS = 150;
+
+// --- Debounced editor->store content sync ----------------------------------
+// The dirty transition (clean -> first edit) writes through immediately so the
+// tab's dirty dot appears on the first keystroke; while already dirty, writes
+// are debounced. Every reader of doc.content (saves, dirty checks, run/build)
+// calls flushPendingEdits() first — registered below via setPendingEditsFlusher
+// so callers never import this (lazy-loaded) chunk. Module-level state: there
+// is at most one Monaco host, and only the active model receives edits.
+let pendingStoreWrite: {
+  path: string;
+  model: monaco.editor.ITextModel;
+} | null = null;
+let storeWriteTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flushPendingStoreWrite(): void {
+  if (storeWriteTimer) {
+    clearTimeout(storeWriteTimer);
+    storeWriteTimer = null;
+  }
+  const pending = pendingStoreWrite;
+  pendingStoreWrite = null;
+  if (!pending || pending.model.isDisposed()) return;
+  useEditorStore
+    .getState()
+    .updateContent(pending.path, pending.model.getValue());
+}
+
+setPendingEditsFlusher(flushPendingStoreWrite);
 
 // Wire Monaco's web workers for Vite (offline; no CDN). Configured once.
 type MonacoEnv = { getWorker: (workerId: string, label: string) => Worker };
@@ -98,18 +139,21 @@ export default function MonacoEditor() {
       .map((d) => `${d.path}:${d.reloadVersion}`)
       .join("\n"),
   );
-  // Per-document (keyed by model URI) debounce + pending payload, so a change in
+  const pendingReveal = useEditorStore((s) => s.pendingReveal);
+  const lastDocMoves = useEditorStore((s) => s.lastDocMoves);
+  // Per-document (keyed by LSP URI) debounce + pending model, so a change in
   // one document never cancels another document's pending didChange on a fast
   // tab switch (a single shared timer would drop the outgoing doc's last edit).
+  // The model (not its text) is stored; the full text is read once at flush.
   const lspChangeTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(
     new Map(),
   );
   const pendingLspChanges = useRef<
-    Map<string, { session: LspSession; text: string }>
+    Map<string, { session: LspSession; model: monaco.editor.ITextModel }>
   >(new Map());
   const startedLangsRef = useRef<Set<string>>(new Set());
 
-  // Send (and clear) the pending debounced didChange for a model URI immediately.
+  // Send (and clear) the pending debounced didChange for an LSP URI immediately.
   const flushLspChange = useCallback((uri: string) => {
     const timer = lspChangeTimers.current.get(uri);
     if (timer) {
@@ -125,8 +169,13 @@ export default function MonacoEditor() {
       // session (or dropping it if none) avoids a notify on a dead session;
       // didChange is gated on openDocs, so a fresh session safely ignores it.
       const session = getSession(pending.session.languageId);
-      if (session) {
-        void didChange(session, uri, (lspChangeVersion += 1), pending.text);
+      if (session && !pending.model.isDisposed()) {
+        void didChange(
+          session,
+          uri,
+          (lspChangeVersion += 1),
+          pending.model.getValue(),
+        );
       }
     }
   }, []);
@@ -164,22 +213,43 @@ export default function MonacoEditor() {
     const changeSub = editor.onDidChangeModelContent(() => {
       const path = currentPathRef.current;
       const model = editor.getModel();
-      if (path && model) {
-        const text = model.getValue();
-        useEditorStore.getState().updateContent(path, text);
-        const session = getSession(model.getLanguageId());
-        if (session) {
-          const uri = model.uri.toString();
-          // Debounce per-URI: a burst of typing yields ONE didChange with the
-          // latest text, and edits to other documents never clear this one.
-          pendingLspChanges.current.set(uri, { session, text });
-          const existing = lspChangeTimers.current.get(uri);
-          if (existing) clearTimeout(existing);
-          lspChangeTimers.current.set(
-            uri,
-            setTimeout(() => flushLspChange(uri), LSP_DIDCHANGE_DEBOUNCE_MS),
-          );
+      if (!path || !model) return;
+      // Defensive: a pending write for a DIFFERENT doc (tab switched without a
+      // flush — should not happen) must land before tracking this one.
+      if (pendingStoreWrite && pendingStoreWrite.path !== path) {
+        flushPendingStoreWrite();
+      }
+      const doc = useEditorStore.getState().docs.find((d) => d.path === path);
+      const wasClean = !doc || doc.content === doc.savedContent;
+      if (wasClean) {
+        // First keystroke after a clean state: write through immediately so the
+        // tab's dirty dot updates at once.
+        if (storeWriteTimer) {
+          clearTimeout(storeWriteTimer);
+          storeWriteTimer = null;
         }
+        pendingStoreWrite = null;
+        useEditorStore.getState().updateContent(path, model.getValue());
+      } else {
+        pendingStoreWrite = { path, model };
+        if (storeWriteTimer) clearTimeout(storeWriteTimer);
+        storeWriteTimer = setTimeout(
+          flushPendingStoreWrite,
+          STORE_WRITE_DEBOUNCE_MS,
+        );
+      }
+      const session = getSession(model.getLanguageId());
+      if (session) {
+        const uri = lspUriForModel(model);
+        // Debounce per-URI: a burst of typing yields ONE didChange with the
+        // latest text, and edits to other documents never clear this one.
+        pendingLspChanges.current.set(uri, { session, model });
+        const existing = lspChangeTimers.current.get(uri);
+        if (existing) clearTimeout(existing);
+        lspChangeTimers.current.set(
+          uri,
+          setTimeout(() => flushLspChange(uri), LSP_DIDCHANGE_DEBOUNCE_MS),
+        );
       }
     });
 
@@ -193,6 +263,13 @@ export default function MonacoEditor() {
         );
     });
 
+    // Live Ln/Col for the status bar (isolated store; see statusStore).
+    const cursorSub = editor.onDidChangeCursorPosition((e) => {
+      useStatusStore
+        .getState()
+        .setCursor(e.position.lineNumber, e.position.column);
+    });
+
     const models = modelsRef.current;
     const startedLangs = startedLangsRef.current;
     const timers = lspChangeTimers.current;
@@ -202,28 +279,73 @@ export default function MonacoEditor() {
       unsubSettings();
       changeSub.dispose();
       selSub.dispose();
+      cursorSub.dispose();
       setActiveEditor(null);
+      // Commit any outstanding debounced content before the models go away.
+      flushPendingStoreWrite();
       editor.dispose();
       editorRef.current = null;
       timers.forEach((t) => clearTimeout(t));
       timers.clear();
       pendings.clear();
-      models.forEach((m) => m.dispose());
+      models.forEach((m) => {
+        clearLspUriOverride(m);
+        m.dispose();
+      });
       models.clear();
       // Stop the language servers this editor instance started.
       startedLangs.forEach((lang) => void stopServer(lang));
       startedLangs.clear();
     };
-  }, []);
+  }, [flushLspChange]);
+
+  // Re-key models when open files are renamed/moved, BEFORE the bind/dispose
+  // effects below react to the changed paths (effects run in declaration
+  // order). Keeping the same model object preserves undo history + view state;
+  // the LSP is told didClose(old)/didOpen(new) and the model's traffic is
+  // routed through the new URI from now on (model URIs are immutable).
+  useEffect(() => {
+    if (!lastDocMoves) return;
+    for (const move of lastDocMoves.moves) {
+      const model = modelsRef.current.get(move.from);
+      if (!model || model.isDisposed()) continue;
+      const doc = useEditorStore.getState().docs.find((d) => d.path === move.to);
+      // A rename that changes the language (e.g. notes.txt -> notes.md) keeps
+      // the old dispose/recreate path so the model is rebuilt with the right
+      // grammar (undo history is lost in that case — known limitation).
+      if (!doc || !isTextDoc(doc) || doc.language !== model.getLanguageId()) {
+        continue;
+      }
+      const oldUri = lspUriForModel(model);
+      const newUri = monaco.Uri.file(move.to).toString();
+      // Deliver the outgoing URI's pending edit before the server forgets it.
+      flushLspChange(oldUri);
+      modelsRef.current.delete(move.from);
+      modelsRef.current.set(move.to, model);
+      if (pendingStoreWrite?.path === move.from) {
+        pendingStoreWrite = { ...pendingStoreWrite, path: move.to };
+      }
+      if (currentPathRef.current === move.from) {
+        currentPathRef.current = move.to;
+      }
+      setLspUriOverride(model, newUri);
+      const session = getSession(model.getLanguageId());
+      if (session) {
+        void didClose(session, oldUri);
+        void didOpen(session, newUri, model.getLanguageId(), model.getValue());
+      }
+    }
+  }, [lastDocMoves, flushLspChange]);
 
   // Bind the active document's model to the editor.
   useEffect(() => {
     const editor = editorRef.current;
     if (!editor) return;
     // Before (potentially) switching models, flush the outgoing document's
-    // pending debounced change so its final edit is delivered to the server.
+    // pending debounced store write + didChange so nothing reads stale state.
+    flushPendingStoreWrite();
     const outgoing = editor.getModel();
-    if (outgoing) flushLspChange(outgoing.uri.toString());
+    if (outgoing) flushLspChange(lspUriForModel(outgoing));
     if (activePath === null) {
       editor.setModel(null);
       currentPathRef.current = null;
@@ -272,7 +394,7 @@ export default function MonacoEditor() {
           }
           void didOpen(
             session,
-            created.uri.toString(),
+            lspUriForModel(created),
             liveDoc.language,
             created.getValue(),
           );
@@ -288,7 +410,31 @@ export default function MonacoEditor() {
     useEditorStore
       .getState()
       .setSelection(selection ? model.getValueInRange(selection) : "");
+    // Sync the status-bar cursor to the restored view state of this tab.
+    const position = editor.getPosition();
+    useStatusStore
+      .getState()
+      .setCursor(position?.lineNumber ?? 1, position?.column ?? 1);
   }, [activePath, openPaths, flushLspChange]);
+
+  // Reveal a requested position (e.g. a search result's line/column) once its
+  // document is bound. The store field is consumed-and-cleared so a later tab
+  // switch back to the same doc never re-reveals.
+  useEffect(() => {
+    if (!pendingReveal) return;
+    const editor = editorRef.current;
+    if (!editor || pendingReveal.path !== currentPathRef.current) return;
+    const model = editor.getModel();
+    if (!model) return;
+    const position = model.validatePosition({
+      lineNumber: pendingReveal.line,
+      column: pendingReveal.column,
+    });
+    editor.setPosition(position);
+    editor.revealPositionInCenter(position);
+    editor.focus();
+    useEditorStore.getState().clearPendingReveal();
+  }, [pendingReveal, activePath, openPaths]);
 
   // When a clean open text file changes on disk, the watcher updates the store.
   // Existing Monaco models do not subscribe to content, so explicitly sync only
@@ -297,7 +443,7 @@ export default function MonacoEditor() {
     for (const doc of useEditorStore.getState().docs.filter(isTextDoc)) {
       const model = modelsRef.current.get(doc.path);
       if (!model || model.getValue() === doc.content) continue;
-      const uri = model.uri.toString();
+      const uri = lspUriForModel(model);
       const isActiveModel = editorRef.current?.getModel() === model;
       flushLspChange(uri);
       model.setValue(doc.content);
@@ -318,7 +464,7 @@ export default function MonacoEditor() {
     );
     for (const [path, model] of modelsRef.current) {
       if (!open.has(path)) {
-        const uri = model.uri.toString();
+        const uri = lspUriForModel(model);
         // Drop any pending debounced change for this doc so its timer can't fire
         // after didClose (a no-op now that didChange is gated on openDocs, but we
         // also avoid leaking the timer/payload until the whole editor unmounts).
@@ -328,8 +474,10 @@ export default function MonacoEditor() {
           lspChangeTimers.current.delete(uri);
         }
         pendingLspChanges.current.delete(uri);
+        if (pendingStoreWrite?.path === path) pendingStoreWrite = null;
         const session = getSession(model.getLanguageId());
         if (session) void didClose(session, uri);
+        clearLspUriOverride(model);
         model.dispose();
         modelsRef.current.delete(path);
       }

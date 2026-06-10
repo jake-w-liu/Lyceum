@@ -5,6 +5,7 @@
 // etc.) are never descended into, mirroring `walk.rs`.
 
 use serde::Serialize;
+use std::collections::HashSet;
 use std::path::Path;
 
 /// Directory names that are skipped entirely (not descended into).
@@ -77,6 +78,12 @@ pub fn search_in_dir(root: &Path, query: &str, max: usize) -> Result<Vec<SearchM
     let needle = query.to_lowercase();
     let mut matches: Vec<SearchMatch> = Vec::new();
     let mut stack: Vec<std::path::PathBuf> = vec![root.to_path_buf()];
+    // Canonical paths of directories already walked. Guards against descending
+    // the same tree twice and against symlink cycles (mirrors walk.rs).
+    let mut visited: HashSet<std::path::PathBuf> = HashSet::new();
+    if let Ok(canon) = root.canonicalize() {
+        visited.insert(canon);
+    }
 
     while let Some(dir) = stack.pop() {
         if matches.len() >= max {
@@ -93,12 +100,34 @@ pub fn search_in_dir(root: &Path, query: &str, max: usize) -> Result<Vec<SearchM
             let Ok(file_type) = entry.file_type() else {
                 continue;
             };
-            if file_type.is_dir() {
+            let path = entry.path();
+            // Resolve the REAL kind: file_type() reports a symlink as a symlink
+            // (is_dir() == false), so a symlinked directory would otherwise fall
+            // into the file branch and its subtree would be silently skipped.
+            let is_dir = if file_type.is_symlink() {
+                match std::fs::metadata(&path) {
+                    Ok(meta) => meta.is_dir(),
+                    Err(_) => continue, // broken symlink — skip
+                }
+            } else {
+                file_type.is_dir()
+            };
+            if is_dir {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if SKIP_DIRS.contains(&name.as_str()) {
                     continue;
                 }
-                stack.push(entry.path());
+                // Canonicalize before descending so a tree reachable via a
+                // symlink (or two paths) is searched at most once.
+                match path.canonicalize() {
+                    Ok(canon) => {
+                        if !visited.insert(canon) {
+                            continue;
+                        }
+                    }
+                    Err(_) => continue,
+                }
+                stack.push(path);
                 continue;
             }
 
@@ -106,7 +135,6 @@ pub fn search_in_dir(root: &Path, query: &str, max: usize) -> Result<Vec<SearchM
                 break;
             }
 
-            let path = entry.path();
             // Skip files too large to read into memory safely. Stat the RESOLVED
             // target (`fs::metadata` follows symlinks) rather than `entry.metadata()`
             // (which reports the symlink's own tiny size) — otherwise a symlink to a
@@ -128,8 +156,16 @@ pub fn search_in_dir(root: &Path, query: &str, max: usize) -> Result<Vec<SearchM
                 if matches.len() >= max {
                     break;
                 }
-                if let Some(byte_offset) = find_ci(raw_line, &needle) {
+                // Report EVERY occurrence on the line (not just the first),
+                // advancing past each match, while still respecting the cap.
+                let needle_chars = needle.chars().count().max(1);
+                let mut search_from = 0usize;
+                while matches.len() < max && search_from < raw_line.len() {
+                    let Some(found) = find_ci(&raw_line[search_from..], &needle) else {
+                        break;
+                    };
                     // `byte_offset` indexes the original line on a char boundary.
+                    let byte_offset = search_from + found;
                     let column = raw_line[..byte_offset].chars().count() as u32 + 1;
                     matches.push(SearchMatch {
                         path: path_str.clone(),
@@ -137,6 +173,16 @@ pub fn search_in_dir(root: &Path, query: &str, max: usize) -> Result<Vec<SearchM
                         column,
                         text: raw_line.to_string(),
                     });
+                    // Advance past the matched span (the needle's char count,
+                    // walked over the original line so the offset stays on a
+                    // char boundary); at least one char so the loop terminates.
+                    let advance: usize = raw_line[byte_offset..]
+                        .chars()
+                        .take(needle_chars)
+                        .map(|c| c.len_utf8())
+                        .sum::<usize>()
+                        .max(1);
+                    search_from = byte_offset + advance;
                 }
             }
         }

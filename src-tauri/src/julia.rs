@@ -30,13 +30,47 @@ pub struct RunManager {
 impl RunManager {
     /// Kill every in-flight run (whole process group each). Called on app exit
     /// so a long-running Julia process is not orphaned when Lyceum quits.
+    /// Entries are drained under the lock, but the (blocking) kills happen
+    /// after the guard is dropped so reaper threads are never blocked on it.
     pub fn shutdown_all(&self) {
-        if let Ok(mut runs) = self.runs.lock() {
-            for (_id, pid) in runs.drain() {
-                kill_pid(pid);
-            }
+        let pids: Vec<u32> = match self.runs.lock() {
+            Ok(mut runs) => runs.drain().map(|(_id, pid)| pid).collect(),
+            Err(_) => return,
+        };
+        for pid in pids {
+            kill_pid(pid);
         }
     }
+
+    /// Cancel every in-flight run belonging to one window (called when it is
+    /// destroyed), reusing the `run_cancel` discipline: entries are removed
+    /// while the lock is held — so removal stays serialized against the reaper
+    /// threads and `run_cancel` — and the (blocking) kills happen after the
+    /// guard is dropped.
+    pub fn cancel_runs_for_window(&self, label: &str) {
+        let prefix = format!("{label}:");
+        let mut pids = Vec::new();
+        match self.runs.lock() {
+            Ok(mut runs) => runs.retain(|key, pid| {
+                if key.starts_with(&prefix) {
+                    pids.push(*pid);
+                    false
+                } else {
+                    true
+                }
+            }),
+            Err(_) => return,
+        }
+        for pid in pids {
+            kill_pid(pid);
+        }
+    }
+}
+
+/// Runs are app-global but ids are generated per window, so the registry is
+/// keyed by `"<window label>:<id>"` to keep windows from colliding.
+pub(crate) fn run_key(window: &tauri::Window, id: &str) -> String {
+    format!("{}:{}", window.label(), id)
 }
 
 /// Resolve the Julia executable: an explicit setting, else common GUI-app PATH
@@ -164,6 +198,10 @@ struct LineSplitter {
 }
 
 impl LineSplitter {
+    /// A buffered line longer than this is force-flushed as-is, so a child that
+    /// prints a huge chunk with no newline cannot grow the buffer unboundedly.
+    const MAX_LINE: usize = 1024 * 1024;
+
     /// Feed freshly read bytes; returns each completed line (terminator stripped).
     fn feed(&mut self, data: &[u8]) -> Vec<String> {
         let mut out = Vec::new();
@@ -183,6 +221,10 @@ impl LineSplitter {
             } else {
                 self.pending_cr = false;
                 self.line.push(b);
+                if self.line.len() >= Self::MAX_LINE {
+                    out.push(String::from_utf8_lossy(&self.line).into_owned());
+                    self.line.clear();
+                }
             }
         }
         out
@@ -200,8 +242,9 @@ impl LineSplitter {
     }
 }
 
-/// Read a child stream to EOF, emitting each line as an `OutputLine` event.
-fn pump<R: Read>(mut reader: R, app: &AppHandle, event: &str, stream_name: &str) {
+/// Read a child stream to EOF, emitting each line as an `OutputLine` event to
+/// the owning window only.
+fn pump<R: Read>(mut reader: R, app: &AppHandle, label: &str, event: &str, stream_name: &str) {
     let mut splitter = LineSplitter::default();
     let mut buf = [0u8; 4096];
     loop {
@@ -209,7 +252,8 @@ fn pump<R: Read>(mut reader: R, app: &AppHandle, event: &str, stream_name: &str)
             Ok(0) => break,
             Ok(n) => {
                 for line in splitter.feed(&buf[..n]) {
-                    let _ = app.emit(
+                    let _ = app.emit_to(
+                        label,
                         event,
                         OutputLine {
                             stream: stream_name.into(),
@@ -222,7 +266,8 @@ fn pump<R: Read>(mut reader: R, app: &AppHandle, event: &str, stream_name: &str)
         }
     }
     if let Some(line) = splitter.finish() {
-        let _ = app.emit(
+        let _ = app.emit_to(
+            label,
             event,
             OutputLine {
                 stream: stream_name.into(),
@@ -278,6 +323,7 @@ fn kill_pid(pid: u32) {
 #[tauri::command]
 pub fn run_julia(
     app: AppHandle,
+    window: tauri::Window,
     state: State<RunManager>,
     id: String,
     julia_path: Option<String>,
@@ -310,8 +356,9 @@ pub fn run_julia(
         .map_err(|e| format!("failed to start {program}: {e}"))?;
     stream_child(
         app,
+        window.label().to_string(),
         child,
-        id.clone(),
+        run_key(&window, &id),
         state.runs.clone(),
         format!("julia:output:{id}"),
         format!("julia:exit:{id}"),
@@ -320,27 +367,32 @@ pub fn run_julia(
 }
 
 /// Stream a spawned child's stdout/stderr as `<out_event>` (OutputLine payloads)
-/// and its exit code as `<exit_event>`. Registers the child in `runs` (keyed by
-/// `id`) so it can be cancelled, and removes it on exit.
+/// and its exit code as `<exit_event>`, emitted to the window labelled `label`.
+/// Registers the child in `runs` (keyed by `key`, see `run_key`) so it can be
+/// cancelled, and removes it on exit.
 pub(crate) fn stream_child(
     app: AppHandle,
+    label: String,
     mut child: Child,
-    id: String,
+    key: String,
     runs: RunMap,
     out_event: String,
     exit_event: String,
 ) {
-    runs.lock().unwrap().insert(id.clone(), child.id());
+    let pid = child.id();
+    runs.lock().unwrap().insert(key.clone(), pid);
 
     let out_handle = child.stdout.take().map(|stdout| {
         let app = app.clone();
+        let label = label.clone();
         let event = out_event.clone();
-        std::thread::spawn(move || pump(stdout, &app, &event, "stdout"))
+        std::thread::spawn(move || pump(stdout, &app, &label, &event, "stdout"))
     });
     let err_handle = child.stderr.take().map(|stderr| {
         let app = app.clone();
+        let label = label.clone();
         let event = out_event.clone();
-        std::thread::spawn(move || pump(stderr, &app, &event, "stderr"))
+        std::thread::spawn(move || pump(stderr, &app, &label, &event, "stderr"))
     });
     std::thread::spawn(move || {
         let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
@@ -349,7 +401,14 @@ pub(crate) fn stream_child(
         // `run_cancel` (which would otherwise signal an unrelated process that
         // reused the pid). Draining the pumps below can block (e.g. if a grandchild
         // holds the pipe open), so this must happen before the joins, not after.
-        runs.lock().unwrap().remove(&id);
+        // Only remove the entry if it still maps to OUR pid — a new run that
+        // reused the key must not lose its (live) registration.
+        {
+            let mut runs = runs.lock().unwrap();
+            if runs.get(&key).copied() == Some(pid) {
+                runs.remove(&key);
+            }
+        }
         // Drain output before signaling exit so the frontend (which tears down
         // its output listener on exit) does not lose trailing lines — but bound
         // the wait. A grandchild that inherited the pipe (e.g. latexmk forking
@@ -366,21 +425,27 @@ pub(crate) fn stream_child(
             let _ = tx.send(());
         });
         let _ = rx.recv_timeout(std::time::Duration::from_secs(2));
-        let _ = app.emit(&exit_event, code);
+        let _ = app.emit_to(label.as_str(), &exit_event, code);
     });
 }
 
 /// Cancel an in-flight Julia run by id, killing its whole process group.
-/// Idempotent. The kill happens while the `runs` lock is held so it is
-/// serialized against the reaper thread's removal of the same entry: whichever
-/// thread removes the id first owns it, and the other observes `None` and does
-/// nothing — only one `kill_pid` can ever fire for a given run. Killing the
-/// process group (negative pid) further bounds blast radius if the leader pid
-/// were ever reused before the entry is dropped.
+/// Idempotent. The entry is removed while the `runs` lock is held, so removal
+/// is serialized against the reaper thread: whichever thread removes the id
+/// first owns it, and the other observes a miss and does nothing — only one
+/// `kill_pid` can ever fire for a given run. The kill itself (which spawns a
+/// blocking `kill` subprocess) happens AFTER the guard is dropped so it never
+/// stalls other run commands. Killing the process group (negative pid) further
+/// bounds blast radius if the leader pid were ever reused before the entry is
+/// dropped.
 #[tauri::command]
-pub fn run_cancel(state: State<RunManager>, id: String) -> Result<(), String> {
-    let mut runs = state.runs.lock().unwrap();
-    if let Some(pid) = runs.remove(&id) {
+pub fn run_cancel(
+    window: tauri::Window,
+    state: State<RunManager>,
+    id: String,
+) -> Result<(), String> {
+    let pid = state.runs.lock().unwrap().remove(&run_key(&window, &id));
+    if let Some(pid) = pid {
         kill_pid(pid);
     }
     Ok(())

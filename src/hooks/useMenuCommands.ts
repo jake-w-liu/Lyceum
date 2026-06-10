@@ -3,14 +3,19 @@
 // run it. Degrades to a no-op outside Tauri (listen rejects).
 
 import { useEffect } from "react";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { type UnlistenFn } from "@tauri-apps/api/event";
+import { listenScoped } from "../lib/windowEvents";
 import { commandRegistry } from "../commands/commandRegistry";
 
 export function useMenuCommands(): void {
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
     let disposed = false;
-    listen<string>("menu", (event) => {
+    // Window-scoped: the backend emits "menu" to the focused window only, but a
+    // target-Any listener would receive every window's menu events (an
+    // unfocused clean window would e.g. execute "quit" and skip the focused
+    // window's unsaved-changes prompt).
+    listenScoped<string>("menu", (event) => {
       void commandRegistry.execute(event.payload);
     })
       .then((fn) => {

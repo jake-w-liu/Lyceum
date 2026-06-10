@@ -22,8 +22,10 @@ export const DEFAULT_KEYMAP: Keybinding[] = [
   { key: "mod+alt+s", command: "file.saveAll" },
   { key: "mod+shift+e", command: "explorer.revealActiveFile" },
   { key: "mod+w", command: "editor.closeTab" },
-  { key: "mod+tab", command: "editor.nextTab" },
-  { key: "mod+shift+tab", command: "editor.previousTab" },
+  // Ctrl on EVERY platform (VS Code convention): on macOS Cmd+Tab is the OS
+  // app switcher and never reaches the WebView, so mod+tab would be dead.
+  { key: "ctrl+tab", command: "editor.nextTab" },
+  { key: "ctrl+shift+tab", command: "editor.previousTab" },
   { key: "mod+shift+v", command: "preview.open" },
   { key: "mod+shift+f", command: "workbench.searchWorkspace" },
   { key: "mod+enter", command: "editor.run" },
