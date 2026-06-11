@@ -76,18 +76,34 @@ export function useWorkspaceLifecycle(): void {
   }, []);
 
   // Guard the native window close (traffic-light / Alt+F4) behind the same
-  // discard confirmation. Degrades to a no-op outside Tauri.
+  // discard confirmation. The original close request is always cancelled
+  // synchronously, then we explicitly destroy the window after any async prompt.
+  // That keeps the native close path deterministic while preserving the dirty
+  // document guard. Degrades to a no-op outside Tauri.
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let disposed = false;
+    let closing = false;
     void (async () => {
       try {
-        const off = await getCurrentWindow().onCloseRequested(async (event) => {
-          if (!hasDirtyWorkspaceDocs()) return;
-          const ok = await askDiscard(
-            "Discard unsaved changes and close the window?",
-          );
-          if (!ok) event.preventDefault();
+        const currentWindow = getCurrentWindow();
+        const off = await currentWindow.onCloseRequested((event) => {
+          if (closing) return;
+          event.preventDefault();
+          void (async () => {
+            if (hasDirtyWorkspaceDocs()) {
+              const ok = await askDiscard(
+                "Discard unsaved changes and close the window?",
+              );
+              if (!ok || disposed) return;
+            }
+            closing = true;
+            try {
+              await currentWindow.destroy();
+            } catch {
+              closing = false;
+            }
+          })();
         });
         // Effect already cleaned up before the listener resolved: detach now.
         if (disposed) off();

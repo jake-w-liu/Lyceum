@@ -8,7 +8,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: askMock }));
 type CloseHandler = (event: {
   preventDefault: () => void;
 }) => void | Promise<void>;
-const { onCloseRequestedMock, getCloseHandler } = vi.hoisted(() => {
+const { onCloseRequestedMock, destroyMock, getCloseHandler } = vi.hoisted(() => {
   let handler: CloseHandler | null = null;
   const onCloseRequestedMock = vi.fn(async (h: CloseHandler) => {
     handler = h;
@@ -16,10 +16,14 @@ const { onCloseRequestedMock, getCloseHandler } = vi.hoisted(() => {
       handler = null;
     };
   });
-  return { onCloseRequestedMock, getCloseHandler: () => handler };
+  const destroyMock = vi.fn(async () => {});
+  return { onCloseRequestedMock, destroyMock, getCloseHandler: () => handler };
 });
 vi.mock("@tauri-apps/api/window", () => ({
-  getCurrentWindow: () => ({ onCloseRequested: onCloseRequestedMock }),
+  getCurrentWindow: () => ({
+    onCloseRequested: onCloseRequestedMock,
+    destroy: destroyMock,
+  }),
 }));
 
 import { initialEditorData, useEditorStore } from "../state/editorStore";
@@ -86,6 +90,7 @@ describe("useWorkspaceLifecycle", () => {
     resetStores();
     askMock.mockReset().mockResolvedValue(true);
     onCloseRequestedMock.mockClear();
+    destroyMock.mockClear();
   });
   afterEach(() => vi.unstubAllGlobals());
 
@@ -176,7 +181,7 @@ describe("useWorkspaceLifecycle", () => {
   });
 
   describe("window close guard", () => {
-    it("lets a clean window close without prompting", async () => {
+    it("destroys a clean window without prompting", async () => {
       seedWorkspaceScopedUi("/old", false);
       renderHook(() => useWorkspaceLifecycle());
       await waitFor(() => expect(getCloseHandler()).not.toBeNull());
@@ -187,7 +192,8 @@ describe("useWorkspaceLifecycle", () => {
       });
 
       expect(askMock).not.toHaveBeenCalled();
-      expect(preventDefault).not.toHaveBeenCalled();
+      expect(preventDefault).toHaveBeenCalledTimes(1);
+      await waitFor(() => expect(destroyMock).toHaveBeenCalledTimes(1));
     });
 
     it("prevents the close when discarding dirty docs is declined", async () => {
@@ -206,6 +212,7 @@ describe("useWorkspaceLifecycle", () => {
         expect.anything(),
       );
       expect(preventDefault).toHaveBeenCalledTimes(1);
+      expect(destroyMock).not.toHaveBeenCalled();
     });
 
     it("allows the close when the discard is confirmed", async () => {
@@ -219,7 +226,8 @@ describe("useWorkspaceLifecycle", () => {
         await getCloseHandler()!({ preventDefault });
       });
 
-      expect(preventDefault).not.toHaveBeenCalled();
+      expect(preventDefault).toHaveBeenCalledTimes(1);
+      await waitFor(() => expect(destroyMock).toHaveBeenCalledTimes(1));
     });
 
     it("detaches the close listener on unmount", async () => {
