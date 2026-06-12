@@ -6,6 +6,7 @@
 // be driven from one place:
 //   - `expanded`      which directory paths are currently open
 //   - `children`      cached listing per directory path
+//   - `loadedAtNonce` which refresh generation each cached listing belongs to
 //   - `refreshNonce`  bumped to force consumers to re-fetch listings
 
 import { create } from "zustand";
@@ -16,6 +17,7 @@ const MAX_DELETE_HISTORY = 50;
 export interface TreeData {
   expanded: Record<string, boolean>;
   children: Record<string, DirEntry[]>;
+  loadedAtNonce: Record<string, number>;
   refreshNonce: number;
   selectedPaths: string[];
   anchorPath: string | null;
@@ -35,7 +37,7 @@ export interface TreeActions {
   toggleExpanded: (path: string) => void;
   /** Collapse every directory (expanded back to {}). */
   collapseAll: () => void;
-  /** Drop the cached listings and bump the nonce to force a re-fetch. */
+  /** Mark cached listings stale and bump the nonce to force a re-fetch. */
   refresh: () => void;
   /** Mark all given paths expanded (used by reveal for each ancestor dir). */
   expandPaths: (paths: string[]) => void;
@@ -77,6 +79,7 @@ export type TreeState = TreeData & TreeActions;
 export const initialTreeData: TreeData = {
   expanded: {},
   children: {},
+  loadedAtNonce: {},
   refreshNonce: 0,
   selectedPaths: [],
   anchorPath: null,
@@ -90,14 +93,17 @@ export const useTreeStore = create<TreeState>()((set, get) => ({
   ...initialTreeData,
 
   setChildren: (path, entries) =>
-    set((s) => ({ children: { ...s.children, [path]: entries } })),
+    set((s) => ({
+      children: { ...s.children, [path]: entries },
+      loadedAtNonce: { ...s.loadedAtNonce, [path]: s.refreshNonce },
+    })),
   setExpanded: (path, value) =>
     set((s) => ({ expanded: { ...s.expanded, [path]: value } })),
   toggleExpanded: (path) =>
     set((s) => ({ expanded: { ...s.expanded, [path]: !s.expanded[path] } })),
   collapseAll: () => set({ expanded: {} }),
   refresh: () =>
-    set((s) => ({ children: {}, refreshNonce: s.refreshNonce + 1 })),
+    set((s) => ({ refreshNonce: s.refreshNonce + 1 })),
   expandPaths: (paths) =>
     set((s) => {
       const expanded = { ...s.expanded };

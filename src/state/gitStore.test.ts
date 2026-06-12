@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { computeFolders, initialGitData, parentOf, useGitStore } from "./gitStore";
-import type { GitFileStatus } from "../lib/ipc";
+import {
+  computeFolderDecorations,
+  computeFolders,
+  initialGitData,
+  parentOf,
+  useGitStore,
+} from "./gitStore";
+import type { GitFileStatus, GitStatus } from "../lib/ipc";
 import {
   initialWorkspaceData,
   useWorkspaceStore,
@@ -76,18 +82,39 @@ describe("computeFolders", () => {
     const files: Record<string, GitFileStatus> = { "/repo/build/out.js": "ignored" };
     expect(computeFolders(files)).toEqual({});
   });
+
+  it("rolls nested repository scope up to ancestor folders", () => {
+    const files: Record<string, GitFileStatus> = {
+      "/repo/pkg/src/a.ts": "modified",
+    };
+    const folders = computeFolderDecorations(files, {
+      "/repo/pkg/src/a.ts": "nested",
+    });
+
+    expect(folders.statuses["/repo/pkg"]).toBe("modified");
+    expect(folders.scopes["/repo/pkg"]).toBe("nested");
+    expect(folders.scopes["/repo"]).toBe("nested");
+  });
+
+  it("lets workspace scope win when a folder contains workspace and nested changes", () => {
+    const files: Record<string, GitFileStatus> = {
+      "/repo/main.ts": "modified",
+      "/repo/pkg/src/a.ts": "modified",
+    };
+    const folders = computeFolderDecorations(files, {
+      "/repo/main.ts": "workspace",
+      "/repo/pkg/src/a.ts": "nested",
+    });
+
+    expect(folders.scopes["/repo/pkg"]).toBe("nested");
+    expect(folders.scopes["/repo"]).toBe("workspace");
+  });
 });
 
 describe("gitStore", () => {
   it("ignores stale git status responses after the workspace changes", async () => {
-    let resolveOld!: (value: {
-      isRepo: boolean;
-      files: Record<string, GitFileStatus>;
-    }) => void;
-    let resolveNew!: (value: {
-      isRepo: boolean;
-      files: Record<string, GitFileStatus>;
-    }) => void;
+    let resolveOld!: (value: GitStatus) => void;
+    let resolveNew!: (value: GitStatus) => void;
     gitStatusMock
       .mockImplementationOnce(
         () =>
@@ -107,10 +134,19 @@ describe("gitStore", () => {
     useWorkspaceStore.getState().openWorkspace("/new");
     const newRefresh = useGitStore.getState().refresh();
 
-    resolveNew({ isRepo: true, files: { "/new/a.ts": "modified" } });
+    resolveNew({
+      isRepo: true,
+      rootRepo: "/new",
+      repoRoots: ["/new"],
+      files: { "/new/a.ts": "modified" },
+      fileRepos: { "/new/a.ts": "/new" },
+    });
     await newRefresh;
     expect(useGitStore.getState().files).toEqual({
       "/new/a.ts": "modified",
+    });
+    expect(useGitStore.getState().fileScopes).toEqual({
+      "/new/a.ts": "workspace",
     });
 
     resolveOld({ isRepo: true, files: { "/old/stale.ts": "deleted" } });
@@ -122,14 +158,8 @@ describe("gitStore", () => {
   });
 
   it("ignores out-of-order responses within the SAME root (staleness guard)", async () => {
-    let resolveFirst!: (value: {
-      isRepo: boolean;
-      files: Record<string, GitFileStatus>;
-    }) => void;
-    let resolveSecond!: (value: {
-      isRepo: boolean;
-      files: Record<string, GitFileStatus>;
-    }) => void;
+    let resolveFirst!: (value: GitStatus) => void;
+    let resolveSecond!: (value: GitStatus) => void;
     gitStatusMock
       .mockImplementationOnce(
         () =>
@@ -157,5 +187,31 @@ describe("gitStore", () => {
     expect(useGitStore.getState().files).toEqual({
       "/repo/new.ts": "modified",
     });
+  });
+
+  it("marks files owned by nested repositories with nested scope", async () => {
+    gitStatusMock.mockResolvedValue({
+      isRepo: true,
+      rootRepo: "/repo",
+      repoRoots: ["/repo", "/repo/pkg"],
+      files: {
+        "/repo/main.ts": "modified",
+        "/repo/pkg/src/a.ts": "modified",
+      },
+      fileRepos: {
+        "/repo/main.ts": "/repo",
+        "/repo/pkg/src/a.ts": "/repo/pkg",
+      },
+    });
+
+    useWorkspaceStore.getState().openWorkspace("/repo");
+    await useGitStore.getState().refresh();
+
+    expect(useGitStore.getState().fileScopes).toEqual({
+      "/repo/main.ts": "workspace",
+      "/repo/pkg/src/a.ts": "nested",
+    });
+    expect(useGitStore.getState().folderScopes["/repo/pkg"]).toBe("nested");
+    expect(useGitStore.getState().folderScopes["/repo"]).toBe("workspace");
   });
 });

@@ -70,6 +70,20 @@ describe("TabBar", () => {
     expect(screen.queryByText("a.ts")).not.toBeInTheDocument();
   });
 
+  it("closes all tabs from the topbar action", async () => {
+    seed();
+    render(<TabBar />);
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Close All Editors" }),
+    );
+
+    expect(get().docs).toEqual([]);
+    expect(get().activePath).toBeNull();
+    expect(screen.queryByText("a.ts")).not.toBeInTheDocument();
+    expect(screen.queryByText("b.ts")).not.toBeInTheDocument();
+  });
+
   it("closes a tab on middle-click", async () => {
     seed();
     render(<TabBar />);
@@ -212,6 +226,30 @@ describe("TabBar", () => {
     const action = screen.getByRole("button", { name: "Open Preview" });
     const tabList = container.querySelector(".tab-list");
     expect(tabList).not.toContainElement(action);
+  });
+
+  it("scrolls overflowing tabs horizontally on touchpad wheel", () => {
+    for (let i = 0; i < 20; i++) {
+      get().openDoc({
+        path: `/w/file-${i}.ts`,
+        content: "",
+        language: "typescript",
+      });
+    }
+    const { container } = render(<TabBar />);
+    const tabList = container.querySelector(".tab-list") as HTMLDivElement;
+    Object.defineProperty(tabList, "clientWidth", {
+      configurable: true,
+      value: 200,
+    });
+    Object.defineProperty(tabList, "scrollWidth", {
+      configurable: true,
+      value: 1000,
+    });
+
+    fireEvent.wheel(tabList, { deltaY: 80 });
+
+    expect(tabList.scrollLeft).toBe(80);
   });
 
   it("hides the Preview action for non-previewable files", () => {

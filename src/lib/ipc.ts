@@ -187,13 +187,21 @@ export type GitFileStatus =
 /** Workspace git status, mirroring the Rust `GitStatusDto`. */
 export interface GitStatus {
   isRepo: boolean;
+  /** Top-level repository containing the opened workspace root, when any. */
+  rootRepo?: string | null;
+  /** Repository roots queried for this workspace. */
+  repoRoots?: string[];
   /** Absolute path -> status. */
   files: Record<string, GitFileStatus>;
+  /** Absolute path -> owning repository top-level path. */
+  fileRepos?: Record<string, string>;
 }
 
 /**
  * Fetch git working-tree status for the workspace (Explorer decorations).
- * The backend is best-effort: a non-git folder resolves to `{ isRepo: false }`.
+ * The backend is best-effort: a folder with no Git repository resolves to
+ * `{ isRepo: false }`; folders containing nested repositories still return
+ * those nested decorations.
  */
 export async function gitStatus(root: string): Promise<GitStatus> {
   return invoke<GitStatus>("git_status", { root });

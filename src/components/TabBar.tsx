@@ -1,6 +1,6 @@
 // The open-editors tab strip: one tab per open document, with an active
-// indicator, an unsaved (dirty) dot, and a per-tab close button. Reads and
-// drives editor state via useEditorStore.
+// indicator, an unsaved (dirty) dot, per-tab close buttons, and editor actions.
+// Reads and drives editor state via useEditorStore.
 
 import { useEffect, useRef } from "react";
 import { Icon } from "./Icon";
@@ -24,11 +24,22 @@ import {
   type ContextMenuItem,
 } from "../state/contextMenuStore";
 
+function wheelDeltaToPixels(
+  delta: number,
+  deltaMode: number,
+  viewportWidth: number,
+): number {
+  if (deltaMode === 1) return delta * 16;
+  if (deltaMode === 2) return delta * viewportWidth;
+  return delta;
+}
+
 export function TabBar() {
   const docs = useEditorStore((s) => s.docs);
   const activePath = useEditorStore((s) => s.activePath);
   const setActive = useEditorStore((s) => s.setActive);
   const closeDoc = useEditorStore((s) => s.closeDoc);
+  const closeAllDocs = useEditorStore((s) => s.closeAllDocs);
   const editorPreview = useLayoutStore((s) => s.editorPreview);
   const toggleEditorPreview = useLayoutStore((s) => s.toggleEditorPreview);
   const outputRunning = useOutputStore((s) => s.running);
@@ -78,6 +89,20 @@ export function TabBar() {
     useContextMenuStore.getState().openMenu(e.clientX, e.clientY, items);
   }
 
+  function onTabListWheel(e: React.WheelEvent<HTMLDivElement>) {
+    const el = e.currentTarget;
+    if (el.scrollWidth <= el.clientWidth) return;
+
+    const rawDelta =
+      Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+    const delta = wheelDeltaToPixels(rawDelta, e.deltaMode, el.clientWidth);
+    if (delta === 0) return;
+
+    const before = el.scrollLeft;
+    el.scrollLeft += delta;
+    if (el.scrollLeft !== before) e.preventDefault();
+  }
+
   return (
     <div className="tab-bar">
       <div
@@ -85,6 +110,7 @@ export function TabBar() {
         role="tablist"
         aria-label="Open editors"
         ref={tabListRef}
+        onWheel={onTabListWheel}
       >
         {docs.map((doc) => {
           const active = doc.path === activePath;
@@ -129,68 +155,79 @@ export function TabBar() {
           );
         })}
       </div>
-      {canPreview && (
-        <button
-          type="button"
-          className={"tab-action" + (previewing ? " active" : "")}
-          aria-label={previewing ? "Show Source" : "Open Preview"}
-          aria-pressed={previewing}
-          title="Toggle Preview (⌘/Ctrl+Shift+V)"
-          onClick={() => toggleEditorPreview()}
-        >
-          <Icon name={previewing ? "edit" : "preview"} size={14} />
-          <span>{previewing ? "Edit" : "Preview"}</span>
-        </button>
-      )}
-      {!canPreview && canLatexPreview && activeDoc && (
-        <>
+      <div className="tab-actions" aria-label="Editor actions">
+        {canPreview && (
+          <button
+            type="button"
+            className={"tab-action" + (previewing ? " active" : "")}
+            aria-label={previewing ? "Show Source" : "Open Preview"}
+            aria-pressed={previewing}
+            title="Toggle Preview (⌘/Ctrl+Shift+V)"
+            onClick={() => toggleEditorPreview()}
+          >
+            <Icon name={previewing ? "edit" : "preview"} size={14} />
+            <span>{previewing ? "Edit" : "Preview"}</span>
+          </button>
+        )}
+        {!canPreview && canLatexPreview && activeDoc && (
+          <>
+            <button
+              type="button"
+              className="tab-action"
+              aria-label="Compile LaTeX"
+              title="Compile LaTeX"
+              disabled={outputRunning}
+              onClick={() =>
+                void runLatexBuild({
+                  targetPath: activeDoc.path,
+                  openOnSuccess: false,
+                })
+              }
+            >
+              <Icon name="build" size={14} />
+              <span>Compile</span>
+            </button>
+            <button
+              type="button"
+              className="tab-action"
+              aria-label="Preview LaTeX PDF"
+              title="Compile and Preview LaTeX PDF"
+              disabled={outputRunning}
+              onClick={() =>
+                void runLatexBuild({
+                  targetPath: activeDoc.path,
+                  openOnSuccess: true,
+                })
+              }
+            >
+              <Icon name="preview" size={14} />
+              <span>Preview</span>
+            </button>
+          </>
+        )}
+        {!canPreview && !canLatexPreview && canJuliaRun && (
           <button
             type="button"
             className="tab-action"
-            aria-label="Compile LaTeX"
-            title="Compile LaTeX"
+            aria-label="Run Julia File or Selection"
+            title="Run Julia File or Selection"
             disabled={outputRunning}
-            onClick={() =>
-              void runLatexBuild({
-                targetPath: activeDoc.path,
-                openOnSuccess: false,
-              })
-            }
+            onClick={() => void runActiveJulia()}
           >
-            <Icon name="build" size={14} />
-            <span>Compile</span>
+            <Icon name="run" size={14} />
+            <span>Run</span>
           </button>
-          <button
-            type="button"
-            className="tab-action"
-            aria-label="Preview LaTeX PDF"
-            title="Compile and Preview LaTeX PDF"
-            disabled={outputRunning}
-            onClick={() =>
-              void runLatexBuild({
-                targetPath: activeDoc.path,
-                openOnSuccess: true,
-              })
-            }
-          >
-            <Icon name="preview" size={14} />
-            <span>Preview</span>
-          </button>
-        </>
-      )}
-      {!canPreview && !canLatexPreview && canJuliaRun && (
+        )}
         <button
           type="button"
-          className="tab-action"
-          aria-label="Run Julia File or Selection"
-          title="Run Julia File or Selection"
-          disabled={outputRunning}
-          onClick={() => void runActiveJulia()}
+          className="tab-close-all icon-button"
+          aria-label="Close All Editors"
+          title="Close All Editors"
+          onClick={() => void closeAllDocs()}
         >
-          <Icon name="run" size={14} />
-          <span>Run</span>
+          <Icon name="close-all" size={15} />
         </button>
-      )}
+      </div>
     </div>
   );
 }

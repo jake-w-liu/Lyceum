@@ -13,6 +13,12 @@ import { useWorkspaceStore } from "./workspaceStore";
 /** A folder rollup is either "modified" (contains tracked changes) or
  * "untracked" (contains only new/untracked files). */
 export type FolderGitStatus = "modified" | "untracked";
+export type GitScope = "workspace" | "nested";
+
+export interface FolderGitDecoration {
+  status: FolderGitStatus;
+  scope: GitScope;
+}
 
 /** Status values that color a folder as "modified" (tracked changes) rather
  * than "untracked" (only new files). */
@@ -37,26 +43,62 @@ export function parentOf(path: string): string {
 export function computeFolders(
   files: Record<string, GitFileStatus>,
 ): Record<string, FolderGitStatus> {
+  return computeFolderDecorations(files, {}).statuses;
+}
+
+function scopeForRepo(repoRoot: string | undefined, rootRepo: string | null): GitScope {
+  if (!repoRoot) return "workspace";
+  if (!rootRepo) return "nested";
+  return repoRoot === rootRepo ? "workspace" : "nested";
+}
+
+function dominantScope(previous: GitScope | undefined, next: GitScope): GitScope {
+  return previous === "workspace" || next === "workspace" ? "workspace" : "nested";
+}
+
+/** Roll file statuses and repo ownership up to every ancestor directory.
+ * Modified beats untracked; workspace-repo changes beat nested-repo changes
+ * only when the same folder contains both. */
+export function computeFolderDecorations(
+  files: Record<string, GitFileStatus>,
+  fileScopes: Record<string, GitScope>,
+): {
+  statuses: Record<string, FolderGitStatus>;
+  scopes: Record<string, GitScope>;
+} {
   const folders: Record<string, FolderGitStatus> = {};
+  const folderScopes: Record<string, GitScope> = {};
   for (const [path, status] of Object.entries(files)) {
     if (status === "ignored") continue;
     const tracked = TRACKED_CHANGE.has(status);
+    const scope = fileScopes[path] ?? "workspace";
     let p = parentOf(path);
     while (p) {
-      if (tracked) folders[p] = "modified";
-      else if (folders[p] !== "modified") folders[p] = "untracked";
+      if (tracked) {
+        folders[p] = "modified";
+        folderScopes[p] = dominantScope(folderScopes[p], scope);
+      } else if (folders[p] !== "modified") {
+        folders[p] = "untracked";
+        folderScopes[p] = dominantScope(folderScopes[p], scope);
+      } else {
+        folderScopes[p] = dominantScope(folderScopes[p], scope);
+      }
       const next = parentOf(p);
       if (next === p) break;
       p = next;
     }
   }
-  return folders;
+  return { statuses: folders, scopes: folderScopes };
 }
 
 export interface GitData {
   isRepo: boolean;
+  rootRepo: string | null;
+  repoRoots: string[];
   files: Record<string, GitFileStatus>;
+  fileScopes: Record<string, GitScope>;
   folders: Record<string, FolderGitStatus>;
+  folderScopes: Record<string, GitScope>;
 }
 
 export interface GitActions {
@@ -70,8 +112,12 @@ export type GitState = GitData & GitActions;
 
 export const initialGitData: GitData = {
   isRepo: false,
+  rootRepo: null,
+  repoRoots: [],
   files: {},
+  fileScopes: {},
   folders: {},
+  folderScopes: {},
 };
 
 // Monotonic refresh id: only the LATEST in-flight refresh may write state, so a
@@ -94,10 +140,22 @@ export const useGitStore = create<GitState>()((set) => ({
     try {
       const res = await gitStatus(root);
       if (!isCurrent()) return;
+      const rootRepo = res.rootRepo ?? null;
+      const fileScopes = Object.fromEntries(
+        Object.keys(res.files).map((path) => [
+          path,
+          scopeForRepo(res.fileRepos?.[path], rootRepo),
+        ]),
+      );
+      const folders = computeFolderDecorations(res.files, fileScopes);
       set({
         isRepo: res.isRepo,
+        rootRepo,
+        repoRoots: res.repoRoots ?? [],
         files: res.files,
-        folders: computeFolders(res.files),
+        fileScopes,
+        folders: folders.statuses,
+        folderScopes: folders.scopes,
       });
     } catch {
       if (!isCurrent()) return;

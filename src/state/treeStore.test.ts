@@ -20,6 +20,8 @@ describe("treeStore", () => {
     get().setChildren("/root/sub", b);
     expect(get().children["/root"]).toEqual(a);
     expect(get().children["/root/sub"]).toEqual(b);
+    expect(get().loadedAtNonce["/root"]).toBe(0);
+    expect(get().loadedAtNonce["/root/sub"]).toBe(0);
   });
 
   it("toggleExpanded flips a path", () => {
@@ -43,12 +45,15 @@ describe("treeStore", () => {
     expect(get().children["/root"]).toEqual(a);
   });
 
-  it("refresh clears children and increments refreshNonce", () => {
+  it("refresh keeps cached children visible and increments refreshNonce", () => {
     get().setChildren("/root", [entry("a.txt")]);
     expect(get().refreshNonce).toBe(0);
     get().refresh();
-    expect(get().children).toEqual({});
+    expect(get().children["/root"]).toEqual([entry("a.txt")]);
+    expect(get().loadedAtNonce["/root"]).toBe(0);
     expect(get().refreshNonce).toBe(1);
+    get().setChildren("/root", [entry("b.txt")]);
+    expect(get().loadedAtNonce["/root"]).toBe(1);
     get().refresh();
     expect(get().refreshNonce).toBe(2);
   });
@@ -67,6 +72,7 @@ describe("treeStore", () => {
     get().reset();
     expect(get().expanded).toEqual({});
     expect(get().children).toEqual({});
+    expect(get().loadedAtNonce).toEqual({});
     expect(get().refreshNonce).toBe(0);
   });
 

@@ -16,6 +16,7 @@ export type IconName =
   | "undo"
   | "redo"
   | "close"
+  | "close-all"
   | "folder"
   | "folder-open"
   | "file"
@@ -119,6 +120,15 @@ function glyph(name: IconName): ReactNode {
         <>
           <line x1="6" y1="6" x2="18" y2="18" />
           <line x1="18" y1="6" x2="6" y2="18" />
+        </>
+      );
+    case "close-all":
+      return (
+        <>
+          <path d="M4 4h11v11H4z" />
+          <path d="M8 8h12v12H8z" />
+          <line x1="11.5" y1="11.5" x2="16.5" y2="16.5" />
+          <line x1="16.5" y1="11.5" x2="11.5" y2="16.5" />
         </>
       );
     case "folder":

@@ -5,6 +5,7 @@ import { Explorer } from "./Explorer";
 import type { DirEntry } from "../lib/ipc";
 import { initialTreeData, useTreeStore } from "../state/treeStore";
 import { initialEditorData, useEditorStore } from "../state/editorStore";
+import { initialGitData, useGitStore } from "../state/gitStore";
 
 // Native confirm/alert dialogs (Tauri plugin). `ask` defaults to confirming.
 vi.mock("@tauri-apps/plugin-dialog", () => ({
@@ -30,6 +31,7 @@ vi.mock("../lib/ipc", () => ({
   })),
   restoreTrashBatch: vi.fn(async () => {}),
   redoTrashBatch: vi.fn(async () => {}),
+  gitStatus: vi.fn(async () => ({ isRepo: false, files: {} })),
 }));
 import {
   createDirectory,
@@ -38,10 +40,15 @@ import {
   movePaths,
   readDirectory,
   redoTrashBatch,
+  gitStatus,
   renamePath,
   restoreTrashBatch,
 } from "../lib/ipc";
 import { ask, message } from "@tauri-apps/plugin-dialog";
+import {
+  initialWorkspaceData,
+  useWorkspaceStore,
+} from "../state/workspaceStore";
 
 const ROOT = "/ws";
 const dir = (name: string, parent = ROOT): DirEntry => ({
@@ -66,6 +73,8 @@ function deferred<T>() {
 beforeEach(() => {
   useTreeStore.setState(initialTreeData, false);
   useEditorStore.setState(initialEditorData, false);
+  useGitStore.setState(initialGitData, false);
+  useWorkspaceStore.setState(initialWorkspaceData, false);
   vi.mocked(readDirectory).mockReset();
   vi.mocked(readDirectory).mockImplementation(async (p: string) => {
     if (p === ROOT) return [dir("src"), file("README.md")];
@@ -90,6 +99,8 @@ beforeEach(() => {
   });
   vi.mocked(restoreTrashBatch).mockClear();
   vi.mocked(redoTrashBatch).mockClear();
+  vi.mocked(gitStatus).mockReset();
+  vi.mocked(gitStatus).mockResolvedValue({ isRepo: false, files: {} });
   vi.mocked(ask).mockClear();
   vi.mocked(ask).mockResolvedValue(true);
   vi.mocked(message).mockClear();
@@ -100,6 +111,29 @@ describe("Explorer", () => {
     render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
     expect(await screen.findByText("src")).toBeInTheDocument();
     expect(screen.getByText("README.md")).toBeInTheDocument();
+  });
+
+  it("marks nested-repo git decorations with a distinct scope class", async () => {
+    useWorkspaceStore.getState().openWorkspace(ROOT);
+    vi.mocked(gitStatus).mockResolvedValue({
+      isRepo: true,
+      rootRepo: ROOT,
+      repoRoots: [ROOT, "/ws/src"],
+      files: { "/ws/src/main.tsx": "modified" },
+      fileRepos: { "/ws/src/main.tsx": "/ws/src" },
+    });
+
+    render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    const srcLabel = await screen.findByText("src");
+    await waitFor(() =>
+      expect(srcLabel).toHaveClass("git-modified", "git-scope-nested"),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("treeitem", { name: "src" })).toHaveAttribute(
+        "title",
+        "src — Nested repo Modified",
+      ),
+    );
   });
 
   it("lazily loads children when a directory is expanded", async () => {
@@ -130,6 +164,25 @@ describe("Explorer", () => {
       expect(screen.queryByText("stale.txt")).not.toBeInTheDocument();
       expect(screen.getByText("fresh.txt")).toBeInTheDocument();
     });
+  });
+
+  it("keeps current rows visible while a refresh is loading", async () => {
+    const refreshed = deferred<DirEntry[]>();
+    vi.mocked(readDirectory).mockReset();
+    vi.mocked(readDirectory)
+      .mockResolvedValueOnce([file("old.txt")])
+      .mockImplementationOnce(async () => refreshed.promise);
+
+    render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    expect(await screen.findByText("old.txt")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Refresh Explorer" }));
+
+    expect(screen.getByText("old.txt")).toBeInTheDocument();
+
+    refreshed.resolve([file("new.txt")]);
+    expect(await screen.findByText("new.txt")).toBeInTheDocument();
+    expect(screen.queryByText("old.txt")).not.toBeInTheDocument();
   });
 
   it("calls onOpenFile when a file is clicked", async () => {

@@ -17,7 +17,7 @@ import {
 } from "../lib/ipc";
 import { useTreeStore } from "../state/treeStore";
 import { useEditorStore } from "../state/editorStore";
-import { useGitStore } from "../state/gitStore";
+import { useGitStore, type GitScope } from "../state/gitStore";
 import {
   useContextMenuStore,
   type ContextMenuItem,
@@ -51,20 +51,21 @@ function gitBadgeChar(status: string, isDir: boolean): string {
   }
 }
 
-function gitStatusLabel(status: string): string {
+function gitStatusLabel(status: string, scope: GitScope = "workspace"): string {
+  const prefix = scope === "nested" ? "Nested repo " : "";
   switch (status) {
     case "modified":
-      return "Modified";
+      return `${prefix}Modified`;
     case "added":
-      return "Added";
+      return `${prefix}Added`;
     case "untracked":
-      return "Untracked";
+      return `${prefix}Untracked`;
     case "deleted":
-      return "Deleted";
+      return `${prefix}Deleted`;
     case "renamed":
-      return "Renamed";
+      return `${prefix}Renamed`;
     case "conflict":
-      return "Conflict";
+      return `${prefix}Conflict`;
     default:
       return "";
   }
@@ -214,9 +215,15 @@ function TreeNode({
 }: NodeProps) {
   const expanded = useTreeStore((s) => Boolean(s.expanded[entry.path]));
   const children = useTreeStore((s) => s.children[entry.path]);
+  const loadedAtNonce = useTreeStore((s) => s.loadedAtNonce[entry.path]);
   const refreshNonce = useTreeStore((s) => s.refreshNonce);
   const gitStatus = useGitStore((s) =>
     entry.isDir ? s.folders[entry.path] ?? null : s.files[entry.path] ?? null,
+  );
+  const gitScope = useGitStore((s) =>
+    entry.isDir
+      ? s.folderScopes[entry.path] ?? "workspace"
+      : s.fileScopes[entry.path] ?? "workspace",
   );
   const [renaming, setRenaming] = useState(false);
   const selected = selectedPaths.includes(entry.path);
@@ -230,12 +237,14 @@ function TreeNode({
     }
   };
 
-  // (Re)load children when an expanded directory has no cached entries.
+  // (Re)load children when an expanded directory has no cached entries, or when
+  // a refresh marked the cached listing stale. Keep stale rows visible until
+  // the replacement listing arrives to avoid a flash.
   useEffect(() => {
-    if (entry.isDir && expanded && children === undefined) {
+    if (entry.isDir && expanded && loadedAtNonce !== refreshNonce) {
       loadInto(entry.path, refreshNonce);
     }
-  }, [entry.isDir, entry.path, expanded, children, refreshNonce]);
+  }, [entry.isDir, entry.path, expanded, loadedAtNonce, refreshNonce]);
 
   // Cancel a pending slow-click rename if this row stops being the sole
   // selection (e.g. the user clicked elsewhere before the timer fired), and on
@@ -411,8 +420,8 @@ function TreeNode({
           data-path={entry.path}
           aria-expanded={entry.isDir ? expanded : undefined}
           title={
-            gitStatus && !entry.isDir
-              ? `${entry.name} — ${gitStatusLabel(gitStatus)}`
+            gitStatus
+              ? `${entry.name} — ${gitStatusLabel(gitStatus, gitScope)}`
               : entry.name
           }
           onClick={onActivate}
@@ -443,13 +452,21 @@ function TreeNode({
           {renaming ? (
             <RenameInput initial={entry.name} onCommit={commitRename} />
           ) : (
-            <span className={"tree-label" + (gitStatus ? ` git-${gitStatus}` : "")}>
+            <span
+              className={
+                "tree-label" +
+                (gitStatus ? ` git-${gitStatus} git-scope-${gitScope}` : "")
+              }
+            >
               {entry.name}
             </span>
           )}
         </button>
         {!renaming && gitStatus && (
-          <span className={`git-badge git-${gitStatus}`} aria-hidden="true">
+          <span
+            className={`git-badge git-${gitStatus} git-scope-${gitScope}`}
+            aria-hidden="true"
+          >
             {gitBadgeChar(gitStatus, entry.isDir)}
           </span>
         )}
@@ -631,6 +648,7 @@ export interface ExplorerProps {
 
 export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
   const rootChildren = useTreeStore((s) => s.children[rootPath]);
+  const rootLoadedAtNonce = useTreeStore((s) => s.loadedAtNonce[rootPath]);
   const allChildren = useTreeStore((s) => s.children);
   const expanded = useTreeStore((s) => s.expanded);
   const refreshNonce = useTreeStore((s) => s.refreshNonce);
@@ -706,8 +724,8 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
   }, [pendingFocusPath, visibleEntries]);
 
   useEffect(() => {
-    if (rootChildren === undefined) loadInto(rootPath, refreshNonce);
-  }, [rootPath, rootChildren, refreshNonce]);
+    if (rootLoadedAtNonce !== refreshNonce) loadInto(rootPath, refreshNonce);
+  }, [rootPath, rootLoadedAtNonce, refreshNonce]);
 
   // Refresh git decorations on workspace open and after any tree mutation
   // (create/rename/delete/move all bump refreshNonce).

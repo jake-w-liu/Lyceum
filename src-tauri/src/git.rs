@@ -2,19 +2,20 @@
 //
 // `git_status` shells out to `git` once per refresh and returns a map of
 // absolute path -> status string (modified / added / untracked / deleted /
-// renamed / conflict). The frontend colors tree rows from this map (modified =
-// orange, new/untracked = green, deleted/conflict = red) and rolls the status
-// up to parent folders.
+// renamed / conflict), plus the owning repository root for each changed file.
+// The frontend colors tree rows from this map and can distinguish the opened
+// workspace repository from nested repositories under it.
 //
 // The pure parsing logic lives in `parse_porcelain_z` / `classify` so it can be
 // unit-tested with `cargo test` (no git binary or Tauri runtime needed); the
 // `#[tauri::command]` wrapper is thin and best-effort (any failure degrades to
 // "not a repo" rather than surfacing an error to the UI).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::ffi::OsString;
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use serde::Serialize;
@@ -24,11 +25,17 @@ use serde::Serialize;
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct GitStatusDto {
-    /// True when the workspace lives inside a git work tree.
+    /// True when the workspace lives inside or contains at least one git work tree.
     pub is_repo: bool,
+    /// Top-level repository containing the opened workspace root, when any.
+    pub root_repo: Option<String>,
+    /// Repository roots queried for this workspace.
+    pub repo_roots: Vec<String>,
     /// Absolute path -> status ("modified" | "added" | "untracked" |
     /// "deleted" | "renamed" | "conflict").
     pub files: HashMap<String, String>,
+    /// Absolute path -> owning repository top-level path.
+    pub file_repos: HashMap<String, String>,
 }
 
 /// Map a porcelain two-letter status (X = index, Y = work tree) to the small
@@ -118,52 +125,133 @@ fn run_git(program: &OsString, cwd: &Path, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+fn path_string(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+fn repo_top_level(program: &OsString, cwd: &Path) -> Option<PathBuf> {
+    let top = run_git(program, cwd, &["rev-parse", "--show-toplevel"])?;
+    let trimmed = top.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(trimmed))
+    }
+}
+
+fn has_git_marker(dir: &Path) -> bool {
+    dir.join(".git").exists()
+}
+
+fn is_skipped_walk_dir(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|s| s.to_str()),
+        Some(".git" | ".lyceum-trash" | "node_modules" | "target" | "dist" | ".vite")
+    )
+}
+
+fn discover_git_markers(root: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        if has_git_marker(&dir) {
+            roots.push(dir.clone());
+        }
+
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if is_skipped_walk_dir(&path) {
+                continue;
+            }
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                stack.push(path);
+            }
+        }
+    }
+
+    roots.sort();
+    roots
+}
+
+fn path_is_within(path: &Path, root: &Path) -> bool {
+    path == root || path.starts_with(root)
+}
+
 /// Return git status for the workspace as absolute-path -> status. Best-effort:
-/// when `root` is not inside a git work tree (or git is unavailable) this
+/// when `root` is not inside or containing a git work tree (or git is unavailable) this
 /// returns `{ is_repo: false, files: {} }` rather than an error.
 #[tauri::command]
 pub fn git_status(root: String) -> GitStatusDto {
     let empty = || GitStatusDto {
         is_repo: false,
+        root_repo: None,
+        repo_roots: Vec::new(),
         files: HashMap::new(),
+        file_repos: HashMap::new(),
     };
     let root_path = Path::new(&root);
     if !root_path.is_dir() {
         return empty();
     }
     let program = git_program();
+    let root_repo = repo_top_level(&program, root_path);
 
-    // The repo top-level anchors the relative paths git prints; the workspace
-    // may be opened at a subdirectory of the repo.
-    let top = match run_git(&program, root_path, &["rev-parse", "--show-toplevel"]) {
-        Some(s) if !s.trim().is_empty() => s.trim().to_string(),
-        _ => return empty(),
-    };
-    let top_path = Path::new(&top);
-
-    let out = match run_git(
-        &program,
-        root_path,
-        &["status", "--porcelain", "-z", "--untracked-files=all"],
-    ) {
-        Some(s) => s,
-        // Inside a repo but status failed: report repo with no decorations.
-        None => {
-            return GitStatusDto {
-                is_repo: true,
-                files: HashMap::new(),
+    // Query the repository containing the opened root, plus any nested
+    // repositories that have their own .git marker under the workspace.
+    let mut seen = HashSet::new();
+    let mut repo_roots = Vec::<PathBuf>::new();
+    if let Some(top) = &root_repo {
+        seen.insert(path_string(top));
+        repo_roots.push(top.clone());
+    }
+    for marker_root in discover_git_markers(root_path) {
+        if let Some(top) = repo_top_level(&program, &marker_root) {
+            let key = path_string(&top);
+            if seen.insert(key) {
+                repo_roots.push(top);
             }
         }
-    };
+    }
+    if repo_roots.is_empty() {
+        return empty();
+    }
+    repo_roots.sort_by_key(|p| p.components().count());
 
     let mut files = HashMap::new();
-    for (rel, status) in parse_porcelain_z(&out) {
-        let abs = top_path.join(&rel);
-        files.insert(abs.to_string_lossy().into_owned(), status);
+    let mut file_repos = HashMap::new();
+    for top_path in &repo_roots {
+        let out = match run_git(
+            &program,
+            top_path,
+            &["status", "--porcelain", "-z", "--untracked-files=all"],
+        ) {
+            Some(s) => s,
+            None => continue,
+        };
+        let repo = path_string(top_path);
+        for (rel, status) in parse_porcelain_z(&out) {
+            let abs = top_path.join(&rel);
+            if !path_is_within(&abs, root_path) {
+                continue;
+            }
+            let path = path_string(&abs);
+            files.insert(path.clone(), status);
+            file_repos.insert(path, repo.clone());
+        }
     }
     GitStatusDto {
         is_repo: true,
+        root_repo: root_repo.map(|p| path_string(&p)),
+        repo_roots: repo_roots.iter().map(|p| path_string(p)).collect(),
         files,
+        file_repos,
     }
 }
 
@@ -234,5 +322,25 @@ mod tests {
                 "untracked".to_string()
             )]
         );
+    }
+
+    #[test]
+    fn discovers_nested_git_markers_and_skips_heavy_dirs() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::create_dir(root.join("pkg")).unwrap();
+        fs::write(root.join("pkg").join(".git"), b"gitdir: ../.git/modules/pkg").unwrap();
+        fs::create_dir(root.join("node_modules")).unwrap();
+        fs::create_dir(root.join("node_modules").join("dep")).unwrap();
+        fs::create_dir(root.join("node_modules").join("dep").join(".git")).unwrap();
+
+        let roots = discover_git_markers(root);
+
+        assert!(roots.iter().any(|p| p == root));
+        assert!(roots.iter().any(|p| p == &root.join("pkg")));
+        assert!(!roots
+            .iter()
+            .any(|p| p == &root.join("node_modules").join("dep")));
     }
 }

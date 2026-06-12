@@ -227,22 +227,35 @@ kbd {
 .tree-label.git-ignored {
   color: var(--git-ignored);
 }
+.tree-label.git-scope-nested.git-modified,
+.tree-label.git-scope-nested.git-renamed {
+  color: var(--git-nested-modified);
+}
+.tree-label.git-scope-nested.git-added {
+  color: var(--git-nested-added);
+}
+.tree-label.git-scope-nested.git-untracked {
+  color: var(--git-nested-untracked);
+}
+.tree-label.git-scope-nested.git-deleted {
+  color: var(--git-nested-deleted);
+}
+.tree-label.git-scope-nested.git-conflict {
+  color: var(--git-nested-conflict);
+}
 
-/* Right-aligned status badge (letter for files, dot for folders). Hidden on
- * hover so the per-row create/rename/delete actions can take its place. */
+/* Right-aligned status badge (letter for files, dot for folders). Kept visible
+ * on hover so repository state does not disappear under the pointer. */
 .git-badge {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 16px;
+  min-width: 18px;
   padding-right: 6px;
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 700;
   line-height: 1;
-}
-.tree-row:hover .git-badge {
-  display: none;
 }
 .git-badge.git-modified,
 .git-badge.git-renamed {
@@ -259,6 +272,22 @@ kbd {
 }
 .git-badge.git-conflict {
   color: var(--git-conflict);
+}
+.git-badge.git-scope-nested.git-modified,
+.git-badge.git-scope-nested.git-renamed {
+  color: var(--git-nested-modified);
+}
+.git-badge.git-scope-nested.git-added {
+  color: var(--git-nested-added);
+}
+.git-badge.git-scope-nested.git-untracked {
+  color: var(--git-nested-untracked);
+}
+.git-badge.git-scope-nested.git-deleted {
+  color: var(--git-nested-deleted);
+}
+.git-badge.git-scope-nested.git-conflict {
+  color: var(--git-nested-conflict);
 }
 
 .tree-loading,
@@ -518,7 +547,15 @@ kbd {
   margin-right: 6px;
 }
 
-/* Right-aligned editor-title action (e.g. Markdown Preview), VS Code-style. */
+/* Right-aligned editor-title actions (e.g. Markdown Preview), VS Code-style. */
+.tab-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px 0 8px;
+}
+
 .tab-action {
   flex: 0 0 auto;
   align-self: center;
@@ -526,8 +563,7 @@ kbd {
   align-items: center;
   gap: 5px;
   height: 22px;
-  margin-left: 8px;
-  margin-right: 6px;
+  margin: 0;
   padding: 0 8px;
   background: transparent;
   border: 1px solid var(--border);
@@ -556,6 +592,12 @@ kbd {
   color: var(--fg);
   background: var(--bg-tab-active);
   border-color: var(--focus);
+}
+
+.tab-close-all {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
 }
 
 /* Monaco host (M3) */
