@@ -11,10 +11,12 @@ const {
   watchWorkspaceMock,
   setListener,
   getListener,
+  gitStatusMock,
 } = vi.hoisted(() => {
   let listener: ((event: Event<WorkspaceFsEvent>) => void) | null = null;
   const unlisten = vi.fn();
   return {
+    gitStatusMock: vi.fn(),
     listenMock: vi.fn(
       (_name: string, cb: (event: Event<WorkspaceFsEvent>) => void) => {
         listener = cb;
@@ -34,12 +36,14 @@ const {
 
 vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
 vi.mock("../lib/ipc", () => ({
+  gitStatus: gitStatusMock,
   readFile: readFileMock,
   unwatchWorkspace: unwatchWorkspaceMock,
   watchWorkspace: watchWorkspaceMock,
 }));
 
 import { initialEditorData, useEditorStore } from "../state/editorStore";
+import { initialGitData, useGitStore } from "../state/gitStore";
 import { initialTreeData, useTreeStore } from "../state/treeStore";
 import { useWorkspaceStore } from "../state/workspaceStore";
 import { useWorkspaceFileWatcher } from "./useWorkspaceFileWatcher";
@@ -54,10 +58,12 @@ describe("useWorkspaceFileWatcher", () => {
     vi.useFakeTimers();
     vi.clearAllMocks();
     setListener(null);
+    gitStatusMock.mockResolvedValue({ isRepo: true, files: {} });
     readFileMock.mockResolvedValue("disk content");
     unwatchWorkspaceMock.mockResolvedValue(undefined);
     watchWorkspaceMock.mockResolvedValue(undefined);
     useEditorStore.setState(initialEditorData, false);
+    useGitStore.setState(initialGitData, false);
     useTreeStore.setState(initialTreeData, false);
     useWorkspaceStore.setState({ rootPath: "/w", pendingOpenPath: null });
   });
@@ -158,6 +164,29 @@ describe("useWorkspaceFileWatcher", () => {
     expect(readFileMock).not.toHaveBeenCalled();
   });
 
+  it("ignores git-only events from a stale workspace root", async () => {
+    renderHook(() => useWorkspaceFileWatcher());
+    await Promise.resolve();
+
+    act(() => {
+      getListener()?.({
+        event: "workspace:fs-change",
+        id: 1,
+        payload: {
+          root: "/old",
+          paths: [],
+          kind: "Modify(Data)",
+          gitChanged: true,
+        },
+      });
+      vi.advanceTimersByTime(150);
+    });
+    await flushPromises();
+
+    expect(useTreeStore.getState().refreshNonce).toBe(0);
+    expect(gitStatusMock).not.toHaveBeenCalled();
+  });
+
   it("drops a debounced refresh when the workspace changes first", async () => {
     renderHook(() => useWorkspaceFileWatcher());
     await Promise.resolve();
@@ -174,6 +203,96 @@ describe("useWorkspaceFileWatcher", () => {
 
     expect(useTreeStore.getState().refreshNonce).toBe(0);
     expect(readFileMock).not.toHaveBeenCalled();
+  });
+
+  it("refreshes git decorations without refreshing the tree for git-only events", async () => {
+    renderHook(() => useWorkspaceFileWatcher());
+    await Promise.resolve();
+
+    act(() => {
+      getListener()?.({
+        event: "workspace:fs-change",
+        id: 1,
+        payload: {
+          root: "/w",
+          paths: [],
+          kind: "Modify(Data)",
+          gitChanged: true,
+        },
+      });
+      vi.advanceTimersByTime(150);
+    });
+    await flushPromises();
+
+    expect(useTreeStore.getState().refreshNonce).toBe(0);
+    expect(readFileMock).not.toHaveBeenCalled();
+    expect(gitStatusMock).toHaveBeenCalledTimes(1);
+    expect(gitStatusMock).toHaveBeenCalledWith("/w");
+  });
+
+  it("coalesces visible and git events into one tree refresh and one git refresh", async () => {
+    renderHook(() => useWorkspaceFileWatcher());
+    await Promise.resolve();
+
+    act(() => {
+      getListener()?.({
+        event: "workspace:fs-change",
+        id: 1,
+        payload: {
+          root: "/w",
+          paths: ["/w/new.tex"],
+          kind: "Create(File)",
+        },
+      });
+      getListener()?.({
+        event: "workspace:fs-change",
+        id: 2,
+        payload: {
+          root: "/w",
+          paths: [],
+          kind: "Modify(Data)",
+          gitChanged: true,
+        },
+      });
+      vi.advanceTimersByTime(150);
+    });
+    await flushPromises();
+
+    expect(useTreeStore.getState().refreshNonce).toBe(1);
+    expect(gitStatusMock).toHaveBeenCalledTimes(1);
+    expect(gitStatusMock).toHaveBeenCalledWith("/w");
+  });
+
+  it("bounds pending path storage during large event bursts", async () => {
+    readFileMock.mockResolvedValueOnce("external edit");
+    useEditorStore.getState().openDoc({
+      path: "/w/open.ts",
+      content: "old",
+      language: "typescript",
+    });
+    renderHook(() => useWorkspaceFileWatcher());
+    await Promise.resolve();
+
+    act(() => {
+      for (let i = 0; i < 2001; i += 1) {
+        getListener()?.({
+          event: "workspace:fs-change",
+          id: i,
+          payload: {
+            root: "/w",
+            paths: [`/w/generated-${i}.aux`],
+            kind: "Create(File)",
+          },
+        });
+      }
+      vi.advanceTimersByTime(150);
+    });
+    await flushPromises();
+
+    expect(useTreeStore.getState().refreshNonce).toBe(1);
+    expect(readFileMock).toHaveBeenCalledTimes(1);
+    expect(readFileMock).toHaveBeenCalledWith("/w/open.ts");
+    expect(useEditorStore.getState().docs[0].content).toBe("external edit");
   });
 
   it("reloads clean open text files from disk", async () => {

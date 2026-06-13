@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::mem;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
@@ -21,9 +22,11 @@ impl WorkspaceWatchManager {
     /// `RecommendedWatcher` stops its notify worker threads, mirroring the other
     /// managers' `shutdown_all()` so nothing emits during teardown.
     pub fn shutdown_all(&self) {
-        if let Ok(mut active) = self.active.lock() {
-            active.clear();
-        }
+        let removed = match self.active.lock() {
+            Ok(mut active) => mem::take(&mut *active),
+            Err(_) => HashMap::new(),
+        };
+        drop(removed);
     }
 
     /// Drop the destroyed window's watcher (if any), stopping its notify worker
@@ -51,6 +54,13 @@ pub struct WorkspaceFsEvent {
     root: String,
     paths: Vec<String>,
     kind: String,
+    git_changed: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct WorkspaceEventPaths {
+    paths: Vec<String>,
+    git_changed: bool,
 }
 
 #[tauri::command]
@@ -91,13 +101,15 @@ pub fn watch_workspace(
     let label_for_events = label.clone();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         let Ok(event) = event else { return };
-        let Some(paths) = workspace_event_paths(&watched_root, &requested_root, &event) else {
+        let Some(event_paths) = workspace_event_paths(&watched_root, &requested_root, &event)
+        else {
             return;
         };
         let payload = WorkspaceFsEvent {
             root: event_root.clone(),
-            paths,
+            paths: event_paths.paths,
             kind: format!("{:?}", event.kind),
+            git_changed: event_paths.git_changed,
         };
         let _ = app_for_events.emit_to(
             label_for_events.as_str(),
@@ -110,14 +122,14 @@ pub fn watch_workspace(
     watcher
         .watch(&root_path, RecursiveMode::Recursive)
         .map_err(|e| format!("{}: {e}", root_path.display()))?;
-    active.insert(
-        label,
-        ActiveWatcher {
-            root: root_path,
-            requested_root: root,
-            _watcher: watcher,
-        },
-    );
+    let next = ActiveWatcher {
+        root: root_path,
+        requested_root: root,
+        _watcher: watcher,
+    };
+    let removed = active.insert(label, next);
+    drop(active);
+    drop(removed);
     Ok(())
 }
 
@@ -128,24 +140,29 @@ pub fn unwatch_workspace(
     root: Option<String>,
 ) -> Result<(), String> {
     let label = window.label();
-    let mut active = state
-        .active
-        .lock()
-        .map_err(|_| "workspace watcher lock poisoned".to_string())?;
-    let should_clear = match (active.get(label), root.as_deref()) {
-        (None, _) => false,
-        (Some(_), None) => true,
-        (Some(watcher), Some(root)) => {
-            watcher.requested_root == root
-                || Path::new(root)
-                    .canonicalize()
-                    .ok()
-                    .is_some_and(|path| path == watcher.root)
+    let removed = {
+        let mut active = state
+            .active
+            .lock()
+            .map_err(|_| "workspace watcher lock poisoned".to_string())?;
+        let should_clear = match (active.get(label), root.as_deref()) {
+            (None, _) => false,
+            (Some(_), None) => true,
+            (Some(watcher), Some(root)) => {
+                watcher.requested_root == root
+                    || Path::new(root)
+                        .canonicalize()
+                        .ok()
+                        .is_some_and(|path| path == watcher.root)
+            }
+        };
+        if should_clear {
+            active.remove(label)
+        } else {
+            None
         }
     };
-    if should_clear {
-        active.remove(label);
-    }
+    drop(removed);
     Ok(())
 }
 
@@ -178,20 +195,29 @@ fn workspace_event_paths(
     canonical_root: &Path,
     requested_root: &Path,
     event: &notify::Event,
-) -> Option<Vec<String>> {
+) -> Option<WorkspaceEventPaths> {
     if ignores_workspace_event_kind(&event.kind) {
         return None;
     }
 
-    let paths: Vec<String> = event
-        .paths
-        .iter()
-        .filter(|path| !is_internal_workspace_path(canonical_root, requested_root, path))
-        .map(|path| event_path_for_requested_root(canonical_root, requested_root, path))
-        .collect();
+    let mut git_changed = false;
+    let mut paths = Vec::new();
+    for path in &event.paths {
+        match internal_workspace_path_kind(canonical_root, requested_root, path) {
+            Some(InternalWorkspacePath::Git) => {
+                git_changed = true;
+            }
+            Some(InternalWorkspacePath::Trash) => {}
+            None => paths.push(event_path_for_requested_root(
+                canonical_root,
+                requested_root,
+                path,
+            )),
+        }
+    }
 
-    if event.paths.is_empty() || !paths.is_empty() {
-        Some(paths)
+    if event.paths.is_empty() || !paths.is_empty() || git_changed {
+        Some(WorkspaceEventPaths { paths, git_changed })
     } else {
         None
     }
@@ -204,31 +230,78 @@ fn ignores_workspace_event_kind(kind: &EventKind) -> bool {
     )
 }
 
-fn is_internal_workspace_path(canonical_root: &Path, requested_root: &Path, path: &Path) -> bool {
-    is_internal_path_under_root(canonical_root, path)
-        || is_internal_path_under_root(requested_root, path)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InternalWorkspacePath {
+    Git,
+    Trash,
 }
 
-fn is_internal_path_under_root(root: &Path, path: &Path) -> bool {
+fn internal_workspace_path_kind(
+    canonical_root: &Path,
+    requested_root: &Path,
+    path: &Path,
+) -> Option<InternalWorkspacePath> {
+    let canonical_kind = internal_path_kind_under_root(canonical_root, path);
+    let requested_kind = internal_path_kind_under_root(requested_root, path);
+    if matches!(canonical_kind, Some(InternalWorkspacePath::Trash))
+        || matches!(requested_kind, Some(InternalWorkspacePath::Trash))
+    {
+        Some(InternalWorkspacePath::Trash)
+    } else if matches!(canonical_kind, Some(InternalWorkspacePath::Git))
+        || matches!(requested_kind, Some(InternalWorkspacePath::Git))
+    {
+        Some(InternalWorkspacePath::Git)
+    } else {
+        None
+    }
+}
+
+fn internal_path_kind_under_root(root: &Path, path: &Path) -> Option<InternalWorkspacePath> {
     let Ok(relative) = path.strip_prefix(root) else {
-        return false;
+        return None;
     };
-    relative.components().any(|component| {
-        matches!(
-            component,
-            Component::Normal(name) if name == ".git" || name == ".lyceum-trash"
-        )
-    })
+    for component in relative.components() {
+        if let Component::Normal(name) = component {
+            if name == ".lyceum-trash" {
+                return Some(InternalWorkspacePath::Trash);
+            }
+            if name == ".git" {
+                return Some(InternalWorkspacePath::Git);
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{event_path_for_requested_root, workspace_event_paths};
+    use super::{event_path_for_requested_root, workspace_event_paths, WorkspaceEventPaths};
     use notify::event::{
         AccessKind, AccessMode, CreateKind, DataChange, EventKind, MetadataKind, ModifyKind,
     };
     use notify::Event;
     use std::path::{Path, PathBuf};
+
+    fn visible(paths: &[&str]) -> Option<WorkspaceEventPaths> {
+        Some(WorkspaceEventPaths {
+            paths: paths.iter().map(|path| (*path).to_string()).collect(),
+            git_changed: false,
+        })
+    }
+
+    fn git_only() -> Option<WorkspaceEventPaths> {
+        Some(WorkspaceEventPaths {
+            paths: Vec::new(),
+            git_changed: true,
+        })
+    }
+
+    fn visible_with_git(paths: &[&str]) -> Option<WorkspaceEventPaths> {
+        Some(WorkspaceEventPaths {
+            paths: paths.iter().map(|path| (*path).to_string()).collect(),
+            git_changed: true,
+        })
+    }
 
     #[test]
     fn event_path_is_reported_under_requested_workspace_root() {
@@ -295,17 +368,30 @@ mod tests {
                 Path::new("/link/project"),
                 &event
             ),
-            Some(vec!["/link/project/src/main.tex".to_string()])
+            visible(&["/link/project/src/main.tex"])
         );
     }
 
     #[test]
-    fn internal_workspace_state_events_do_not_refresh_workspace() {
+    fn git_workspace_state_events_only_refresh_git_decorations() {
         let event = Event::new(EventKind::Create(CreateKind::File))
-            .add_path(PathBuf::from("/real/project/.git/index.lock"))
-            .add_path(PathBuf::from(
-                "/real/project/.lyceum-trash/batch-1/file.tex",
-            ));
+            .add_path(PathBuf::from("/real/project/.git/index.lock"));
+
+        assert_eq!(
+            workspace_event_paths(
+                Path::new("/real/project"),
+                Path::new("/link/project"),
+                &event
+            ),
+            git_only()
+        );
+    }
+
+    #[test]
+    fn trash_workspace_state_events_do_not_refresh_workspace() {
+        let event = Event::new(EventKind::Create(CreateKind::File)).add_path(PathBuf::from(
+            "/real/project/.lyceum-trash/batch-1/file.tex",
+        ));
 
         assert_eq!(
             workspace_event_paths(
@@ -329,14 +415,45 @@ mod tests {
                 Path::new("/link/project"),
                 &event
             ),
-            Some(vec!["/link/project/src/main.tex".to_string()])
+            visible_with_git(&["/link/project/src/main.tex"])
         );
     }
 
     #[test]
-    fn internal_requested_root_paths_do_not_refresh_workspace() {
+    fn internal_requested_root_git_paths_only_refresh_git_decorations() {
         let event = Event::new(EventKind::Create(CreateKind::File))
             .add_path(PathBuf::from("/link/project/.git/index.lock"));
+
+        assert_eq!(
+            workspace_event_paths(
+                Path::new("/real/project"),
+                Path::new("/link/project"),
+                &event
+            ),
+            git_only()
+        );
+    }
+
+    #[test]
+    fn git_paths_with_later_trash_component_still_refresh_git_decorations() {
+        let event = Event::new(EventKind::Create(CreateKind::File))
+            .add_path(PathBuf::from("/real/project/.git/.lyceum-trash/file"));
+
+        assert_eq!(
+            workspace_event_paths(
+                Path::new("/real/project"),
+                Path::new("/link/project"),
+                &event
+            ),
+            git_only()
+        );
+    }
+
+    #[test]
+    fn trash_paths_with_later_git_component_do_not_refresh_workspace() {
+        let event = Event::new(EventKind::Create(CreateKind::File)).add_path(PathBuf::from(
+            "/real/project/.lyceum-trash/batch/.git/index",
+        ));
 
         assert_eq!(
             workspace_event_paths(

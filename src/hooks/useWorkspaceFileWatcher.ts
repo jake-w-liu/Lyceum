@@ -8,10 +8,13 @@ import {
   type WorkspaceFsEvent,
 } from "../lib/ipc";
 import { reloadOpenEditorPaths } from "../lib/editorReload";
+import { useEditorStore } from "../state/editorStore";
+import { useGitStore } from "../state/gitStore";
 import { useTreeStore } from "../state/treeStore";
 import { useWorkspaceStore } from "../state/workspaceStore";
 
 const REFRESH_DEBOUNCE_MS = 150;
+const MAX_PENDING_RELOAD_PATHS = 2_000;
 
 function normalizedRoot(path: string | null): string {
   if (!path) return "";
@@ -33,6 +36,9 @@ export function useWorkspaceFileWatcher(): void {
     let unlisten: UnlistenFn | undefined;
     let refreshTimer = 0;
     const pendingPaths = new Set<string>();
+    let pendingGitRefresh = false;
+    let pendingTreeRefresh = false;
+    let reloadAllOpenDocs = false;
 
     const clearRefreshTimer = () => {
       if (refreshTimer) {
@@ -43,20 +49,42 @@ export function useWorkspaceFileWatcher(): void {
 
     const scheduleRefresh = (event: Event<WorkspaceFsEvent>) => {
       if (normalizedRoot(event.payload.root) !== normalizedRoot(rootPath)) return;
-      for (const path of event.payload.paths) pendingPaths.add(path);
+      if (!reloadAllOpenDocs) {
+        for (const path of event.payload.paths) {
+          pendingPaths.add(path);
+          if (pendingPaths.size > MAX_PENDING_RELOAD_PATHS) {
+            pendingPaths.clear();
+            reloadAllOpenDocs = true;
+            break;
+          }
+        }
+      }
+      const gitChanged = Boolean(event.payload.gitChanged);
+      pendingGitRefresh ||= gitChanged;
+      pendingTreeRefresh ||= event.payload.paths.length > 0 || !gitChanged;
       clearRefreshTimer();
       refreshTimer = window.setTimeout(() => {
         refreshTimer = 0;
-        const paths = Array.from(pendingPaths);
+        const paths = reloadAllOpenDocs
+          ? useEditorStore.getState().docs.map((doc) => doc.path)
+          : Array.from(pendingPaths);
+        const refreshGit = pendingGitRefresh;
+        const refreshTree = pendingTreeRefresh;
         pendingPaths.clear();
+        pendingGitRefresh = false;
+        pendingTreeRefresh = false;
+        reloadAllOpenDocs = false;
         if (
           normalizedRoot(useWorkspaceStore.getState().rootPath) !==
           normalizedRoot(rootPath)
         ) {
           return;
         }
-        useTreeStore.getState().refresh();
-        void reloadOpenEditorPaths(paths);
+        if (refreshTree) {
+          useTreeStore.getState().refresh();
+          void reloadOpenEditorPaths(paths);
+        }
+        if (refreshGit) void useGitStore.getState().refresh();
       }, REFRESH_DEBOUNCE_MS);
     };
 

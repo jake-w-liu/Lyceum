@@ -42,6 +42,12 @@ export interface WorkspaceFsEvent {
   root: string;
   paths: string[];
   kind: string;
+  /**
+   * True when the watcher saw Git metadata change under `.git`. These events
+   * should refresh decorations without forcing the visible Explorer tree to
+   * reload.
+   */
+  gitChanged?: boolean;
 }
 
 const FALLBACK_APP_INFO: AppInfo = {
