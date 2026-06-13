@@ -1087,7 +1087,7 @@ kbd {
      and the full width becomes reachable by horizontal scroll. */
   gap: 12px;
   padding: 12px;
-  background: #535953;
+  background: #4a4a4a;
   scroll-padding-top: 12px;
 }
 
@@ -1240,7 +1240,7 @@ kbd {
   align-items: center;
   justify-content: center;
   padding: 12px;
-  background: #373c38;
+  background: #2b2b2b;
 }
 
 .image-preview {

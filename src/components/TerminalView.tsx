@@ -41,7 +41,7 @@ function xtermThemeFromCss(el: HTMLElement) {
   const styles = getComputedStyle(el);
   const read = (name: string, fallback: string) =>
     styles.getPropertyValue(name).trim() || fallback;
-  const foreground = read("--fg", "#bdc0ba");
+  const foreground = read("--fg", "#d4d4d4");
   return {
     background: read("--bg", "#1c1c1c"),
     foreground,

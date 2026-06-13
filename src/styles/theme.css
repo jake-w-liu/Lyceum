@@ -6,10 +6,13 @@
  * Monaco theme sync) lands in M7. Set the active theme via the `data-theme`
  * attribute on <html>.
  *
- * Palette: every color in the app is a traditional Japanese (Nippon) color
- * (nipponcolors.com). The dark neutral ramp is sumi -> aisumicha -> keshizumi
- * -> dobunezumi; foreground is shironezumi; accent is hanada. When adding a
- * color, pick the nearest Nippon color rather than introducing a new hex.
+ * Palette: every CHROMATIC color (accents, git decorations, status bar,
+ * selection, highlights) is a traditional Japanese (Nippon) color
+ * (nipponcolors.com) — e.g. accent hanada, statusbar/focus ruri, git modified
+ * tonoko / added wakatake / deleted ake. The neutral grey ramp (backgrounds,
+ * borders, foreground) is a plain tuned neutral scale for crisp panel/tab
+ * separation, anchored on sumi (#1c1c1c) for the dark editor background. When
+ * adding a colored token, pick the nearest Nippon color; greys stay neutral.
  */
 
 :root,
@@ -17,18 +20,18 @@
   color-scheme: dark;
 
   --bg: #1c1c1c;
-  --bg-elevated: #373c38;
-  --bg-activity-bar: #4f4f48;
-  --bg-tab-inactive: #434343;
+  --bg-elevated: #262626;
+  --bg-activity-bar: #2d2d2d;
+  --bg-tab-inactive: #2a2a2a;
   --bg-tab-active: #1c1c1c;
   --bg-statusbar: #005caf;
-  --bg-hover: #434343;
+  --bg-hover: #2f2f2f;
 
-  --fg: #bdc0ba;
-  --fg-muted: #828282;
+  --fg: #d4d4d4;
+  --fg-muted: #8a8a8a;
   --fg-statusbar: #fffffb;
 
-  --border: #434343;
+  --border: #363636;
   --accent: #006284;
   --accent-hover: #005caf;
   --focus: #005caf;
@@ -58,19 +61,19 @@
 :root[data-theme="light"] {
   color-scheme: light;
 
-  --bg: #fffffb;
-  --bg-elevated: #fcfaf2;
-  --bg-activity-bar: #434343;
-  --bg-tab-inactive: #d7c4bb;
-  --bg-tab-active: #fffffb;
+  --bg: #ffffff;
+  --bg-elevated: #f3f3f3;
+  --bg-activity-bar: #2c2c2c;
+  --bg-tab-inactive: #ececec;
+  --bg-tab-active: #ffffff;
   --bg-statusbar: #005caf;
-  --bg-hover: #d7c4bb;
+  --bg-hover: #e8e8e8;
 
-  --fg: #4f4f48;
-  --fg-muted: #656765;
+  --fg: #2b2b2b;
+  --fg-muted: #6c6c6c;
   --fg-statusbar: #fffffb;
 
-  --border: #bdc0ba;
+  --border: #d0d0d0;
   --accent: #006284;
   --accent-hover: #005caf;
   --focus: #005caf;
