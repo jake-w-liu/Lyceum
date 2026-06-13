@@ -7,7 +7,7 @@
 // hung run can be cancelled from the UI via `run_cancel`; entries are removed on
 // natural exit. This mirrors the terminal/LSP managers, which retain kill handles.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
@@ -25,6 +25,11 @@ pub(crate) type RunMap = Arc<Mutex<HashMap<String, u32>>>;
 #[derive(Default)]
 pub struct RunManager {
     pub(crate) runs: RunMap,
+    /// Run keys whose cancel arrived before the child was registered (cancel
+    /// raced the spawn). `stream_child` consults this right after it inserts and
+    /// kills immediately, so a Stop click during the spawn window is honored
+    /// instead of being silently lost.
+    pub(crate) pending_cancel: Arc<Mutex<HashSet<String>>>,
 }
 
 impl RunManager {
@@ -60,6 +65,12 @@ impl RunManager {
                 }
             }),
             Err(_) => return,
+        }
+        // Drop any pending-cancel tombstones for this window so they don't linger
+        // after the window is gone (e.g. a cancel that raced a spawn which then
+        // errored before registering).
+        if let Ok(mut pending) = self.pending_cancel.lock() {
+            pending.retain(|key| !key.starts_with(&prefix));
         }
         for pid in pids {
             kill_pid(pid);
@@ -222,12 +233,31 @@ impl LineSplitter {
                 self.pending_cr = false;
                 self.line.push(b);
                 if self.line.len() >= Self::MAX_LINE {
-                    out.push(String::from_utf8_lossy(&self.line).into_owned());
-                    self.line.clear();
+                    out.push(self.force_flush());
                 }
             }
         }
         out
+    }
+
+    /// Force-flush the buffer at `MAX_LINE`, stopping at the last complete UTF-8
+    /// char boundary so a multi-byte code point straddling the cap is not split
+    /// into U+FFFD replacement chars. Any trailing incomplete bytes are retained
+    /// to be completed by the next read. An all-invalid buffer (no valid prefix)
+    /// is flushed whole to guarantee forward progress.
+    fn force_flush(&mut self) -> String {
+        let valid_up_to = match std::str::from_utf8(&self.line) {
+            Ok(_) => self.line.len(),
+            Err(e) => e.valid_up_to(),
+        };
+        let cut = if valid_up_to == 0 {
+            self.line.len()
+        } else {
+            valid_up_to
+        };
+        let flushed = String::from_utf8_lossy(&self.line[..cut]).into_owned();
+        self.line.drain(..cut);
+        flushed
     }
 
     /// Emit any buffered partial line (output that never ended in a newline).
@@ -319,6 +349,27 @@ fn kill_pid(pid: u32) {
     }
 }
 
+/// Signal only the process GROUP of `pid` (negative pid on Unix), NOT the bare
+/// pid. Safe to call after the leader child has already been reaped: the group
+/// keeps existing as long as a lingering grandchild (which inherited the pipe)
+/// is alive, whereas the bare leader pid may have been reused by an unrelated
+/// process. Used to unblock the output pumps on a natural exit whose grandchild
+/// is holding the stdout/stderr pipe open.
+fn kill_process_group(pid: u32) {
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .status();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = Command::new("kill")
+            .args(["-TERM", &format!("-{pid}")])
+            .status();
+    }
+}
+
 /// Run a Julia file or inline code, streaming output to the frontend.
 #[tauri::command]
 pub fn run_julia(
@@ -360,6 +411,7 @@ pub fn run_julia(
         child,
         run_key(&window, &id),
         state.runs.clone(),
+        state.pending_cancel.clone(),
         format!("julia:output:{id}"),
         format!("julia:exit:{id}"),
     );
@@ -376,11 +428,30 @@ pub(crate) fn stream_child(
     mut child: Child,
     key: String,
     runs: RunMap,
+    pending_cancel: Arc<Mutex<HashSet<String>>>,
     out_event: String,
     exit_event: String,
 ) {
     let pid = child.id();
-    runs.lock().unwrap().insert(key.clone(), pid);
+    // Register the child, but honor a cancel that arrived during the spawn window
+    // (before this insert). Both this check and `run_cancel`'s tombstone insert
+    // happen while holding the `runs` lock, so they cannot interleave into a gap
+    // where neither side acts: either we observe the tombstone here, or
+    // `run_cancel` observes our registration there.
+    let cancelled_during_spawn = {
+        let mut runs = runs.lock().unwrap();
+        if pending_cancel.lock().unwrap().remove(&key) {
+            true
+        } else {
+            runs.insert(key.clone(), pid);
+            false
+        }
+    };
+    if cancelled_during_spawn {
+        // Don't register; kill now. The pumps/reaper below still run so the child
+        // is reaped (no zombie) and the exit event still fires for the UI.
+        kill_pid(pid);
+    }
 
     let out_handle = child.stdout.take().map(|stdout| {
         let app = app.clone();
@@ -424,7 +495,18 @@ pub(crate) fn stream_child(
             }
             let _ = tx.send(());
         });
-        let _ = rx.recv_timeout(std::time::Duration::from_secs(2));
+        if rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .is_err()
+        {
+            // The pumps did not finish draining within the timeout: a grandchild
+            // inherited the pipe and is keeping it open after the leader exited.
+            // On the natural-exit path nothing else will ever close it, so the
+            // pump threads (blocked in read()) and this drain thread would leak
+            // forever. Signal the leader's process group to close the pipe so they
+            // can terminate. Group-only (never the bare, possibly-reused pid).
+            kill_process_group(pid);
+        }
         let _ = app.emit_to(label.as_str(), &exit_event, code);
     });
 }
@@ -444,7 +526,21 @@ pub fn run_cancel(
     state: State<RunManager>,
     id: String,
 ) -> Result<(), String> {
-    let pid = state.runs.lock().unwrap().remove(&run_key(&window, &id));
+    let key = run_key(&window, &id);
+    // Take the `runs` lock as the outer lock for both the remove and the
+    // tombstone insert, matching `stream_child`'s ordering, so a cancel that
+    // races the spawn cannot slip through a gap: if the child isn't registered
+    // yet, we leave a tombstone that `stream_child` will honor on registration.
+    let pid = {
+        let mut runs = state.runs.lock().unwrap();
+        match runs.remove(&key) {
+            Some(pid) => Some(pid),
+            None => {
+                state.pending_cancel.lock().unwrap().insert(key);
+                None
+            }
+        }
+    };
     if let Some(pid) = pid {
         kill_pid(pid);
     }
@@ -550,6 +646,26 @@ mod tests {
         // The `\n` arriving in the next read must not emit a spurious blank line.
         assert_eq!(s.feed(b"\ndef"), Vec::<String>::new());
         assert_eq!(s.finish(), Some("def".to_string()));
+    }
+
+    #[test]
+    fn force_flush_at_max_line_does_not_split_multibyte_utf8() {
+        let mut s = LineSplitter::default();
+        // Fill to one byte short of the cap, then push the first byte of a 2-byte
+        // 'é' (0xC3 0xA9). That push reaches MAX_LINE and force-flushes.
+        let mut data = vec![b'a'; LineSplitter::MAX_LINE - 1];
+        data.push(0xC3);
+        let lines = s.feed(&data);
+
+        assert_eq!(lines.len(), 1, "expected exactly one forced flush");
+        assert!(
+            !lines[0].contains('\u{FFFD}'),
+            "forced flush split a multi-byte char into U+FFFD"
+        );
+        assert_eq!(lines[0].len(), LineSplitter::MAX_LINE - 1);
+        // The orphaned 0xC3 was retained; its continuation byte completes 'é'.
+        assert!(s.feed(&[0xA9]).is_empty());
+        assert_eq!(s.finish(), Some("é".to_string()));
     }
 
     #[cfg(unix)]

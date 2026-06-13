@@ -196,7 +196,15 @@ pub fn git_status(root: String) -> GitStatusDto {
         files: HashMap::new(),
         file_repos: HashMap::new(),
     };
-    let root_path = Path::new(&root);
+    // Canonicalize the root, mirroring walk.rs/search.rs/workspace_watch.rs.
+    // `git rev-parse --show-toplevel` always returns a canonical, symlink-free
+    // path, so `top_path.join(rel)` is canonical; if `root_path` still contained
+    // a symlinked component (e.g. macOS `/tmp` -> `/private/tmp`) then
+    // `path_is_within` would reject every file and ALL decorations would silently
+    // drop. Canonicalizing here makes both sides agree. (The workspace-open flow
+    // also canonicalizes the root so the Explorer tree's keys match these.)
+    let root_path = std::fs::canonicalize(&root).unwrap_or_else(|_| PathBuf::from(&root));
+    let root_path = root_path.as_path();
     if !root_path.is_dir() {
         return empty();
     }

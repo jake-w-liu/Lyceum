@@ -16,21 +16,27 @@ const SKIP_DIRS: [&str; 5] = [".git", "node_modules", "target", "dist", ".vite"]
 /// heap String. Mirrors the bound `lsp.rs` places on a single message.
 const MAX_FILE_SIZE: u64 = 16 * 1024 * 1024;
 
-/// Case-insensitive substring search returning the byte offset of the match in
-/// the ORIGINAL `haystack` (never in a lowercased copy), so the offset always
-/// lands on a char boundary. `needle_lower` must already be lowercased. The
-/// common all-ASCII path allocates nothing; the Unicode path allocates only the
-/// per-window comparison string. Returns `None` if not found.
-fn find_ci(haystack: &str, needle_lower: &str) -> Option<usize> {
+/// Case-insensitive substring search returning the `[start, end)` byte span of
+/// the match in the ORIGINAL `haystack` (never in a lowercased copy), so both
+/// offsets land on char boundaries. `end` is where a non-overlapping next search
+/// should resume: it is the byte offset just past the LAST original char that
+/// contributed to the match, which matters when case folding is not length-
+/// preserving (e.g. 'İ' lowercases to two chars). `needle_lower` must already be
+/// lowercased. The common all-ASCII path allocates nothing; the Unicode path
+/// allocates only the per-window comparison string. Returns `None` if not found.
+fn find_ci(haystack: &str, needle_lower: &str) -> Option<(usize, usize)> {
     if needle_lower.is_empty() {
-        return Some(0);
+        return Some((0, 0));
     }
     if haystack.is_ascii() && needle_lower.is_ascii() {
         let hay = haystack.as_bytes();
         let needle = needle_lower.as_bytes();
-        return hay
+        let start = hay
             .windows(needle.len())
-            .position(|w| w.eq_ignore_ascii_case(needle));
+            .position(|w| w.eq_ignore_ascii_case(needle))?;
+        // ASCII case folding is 1:1 in length, so the original span is exactly
+        // the needle's length.
+        return Some((start, start + needle.len()));
     }
     // Unicode fallback: lowercase the whole haystack once, recording for each
     // produced char the byte offset of the ORIGINAL char it came from. A fixed
@@ -51,8 +57,40 @@ fn find_ci(haystack: &str, needle_lower: &str) -> Option<usize> {
     let match_byte = lowered.find(needle_lower)?;
     // Convert the byte offset within `lowered` to a char index, then map back to
     // the original char's byte offset (always a valid char boundary in `haystack`).
-    let char_index = lowered[..match_byte].chars().count();
-    Some(origin[char_index])
+    let start_char = lowered[..match_byte].chars().count();
+    let start = origin[start_char];
+    // End: the lowered match ends at `match_byte + needle_lower.len()`. Map that
+    // back to the byte offset just past the LAST original char that contributed,
+    // so a match that consumes only part of a char's lowercase expansion (e.g.
+    // needle "i" matching the "i" of 'İ' -> "i\u{0307}") still advances past the
+    // whole 'İ' rather than re-matching or stalling.
+    let end_char = lowered[..match_byte + needle_lower.len()].chars().count();
+    let last_src_byte = origin[end_char - 1];
+    let end = haystack[last_src_byte..]
+        .chars()
+        .next()
+        .map(|c| last_src_byte + c.len_utf8())
+        .unwrap_or(haystack.len());
+    Some((start, end))
+}
+
+/// Largest per-match line snippet returned to the frontend, in bytes. A match on
+/// a multi-megabyte single line (e.g. a minified bundle) must not clone the whole
+/// line once per match — that is gigabytes of Strings and IPC payload. The search
+/// UI only needs a snippet to display, so the stored `text` is truncated on a
+/// char boundary. Column/line are still computed against the full line.
+const MAX_LINE_SNIPPET: usize = 2000;
+
+/// Truncate `line` to at most `MAX_LINE_SNIPPET` bytes on a UTF-8 char boundary.
+fn line_snippet(line: &str) -> String {
+    if line.len() <= MAX_LINE_SNIPPET {
+        return line.to_string();
+    }
+    let mut end = MAX_LINE_SNIPPET;
+    while end > 0 && !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    line[..end].to_string()
 }
 
 /// A single matching line within a workspace file. Line and column are 1-based;
@@ -143,6 +181,15 @@ pub fn search_in_dir(root: &Path, query: &str, max: usize) -> Result<Vec<SearchM
             let Ok(meta) = std::fs::metadata(&path) else {
                 continue;
             };
+            // Only read regular files. A non-regular entry — a FIFO/named pipe,
+            // socket, or device — reports len()==0 (passing the size cap) and a
+            // blocking `read_to_string` on a FIFO with no writer would hang this
+            // synchronous command forever, leaking a Tauri worker thread and
+            // wedging the search UI on "Searching…". `metadata` already followed
+            // any symlink, so this also reflects the real target's kind.
+            if !meta.is_file() {
+                continue;
+            }
             if meta.len() > MAX_FILE_SIZE {
                 continue;
             }
@@ -156,33 +203,32 @@ pub fn search_in_dir(root: &Path, query: &str, max: usize) -> Result<Vec<SearchM
                 if matches.len() >= max {
                     break;
                 }
+                // Snippet is cloned once per matching line, not once per match.
+                let snippet = line_snippet(raw_line);
                 // Report EVERY occurrence on the line (not just the first),
                 // advancing past each match, while still respecting the cap.
-                let needle_chars = needle.chars().count().max(1);
                 let mut search_from = 0usize;
                 while matches.len() < max && search_from < raw_line.len() {
-                    let Some(found) = find_ci(&raw_line[search_from..], &needle) else {
+                    let Some((found, found_end)) = find_ci(&raw_line[search_from..], &needle) else {
                         break;
                     };
                     // `byte_offset` indexes the original line on a char boundary.
                     let byte_offset = search_from + found;
-                    let column = raw_line[..byte_offset].chars().count() as u32 + 1;
+                    // Column is measured in UTF-16 code units, because Monaco (the
+                    // frontend editor that consumes this column) measures columns
+                    // in UTF-16 units. Counting chars (Unicode scalars) would place
+                    // the cursor too far left by one per preceding astral character.
+                    let column = raw_line[..byte_offset].encode_utf16().count() as u32 + 1;
                     matches.push(SearchMatch {
                         path: path_str.clone(),
                         line: index as u32 + 1,
                         column,
-                        text: raw_line.to_string(),
+                        text: snippet.clone(),
                     });
-                    // Advance past the matched span (the needle's char count,
-                    // walked over the original line so the offset stays on a
-                    // char boundary); at least one char so the loop terminates.
-                    let advance: usize = raw_line[byte_offset..]
-                        .chars()
-                        .take(needle_chars)
-                        .map(|c| c.len_utf8())
-                        .sum::<usize>()
-                        .max(1);
-                    search_from = byte_offset + advance;
+                    // Advance to the END of the matched span in the ORIGINAL line
+                    // (returned by find_ci). The `.max(byte_offset + 1)` floor
+                    // guarantees forward progress even for a zero-width edge case.
+                    search_from = (search_from + found_end).max(byte_offset + 1);
                 }
             }
         }
@@ -346,6 +392,75 @@ mod tests {
         // symlink that resolves to it are skipped by the cap.
         assert_eq!(matches.len(), 1);
         assert!(matches[0].path.ends_with("small.txt"));
+    }
+
+    #[test]
+    fn astral_char_before_match_yields_utf16_column() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        // Two 😀 (U+1F600) each count as 1 char but 2 UTF-16 units. Monaco uses
+        // UTF-16 columns, so the reported column must be 5 (4 units + 1), not 3.
+        fs::write(root.join("a.txt"), "😀😀foo\n".as_bytes()).unwrap();
+
+        let matches = search_in_dir(root, "foo", 1000).expect("search");
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].column, 5);
+    }
+
+    #[test]
+    fn adjacent_length_changing_matches_are_not_dropped() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        // Two 'İ' (U+0130), each lowercasing to the 2-char "i\u{0307}". Searching
+        // for that 2-char needle must find BOTH; the old advance walked 2 ORIGINAL
+        // chars per match and skipped the second 'İ'.
+        fs::write(root.join("t.txt"), "İİ\n".as_bytes()).unwrap();
+
+        let matches = search_in_dir(root, "i\u{0307}", 1000).expect("search");
+
+        assert_eq!(matches.len(), 2, "second adjacent match was dropped");
+        assert_eq!(matches[0].column, 1);
+        assert_eq!(matches[1].column, 2);
+    }
+
+    #[test]
+    fn very_long_line_match_text_is_truncated_on_char_boundary() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        // A single line far longer than the snippet cap with a match early on.
+        let mut line = String::from("needle");
+        line.push_str(&"x".repeat(MAX_LINE_SNIPPET * 4));
+        fs::write(root.join("big.txt"), format!("{line}\n")).unwrap();
+
+        let matches = search_in_dir(root, "needle", 1000).expect("search");
+
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].text.len() <= MAX_LINE_SNIPPET);
+        // Truncation must not break a char boundary (no panic / valid UTF-8).
+        assert!(matches[0].text.is_char_boundary(matches[0].text.len()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_is_skipped_and_does_not_hang_search() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        fs::write(root.join("real.txt"), b"needle here\n").unwrap();
+        // A named pipe with no writer: reading it would block forever. The search
+        // must skip it (is_file() == false) and return promptly with only the
+        // regular-file match. If this test ever hangs, the FIFO guard regressed.
+        let fifo = root.join("pipe");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success(), "mkfifo failed");
+
+        let matches = search_in_dir(root, "needle", 1000).expect("search");
+
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].path.ends_with("real.txt"));
     }
 
     #[test]

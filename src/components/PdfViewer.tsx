@@ -584,8 +584,17 @@ function PdfPageInput({
       return;
     }
     const n = Number.parseInt(draft, 10);
-    if (Number.isFinite(n)) onGo(n);
-    else setDraft(String(page));
+    if (Number.isFinite(n)) {
+      // Reconcile the draft to the clamped target HERE rather than relying on the
+      // `[page]` effect: when the typed value clamps to the page already shown,
+      // navigation is a no-op so `page` never changes and the effect never fires,
+      // leaving the input showing the stale out-of-range draft (e.g. "999 / 3").
+      const target = Math.min(Math.max(n, 1), Math.max(numPages, 1));
+      setDraft(String(target));
+      onGo(target);
+    } else {
+      setDraft(String(page));
+    }
   };
   return (
     <span className="pdf-page-indicator">
@@ -652,6 +661,14 @@ export default function PdfViewer({ path }: { path: string }) {
   useEffect(() => {
     pageStateRef.current = page;
   }, [page]);
+
+  // Mirror visiblePages into a ref so the active-match scroll effect can read the
+  // latest visibility WITHOUT depending on it (which would re-run that effect on
+  // every scroll and re-snap the view).
+  const visiblePagesRef = useRef(visiblePages);
+  useEffect(() => {
+    visiblePagesRef.current = visiblePages;
+  }, [visiblePages]);
 
   const scrollToPage = useCallback(
     (target: number) => {
@@ -1102,10 +1119,16 @@ export default function PdfViewer({ path }: { path: string }) {
     setActiveMatch(-1);
   }, [doc]);
 
-  // Jump to the active match's page as it changes.
+  // Jump to the active match's page as it changes — but only when that page is
+  // not already visible. When several matches share one visible page, forcing
+  // scrollToPage would snap to the page top on every Next/Prev before the
+  // highlight layer's scrollIntoView nudges the match back, a visible jolt. If
+  // the page is already on screen, the per-page highlight scrollIntoView alone
+  // brings the specific match into view without resetting scroll.
   useEffect(() => {
     if (activeMatch < 0 || activeMatch >= matches.length) return;
-    scrollToPage(matches[activeMatch].pageNumber);
+    const target = matches[activeMatch].pageNumber;
+    if (!visiblePagesRef.current.has(target)) scrollToPage(target);
   }, [activeMatch, matches, scrollToPage]);
 
   // Focus the input each time the find bar opens.

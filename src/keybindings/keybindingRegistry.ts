@@ -202,7 +202,16 @@ function matchMainKey(token: string, e: KeyboardEvent): boolean {
     case "right":
       return e.key === "ArrowRight";
     default:
-      return e.key.toLowerCase() === token;
+      if (e.key.toLowerCase() === token) return true;
+      // macOS Option/Alt remaps the produced character (Option+S => "ß"), so a
+      // letter binding's e.key no longer equals the token and the shortcut (e.g.
+      // ⌥⌘S Save All) silently never fires. When Alt is held, also accept the
+      // physical key code (KeyS for "s"). Gated on altKey so ordinary letter
+      // bindings still follow the keyboard layout via e.key (don't break Dvorak).
+      if (e.altKey && /^[a-z]$/.test(token)) {
+        return e.code === "Key" + token.toUpperCase();
+      }
+      return false;
   }
 }
 

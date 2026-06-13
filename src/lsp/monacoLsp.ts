@@ -71,6 +71,11 @@ interface LspCompletionItem {
   detail?: string;
   insertText?: string;
   kind?: number;
+  /** 1 = PlainText, 2 = Snippet (insertText carries ${1:...} tab stops). */
+  insertTextFormat?: number;
+  /** Server-chosen replacement range/text; honored over the computed word range
+   *  so trigger chars like '@'/':' are replaced, not duplicated. */
+  textEdit?: { range?: LspRange; newText?: string };
 }
 interface LspTextEdit {
   range: LspRange;
@@ -214,6 +219,17 @@ export function attachMonacoLsp(monaco: typeof Monaco): void {
           startColumn: word.startColumn,
           endColumn: word.endColumn,
         };
+        // The character immediately before the cursor, used to widen the range
+        // back over a trigger char ('@'/':') the server's insertText repeats.
+        const charBefore =
+          position.column > 1
+            ? model.getValueInRange({
+                startLineNumber: position.lineNumber,
+                startColumn: position.column - 1,
+                endLineNumber: position.lineNumber,
+                endColumn: position.column,
+              })
+            : "";
         try {
           const res = await rpc.request<
             LspCompletionItem[] | { items: LspCompletionItem[] } | null
@@ -223,13 +239,45 @@ export function attachMonacoLsp(monaco: typeof Monaco): void {
           });
           const items = Array.isArray(res) ? res : (res?.items ?? []);
           return {
-            suggestions: items.map((item) => ({
-              label: item.label,
-              detail: item.detail,
-              kind: completionKindToMonaco(monaco, item.kind),
-              insertText: item.insertText ?? item.label,
-              range,
-            })),
+            suggestions: items.map((item) => {
+              const insertText = item.insertText ?? item.label;
+              const suggestion: Monaco.languages.CompletionItem = {
+                label: item.label,
+                detail: item.detail,
+                kind: completionKindToMonaco(monaco, item.kind),
+                insertText,
+                range,
+              };
+              // Snippet completions carry ${1:...} tab stops; Monaco only expands
+              // them when told via insertTextRules, else the literal text inserts.
+              if (item.insertTextFormat === 2) {
+                suggestion.insertTextRules =
+                  monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet;
+              }
+              const editRange = item.textEdit?.range;
+              if (editRange) {
+                // Honor the server's replacement range (it knows to replace the
+                // trigger char), converting LSP 0-based -> Monaco 1-based.
+                suggestion.range = {
+                  startLineNumber: editRange.start.line + 1,
+                  startColumn: editRange.start.character + 1,
+                  endLineNumber: editRange.end.line + 1,
+                  endColumn: editRange.end.character + 1,
+                };
+                if (item.textEdit?.newText !== undefined) {
+                  suggestion.insertText = item.textEdit.newText;
+                }
+              } else if (
+                (charBefore === "@" || charBefore === ":") &&
+                insertText.startsWith(charBefore)
+              ) {
+                // No textEdit: the word range sits just AFTER the trigger char,
+                // so inserting "@time" would yield "@@time". Widen back by one to
+                // replace the already-typed trigger char.
+                suggestion.range = { ...range, startColumn: range.startColumn - 1 };
+              }
+              return suggestion;
+            }),
           };
         } catch {
           return { suggestions: [] };

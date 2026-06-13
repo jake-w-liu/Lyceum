@@ -84,6 +84,31 @@ describe("matchKeybinding tab cycling (Ctrl on every platform)", () => {
   });
 });
 
+describe("matchKeybinding Option/Alt letter remap (macOS)", () => {
+  it("⌥⌘S matches file.saveAll even when Option remaps e.key", () => {
+    // macOS reports the Option-remapped glyph for e.key (Option+S => "ß") while
+    // e.code stays the physical "KeyS". The binding must still match.
+    const e = new KeyboardEvent("keydown", {
+      key: "ß",
+      code: "KeyS",
+      metaKey: true,
+      altKey: true,
+    });
+    expect(matchKeybinding(e, {}, true)).toBe("file.saveAll");
+  });
+
+  it("does not use the physical code for a non-Alt letter binding", () => {
+    // mod+s (no Alt): a layout that produces a different e.key must not match via
+    // the physical code path. Here e.key is "x" but e.code is "KeyS".
+    const e = new KeyboardEvent("keydown", {
+      key: "x",
+      code: "KeyS",
+      metaKey: true,
+    });
+    expect(matchKeybinding(e, {}, true)).toBeNull();
+  });
+});
+
 describe("matchKeybinding escape when-clause", () => {
   it("escape with ctx={} => null", () => {
     const e = new KeyboardEvent("keydown", { key: "Escape" });

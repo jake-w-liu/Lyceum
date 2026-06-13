@@ -182,6 +182,7 @@ pub fn run() {
             file_ops::read_file,
             file_ops::write_file,
             file_ops::read_file_bytes,
+            file_ops::canonicalize_path,
             file_ops::app_config_path,
             walk::list_workspace_files,
             terminal::terminal_create,

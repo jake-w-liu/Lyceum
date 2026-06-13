@@ -95,6 +95,26 @@ describe("ContextMenu", () => {
     expect(screen.getByRole("menuitem", { name: "Last" })).toHaveFocus();
   });
 
+  it("traps Tab/Shift+Tab within the menu instead of letting focus escape", () => {
+    useContextMenuStore.getState().openMenu(12, 12, [
+      { label: "First", run: vi.fn() },
+      { label: "Skipped", run: vi.fn(), disabled: true },
+      { label: "Last", run: vi.fn() },
+    ]);
+    render(<ContextMenu />);
+    const menu = screen.getByRole("menu");
+
+    // Tab moves forward through enabled items (skipping disabled) and wraps,
+    // never escaping to a background control.
+    fireEvent.keyDown(menu, { key: "Tab" });
+    expect(screen.getByRole("menuitem", { name: "Last" })).toHaveFocus();
+    fireEvent.keyDown(menu, { key: "Tab" });
+    expect(screen.getByRole("menuitem", { name: "First" })).toHaveFocus();
+    // Shift+Tab moves backward.
+    fireEvent.keyDown(menu, { key: "Tab", shiftKey: true });
+    expect(screen.getByRole("menuitem", { name: "Last" })).toHaveFocus();
+  });
+
   it("restores focus to the invoking element when dismissed with Escape", () => {
     render(
       <>

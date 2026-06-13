@@ -83,15 +83,23 @@ pub fn watch_workspace(
         );
     }
     let label = window.label().to_string();
-    let mut active = state
-        .active
-        .lock()
-        .map_err(|_| "workspace watcher lock poisoned".to_string())?;
-    if active
-        .get(&label)
-        .is_some_and(|watcher| watcher.root == root_path)
+    // Dedup check under the lock, then RELEASE it before building the watcher.
+    // notify's recursive `watch()` is synchronous and can block for a noticeable
+    // time (large trees, network/FUSE mounts, slow disks). Holding `active`
+    // across it would stall every other holder of this lock — most importantly
+    // `remove_window`, which runs on the main UI thread when ANY window is
+    // destroyed — freezing the app until the slow setup finishes.
     {
-        return Ok(());
+        let active = state
+            .active
+            .lock()
+            .map_err(|_| "workspace watcher lock poisoned".to_string())?;
+        if active
+            .get(&label)
+            .is_some_and(|watcher| watcher.root == root_path)
+        {
+            return Ok(());
+        }
     }
 
     let event_root = root.clone();
@@ -119,6 +127,7 @@ pub fn watch_workspace(
     })
     .map_err(|e| format!("watcher setup failed: {e}"))?;
 
+    // Slow, blocking setup happens with NO lock held.
     watcher
         .watch(&root_path, RecursiveMode::Recursive)
         .map_err(|e| format!("{}: {e}", root_path.display()))?;
@@ -127,6 +136,22 @@ pub fn watch_workspace(
         requested_root: root,
         _watcher: watcher,
     };
+    // Re-acquire only to install the finished watcher, re-checking the dedup in
+    // case a concurrent call already installed an identical one for this label.
+    let mut active = state
+        .active
+        .lock()
+        .map_err(|_| "workspace watcher lock poisoned".to_string())?;
+    if active
+        .get(&label)
+        .is_some_and(|watcher| watcher.root == next.root)
+    {
+        // Another call won the race with an identical watcher; drop ours (its
+        // Drop stops the just-started notify threads) outside the lock.
+        drop(active);
+        drop(next);
+        return Ok(());
+    }
     let removed = active.insert(label, next);
     drop(active);
     drop(removed);

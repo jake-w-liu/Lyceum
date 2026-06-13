@@ -148,7 +148,11 @@ export function QuickOpen() {
                   key={path}
                   className={"modal-item" + (i === selected ? " selected" : "")}
                   title={path}
-                  onMouseEnter={() => setSelected(i)}
+                  // onMouseMove (not onMouseEnter): keyboard ArrowUp/Down scrolls
+                  // a row under a stationary cursor, which fires mouseenter and
+                  // would hijack the keyboard selection so Enter opens the wrong
+                  // file. mousemove fires only on real pointer movement.
+                  onMouseMove={() => setSelected(i)}
                   onClick={() => openAt(i)}
                 >
                   <span className="modal-item-name">{baseName(path)}</span>

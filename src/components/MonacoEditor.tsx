@@ -280,6 +280,10 @@ export default function MonacoEditor() {
       changeSub.dispose();
       selSub.dispose();
       cursorSub.dispose();
+      // Reset the status bar's Ln/Col: when the last document closes this editor
+      // unmounts and the cursor store would otherwise keep showing the closed
+      // file's stale position over the empty Welcome screen.
+      useStatusStore.getState().setCursor(1, 1);
       setActiveEditor(null);
       // Commit any outstanding debounced content before the models go away.
       flushPendingStoreWrite();

@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   MAX_OUTPUT_LINES,
+  appendOutputBuffered,
+  flushOutputBuffer,
   initialOutputData,
   useOutputStore,
 } from "./outputStore";
@@ -15,6 +17,16 @@ describe("outputStore", () => {
     get().append("b");
     expect(get().lines).toEqual(["a", "b"]);
     get().clear();
+    expect(get().lines).toEqual([]);
+  });
+
+  it("clear() drops buffered-but-unflushed streamed lines", () => {
+    // Buffer streamed output (as a live run would), then clear before the
+    // animation-frame flush runs. The buffered lines must NOT reappear.
+    appendOutputBuffered("streamed-1");
+    appendOutputBuffered("streamed-2");
+    get().clear();
+    flushOutputBuffer(); // simulate the pending frame firing after clear
     expect(get().lines).toEqual([]);
   });
 

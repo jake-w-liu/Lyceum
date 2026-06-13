@@ -94,6 +94,32 @@ function rewriteRootRelativeUrls(
       }
     }
   }
+  // `srcset` (on <img>/<source>) is a comma-separated list of `url descriptor`
+  // candidates, so it needs per-candidate rewriting rather than a single
+  // setAttribute — otherwise root-relative responsive images never resolve.
+  for (const el of Array.from(doc.querySelectorAll("[srcset]"))) {
+    const value = el.getAttribute("srcset");
+    if (value) {
+      el.setAttribute("srcset", rewriteSrcset(value, workspaceRoot));
+    }
+  }
+}
+
+function rewriteSrcset(value: string, workspaceRoot: string): string {
+  return value
+    .split(",")
+    .map((candidate) => {
+      const trimmed = candidate.trim();
+      if (!trimmed) return candidate;
+      // "<url> <optional descriptor>" — the descriptor is e.g. "2x" or "640w".
+      const spaceIdx = trimmed.search(/\s/);
+      const url = spaceIdx === -1 ? trimmed : trimmed.slice(0, spaceIdx);
+      if (!isRootRelativeUrl(url)) return trimmed;
+      const rewritten = fileAssetUrl(joinRootPath(workspaceRoot, url));
+      const descriptor = spaceIdx === -1 ? "" : trimmed.slice(spaceIdx);
+      return `${rewritten}${descriptor}`;
+    })
+    .join(", ");
 }
 
 function isRootRelativeUrl(value: string): boolean {

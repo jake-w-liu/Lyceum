@@ -40,8 +40,19 @@ describe("getAppInfo", () => {
 });
 
 describe("pickFolder", () => {
-  it("returns the chosen path", async () => {
+  it("returns the chosen path (canonicalized by the backend)", async () => {
+    openMock.mockResolvedValue("/tmp/chosen");
+    // pickFolder canonicalizes the picked path via canonicalize_path so the
+    // workspace keys off one symlink-free root.
+    invokeMock.mockResolvedValue("/private/tmp/chosen");
+    expect(await pickFolder()).toBe("/private/tmp/chosen");
+    expect(invokeMock).toHaveBeenCalledWith("canonicalize_path", {
+      path: "/tmp/chosen",
+    });
+  });
+  it("falls back to the chosen path when canonicalization is unavailable", async () => {
     openMock.mockResolvedValue("/chosen");
+    // invokeMock returns undefined (reset default) → fall back to the input.
     expect(await pickFolder()).toBe("/chosen");
   });
   it("returns null on cancel, array, or error", async () => {

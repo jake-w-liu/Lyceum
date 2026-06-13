@@ -702,9 +702,15 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
   // an inline rename/create input the user opened while the refresh was in
   // flight (focusing the row would blur and commit/cancel it), and give up
   // after the entries change a couple of times without the row appearing.
-  const pendingFocusMissesRef = useRef(0);
+  const pendingFocusDeadlineRef = useRef(0);
   function requestRowFocus(path: string) {
-    pendingFocusMissesRef.current = 0;
+    // Time budget rather than a per-change count: one tree mutation bumps the
+    // refresh nonce for EVERY expanded directory, and each completing reload
+    // changes visibleEntries. A miss-count budget was consumed by those
+    // unrelated sibling reloads before the target row's own listing arrived,
+    // silently dropping keyboard focus to <body>. A deadline keeps retrying
+    // until the row appears or the window elapses.
+    pendingFocusDeadlineRef.current = Date.now() + 1500;
     setPendingFocusPath(path);
   }
   useEffect(() => {
@@ -717,8 +723,10 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
       setPendingFocusPath(null);
       return;
     }
-    pendingFocusMissesRef.current += 1;
-    if (pendingFocusMissesRef.current > 2) setPendingFocusPath(null);
+    // Not in the DOM yet — keep the request alive across completing reloads
+    // (each changes visibleEntries and re-runs this effect) until the deadline.
+    // The deadline also prevents a late, unexpected focus steal.
+    if (Date.now() > pendingFocusDeadlineRef.current) setPendingFocusPath(null);
     // focusRow only reads refs/DOM; visibleEntries drives the retry.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingFocusPath, visibleEntries]);

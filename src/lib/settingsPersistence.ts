@@ -4,8 +4,9 @@
 // dirs). Loading degrades gracefully to defaults when no file exists.
 
 import { invoke } from "@tauri-apps/api/core";
-import { readFile, writeFile } from "./ipc";
+import { canonicalizePath, readFile, writeFile } from "./ipc";
 import {
+  type LayoutData,
   persistedLayoutData,
   sanitizeLayoutData,
   useLayoutStore,
@@ -72,12 +73,58 @@ export async function loadKeybindings(): Promise<void> {
   }
 }
 
+// Top-level keys this window changed since its last successful save. Used to
+// read-modify-write the shared config file so a different key changed in another
+// window (which shares the SAME config file but does NOT sync stores) survives
+// instead of being clobbered by a last-writer-wins full overwrite.
+const dirtySettingsKeys = new Set<string>();
+const dirtyLayoutKeys = new Set<string>();
+// True while `loadLayout` applies the persisted layout, so the layout
+// subscription ignores that programmatic setState (neither marks keys dirty nor
+// schedules a redundant save).
+let applyingPersistedLayout = false;
+
+/** Parse a config file into a plain object, or `{}` if absent/invalid. */
+async function readConfigObject(name: string): Promise<Record<string, unknown>> {
+  try {
+    const parsed = JSON.parse(await readConfigFile(name));
+    return typeof parsed === "object" && parsed !== null
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Merge this window's full state with the on-disk file: every key gets this
+ * window's value EXCEPT keys it did not change since the last save, which keep
+ * the on-disk value (possibly written by another window). Writes a complete file
+ * while never reverting a concurrent change to a key this window didn't touch.
+ */
+function mergeForWrite(
+  mine: Record<string, unknown>,
+  onDisk: Record<string, unknown>,
+  dirty: Set<string>,
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...mine };
+  for (const k of Object.keys(onDisk)) {
+    if (!dirty.has(k)) merged[k] = onDisk[k];
+  }
+  return merged;
+}
+
 export async function saveSettings(): Promise<void> {
   try {
-    await writeFile(
-      await configPath(SETTINGS_FILE),
-      JSON.stringify(useSettingsStore.getState().settings, null, 2),
-    );
+    const path = await configPath(SETTINGS_FILE);
+    const onDisk = await readConfigObject(SETTINGS_FILE);
+    const mine = useSettingsStore.getState().settings as unknown as Record<
+      string,
+      unknown
+    >;
+    const merged = mergeForWrite(mine, onDisk, dirtySettingsKeys);
+    dirtySettingsKeys.clear();
+    await writeFile(path, JSON.stringify(merged, null, 2));
   } catch (e) {
     console.error("Failed to save settings", e);
   }
@@ -88,8 +135,22 @@ export async function saveSettings(): Promise<void> {
 export async function loadLayout(): Promise<void> {
   try {
     const raw = JSON.parse(await readConfigFile(LAYOUT_FILE));
-    const data = sanitizeLayoutData(raw);
-    if (Object.keys(data).length > 0) useLayoutStore.setState(data);
+    const data = sanitizeLayoutData(raw) as Record<string, unknown>;
+    // Apply only keys the user has NOT already changed since startup, so a
+    // layout toggle made during this load's async round-trip (e.g. Cmd+B before
+    // the file resolves) isn't reverted by the restore.
+    const toApply: Record<string, unknown> = {};
+    for (const k of Object.keys(data)) {
+      if (!dirtyLayoutKeys.has(k)) toApply[k] = data[k];
+    }
+    if (Object.keys(toApply).length > 0) {
+      applyingPersistedLayout = true;
+      try {
+        useLayoutStore.setState(toApply as Partial<LayoutData>);
+      } finally {
+        applyingPersistedLayout = false;
+      }
+    }
   } catch {
     // No layout file yet (or not in Tauri) — keep defaults.
   }
@@ -97,10 +158,15 @@ export async function loadLayout(): Promise<void> {
 
 export async function saveLayout(): Promise<void> {
   try {
-    await writeFile(
-      await configPath(LAYOUT_FILE),
-      JSON.stringify(persistedLayoutData(useLayoutStore.getState()), null, 2),
-    );
+    const path = await configPath(LAYOUT_FILE);
+    const onDisk = await readConfigObject(LAYOUT_FILE);
+    const mine = persistedLayoutData(useLayoutStore.getState()) as unknown as Record<
+      string,
+      unknown
+    >;
+    const merged = mergeForWrite(mine, onDisk, dirtyLayoutKeys);
+    dirtyLayoutKeys.clear();
+    await writeFile(path, JSON.stringify(merged, null, 2));
   } catch (e) {
     console.error("Failed to save layout", e);
   }
@@ -122,7 +188,10 @@ export async function restoreWorkspace(): Promise<void> {
   try {
     const data = JSON.parse(await readConfigFile(WORKSPACE_FILE));
     if (data && typeof data.rootPath === "string") {
-      useWorkspaceStore.getState().openWorkspace(data.rootPath);
+      // Canonicalize so the tree, git decorations, search, and watcher all key
+      // off one symlink-free root (see canonicalizePath).
+      const root = await canonicalizePath(data.rootPath);
+      useWorkspaceStore.getState().openWorkspace(root);
     }
   } catch {
     // no saved workspace
@@ -153,18 +222,37 @@ let persistenceInitialized = false;
 export function initSettingsPersistence(): void {
   if (persistenceInitialized) return;
   persistenceInitialized = true;
-  useSettingsStore.subscribe(() => {
+  useSettingsStore.subscribe((s, prev) => {
+    const cur = s.settings as unknown as Record<string, unknown>;
+    const old = prev.settings as unknown as Record<string, unknown>;
+    for (const k of Object.keys(cur)) {
+      if (cur[k] !== old[k]) dirtySettingsKeys.add(k);
+    }
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(() => void saveSettings(), 400);
   });
-  // Restore the persisted layout first, then subscribe — so the restore itself
-  // doesn't immediately re-save what was just read.
-  void loadLayout().finally(() => {
-    useLayoutStore.subscribe(() => {
-      if (layoutSaveTimer) clearTimeout(layoutSaveTimer);
-      layoutSaveTimer = setTimeout(() => void saveLayout(), 400);
-    });
+  // Subscribe layout persistence BEFORE loading, so a layout change made during
+  // loadLayout's async round-trip is recorded and persisted (not lost). The
+  // restore's own setState is ignored via `applyingPersistedLayout`, so it
+  // doesn't re-save what was just read.
+  useLayoutStore.subscribe((s, prev) => {
+    if (applyingPersistedLayout) return;
+    const cur = persistedLayoutData(s) as unknown as Record<string, unknown>;
+    const old = persistedLayoutData(prev) as unknown as Record<string, unknown>;
+    let changed = false;
+    for (const k of Object.keys(cur)) {
+      if (cur[k] !== old[k]) {
+        dirtyLayoutKeys.add(k);
+        changed = true;
+      }
+    }
+    // No persisted field changed (e.g. only the transient editorPreview toggled)
+    // — nothing to write.
+    if (!changed) return;
+    if (layoutSaveTimer) clearTimeout(layoutSaveTimer);
+    layoutSaveTimer = setTimeout(() => void saveLayout(), 400);
   });
+  void loadLayout();
   // Theme changed via the palette → reflect into settings (which persists it).
   useThemeStore.subscribe((s) => {
     if (useSettingsStore.getState().settings.theme !== s.theme) {

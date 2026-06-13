@@ -50,4 +50,17 @@ describe("HtmlPreview", () => {
     expect(doc).toContain('src="file:///workspace/src/main.js"');
     expect(doc).toContain('<base href="file:///workspace/pages/">');
   });
+
+  it("rewrites root-relative URLs inside srcset, preserving descriptors", () => {
+    const doc = buildHtmlPreviewDocument(
+      '<img src="/img/logo.png" srcset="/img/logo.png 1x, /img/logo@2x.png 2x">',
+      "/workspace/pages/index.html",
+      "/workspace",
+    );
+
+    expect(doc).toContain(
+      'srcset="file:///workspace/img/logo.png 1x, file:///workspace/img/logo@2x.png 2x"',
+    );
+    expect(doc).toContain('src="file:///workspace/img/logo.png"');
+  });
 });

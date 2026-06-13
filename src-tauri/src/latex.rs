@@ -109,6 +109,7 @@ pub fn run_latex_build(
         child,
         julia::run_key(&window, &id),
         state.runs.clone(),
+        state.pending_cancel.clone(),
         out_event,
         format!("build:exit:{id}"),
     );
@@ -167,6 +168,10 @@ fn plan_latex_build_impl(
     }
 
     let command = retarget_tex_command(configured_command, &tex_name);
+    // A custom command may relocate/rename the PDF via -output-directory/-jobname;
+    // honor those so stale-removal, the "wrote …" message, and auto-open all point
+    // at the real artifact instead of the default next-to-source path.
+    let pdf_path = custom_pdf_path(&command, &tex_name, &cwd).unwrap_or(pdf_path);
     let (program, args) = shell_command(&command);
     Ok(LatexBuildPlan {
         program,
@@ -243,6 +248,90 @@ fn pdf_path_for_tex(path: &Path) -> Result<PathBuf, String> {
     let mut pdf = path.to_path_buf();
     pdf.set_extension("pdf");
     Ok(pdf)
+}
+
+/// For a custom (non-stock) build command, derive the real PDF output path by
+/// honoring `-output-directory`/`-outdir`/`--outdir` and `-jobname`, which move
+/// or rename the artifact away from the default `<texdir>/<stem>.pdf`. Both the
+/// `-flag=value` and `-flag value` forms are recognized; a relative output dir is
+/// resolved against `cwd` (the .tex's parent, where the build runs). Returns
+/// `None` when no such flag is present, so the caller keeps the default path.
+/// Without this, Lyceum would delete/predict/auto-open the wrong PDF for commands
+/// like `latexmk -pdf -output-directory=build main.tex`.
+fn custom_pdf_path(command: &str, tex_name: &str, cwd: &Path) -> Option<PathBuf> {
+    const OUTDIR_FLAGS: [&str; 3] = ["-output-directory", "-outdir", "--outdir"];
+    const JOBNAME_FLAGS: [&str; 1] = ["-jobname"];
+
+    let tokens: Vec<String> = shell_token_spans(command)
+        .iter()
+        .map(|span| strip_shell_quotes(&command[span.start..span.end]).to_string())
+        .collect();
+
+    let mut outdir: Option<String> = None;
+    let mut jobname: Option<String> = None;
+    let mut i = 0;
+    while i < tokens.len() {
+        let tok = &tokens[i];
+        let next = tokens.get(i + 1);
+        let mut consumed_next = false;
+        if outdir.is_none() {
+            for flag in OUTDIR_FLAGS {
+                if let Some((value, used_next)) = flag_value(tok, next, flag) {
+                    outdir = Some(value);
+                    consumed_next = used_next;
+                    break;
+                }
+            }
+        }
+        if !consumed_next && jobname.is_none() {
+            for flag in JOBNAME_FLAGS {
+                if let Some((value, used_next)) = flag_value(tok, next, flag) {
+                    jobname = Some(value);
+                    consumed_next = used_next;
+                    break;
+                }
+            }
+        }
+        i += if consumed_next { 2 } else { 1 };
+    }
+
+    if outdir.is_none() && jobname.is_none() {
+        return None;
+    }
+
+    let stem = Path::new(tex_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(tex_name)
+        .to_string();
+    let base = jobname.unwrap_or(stem);
+    let dir = match outdir {
+        Some(d) => {
+            let p = PathBuf::from(&d);
+            if p.is_absolute() {
+                p
+            } else {
+                cwd.join(p)
+            }
+        }
+        None => cwd.to_path_buf(),
+    };
+    Some(dir.join(format!("{base}.pdf")))
+}
+
+/// Extract a flag's value, supporting `-flag=value` (returns `(value, false)`)
+/// and `-flag value` (returns `(value, true)` to signal the next token was
+/// consumed). Returns `None` if `tok` is not this flag.
+fn flag_value(tok: &str, next: Option<&String>, flag: &str) -> Option<(String, bool)> {
+    let rest = tok.strip_prefix(flag)?;
+    if let Some(value) = rest.strip_prefix('=') {
+        return Some((strip_shell_quotes(value).to_string(), false));
+    }
+    if rest.is_empty() {
+        // `-flag value`: the next token (already shell-unquoted) is the value.
+        return next.map(|value| (value.clone(), true));
+    }
+    None
 }
 
 fn remove_stale_pdf(path: &Path) -> Result<bool, String> {
@@ -546,6 +635,49 @@ mod tests {
         let plan = plan_latex_build_impl(&tex, "tectonic --keep-logs", OsStr::new("")).unwrap();
 
         assert_eq!(plan.command, r#"tectonic --keep-logs "paper.tex""#);
+    }
+
+    #[test]
+    fn custom_build_with_output_directory_predicts_pdf_in_that_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tex = tmp.path().join("paper.tex");
+        std::fs::write(&tex, "\\documentclass{article}").unwrap();
+
+        let plan = plan_latex_build_impl(
+            &tex,
+            "latexmk -pdf -output-directory=build main.tex",
+            OsStr::new(""),
+        )
+        .unwrap();
+
+        // Output dir is relative to cwd (the .tex parent); stem comes from the
+        // retargeted current file (paper), not "main".
+        assert_eq!(plan.pdf_path, tmp.path().join("build").join("paper.pdf"));
+    }
+
+    #[test]
+    fn custom_build_with_jobname_predicts_renamed_pdf() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tex = tmp.path().join("paper.tex");
+        std::fs::write(&tex, "\\documentclass{article}").unwrap();
+
+        let plan =
+            plan_latex_build_impl(&tex, "latexmk -pdf -jobname report main.tex", OsStr::new(""))
+                .unwrap();
+
+        assert_eq!(plan.pdf_path, tmp.path().join("report.pdf"));
+    }
+
+    #[test]
+    fn custom_build_without_outdir_keeps_default_pdf_next_to_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tex = tmp.path().join("paper.tex");
+        std::fs::write(&tex, "\\documentclass{article}").unwrap();
+
+        let plan = plan_latex_build_impl(&tex, "latexmk -pdf -silent main.tex", OsStr::new(""))
+            .unwrap();
+
+        assert_eq!(plan.pdf_path, tmp.path().join("paper.pdf"));
     }
 
     #[test]

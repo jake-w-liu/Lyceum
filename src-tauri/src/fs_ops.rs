@@ -131,19 +131,81 @@ pub fn create_file(path: String) -> Result<(), String> {
         })
 }
 
-/// Create a directory (and any missing parents) at `path`.
+/// Create a directory (and any missing parents) at `path`. Errors if the leaf
+/// already exists, mirroring `create_file` — otherwise `create_dir_all` silently
+/// succeeds on an existing directory and the Explorer reports a duplicate-named
+/// "New Folder" as freshly created, misleading the user into the existing dir.
 #[tauri::command]
 pub fn create_directory(path: String) -> Result<(), String> {
+    let target = Path::new(&path);
+    if path_entry_exists(target) {
+        return Err(format!("already exists: {path}"));
+    }
     std::fs::create_dir_all(&path).map_err(|e| format!("{path}: {e}"))
 }
 
 /// Rename/move `from` to `to`. Errors if the destination already exists.
 #[tauri::command]
 pub fn rename_path(from: String, to: String) -> Result<(), String> {
-    if path_entry_exists(Path::new(&to)) {
+    let from_path = Path::new(&from);
+    let to_path = Path::new(&to);
+    if path_entry_exists(to_path) {
+        // A case-only rename on a case-insensitive filesystem (macOS/Windows):
+        // `to` resolves to the SAME on-disk entry as `from`, so the destination-
+        // exists guard would wrongly reject e.g. `Readme.md` -> `readme.md`.
+        // Detect that exact case and rename through a temp name so the case
+        // change still applies.
+        if is_case_only_rename(from_path, to_path) {
+            return rename_case_only(from_path, to_path);
+        }
         return Err(format!("already exists: {to}"));
     }
     std::fs::rename(&from, &to).map_err(|e| format!("{from} -> {to}: {e}"))
+}
+
+/// True when `from` and `to` differ only in the letter case of the final
+/// component and refer to the same on-disk entry (case-insensitive filesystem).
+fn is_case_only_rename(from: &Path, to: &Path) -> bool {
+    if from == to {
+        return false;
+    }
+    let (Some(from_name), Some(to_name)) = (from.file_name(), to.file_name()) else {
+        return false;
+    };
+    if from.parent() != to.parent() {
+        return false;
+    }
+    if from_name.to_string_lossy().to_lowercase() != to_name.to_string_lossy().to_lowercase() {
+        return false;
+    }
+    // Confirm they really point at one entry (so we never temp-dance two distinct
+    // files). On a case-insensitive FS both canonicalize to the same real path.
+    match (std::fs::canonicalize(from), std::fs::canonicalize(to)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+static CASE_RENAME_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Apply a case-only rename via a unique intermediate name in the same directory,
+/// so a case-insensitive filesystem doesn't treat source == destination.
+fn rename_case_only(from: &Path, to: &Path) -> Result<(), String> {
+    let parent = to.parent().filter(|p| !p.as_os_str().is_empty());
+    let seq = CASE_RENAME_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_name = format!(".lyceum-case-rename.{}.{seq}", std::process::id());
+    let tmp = match parent {
+        Some(p) => p.join(tmp_name),
+        None => PathBuf::from(tmp_name),
+    };
+    std::fs::rename(from, &tmp)
+        .map_err(|e| format!("{} -> {}: {e}", from.display(), tmp.display()))?;
+    if let Err(e) = std::fs::rename(&tmp, to) {
+        // Roll back so the file isn't stranded under the temp name.
+        let _ = std::fs::rename(&tmp, from);
+        return Err(format!("{} -> {}: {e}", from.display(), to.display()));
+    }
+    Ok(())
 }
 
 /// Move one or more workspace paths into an existing destination directory.
@@ -910,6 +972,48 @@ mod tests {
             .unwrap()
             .file_type()
             .is_symlink());
+    }
+
+    #[test]
+    fn create_directory_errors_when_directory_already_exists() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let dir = tmp.path().join("src");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("existing.txt"), b"x").unwrap();
+
+        let result = create_directory(dir.to_string_lossy().to_string());
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("already exists"));
+        // The pre-existing directory and its contents are untouched.
+        assert!(dir.join("existing.txt").is_file());
+    }
+
+    #[test]
+    fn rename_path_supports_case_only_rename() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let dir = tmp.path();
+        let from = dir.join("Readme.md");
+        let to = dir.join("readme.md");
+        fs::write(&from, b"data").unwrap();
+
+        rename_path(
+            from.to_string_lossy().to_string(),
+            to.to_string_lossy().to_string(),
+        )
+        .expect("case-only rename should succeed");
+
+        // The on-disk entry now carries the new case (verified via the directory
+        // listing, which is reliable on both case-sensitive and -insensitive FS).
+        let names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert!(names.contains(&"readme.md".to_string()), "names: {names:?}");
+        assert!(!names.contains(&"Readme.md".to_string()), "names: {names:?}");
+        assert_eq!(fs::read(&to).unwrap(), b"data");
+        // No temp file was stranded.
+        assert!(!names.iter().any(|n| n.contains("lyceum-case-rename")));
     }
 
     #[cfg(unix)]

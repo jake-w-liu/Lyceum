@@ -41,9 +41,12 @@ export function ContextMenu() {
   }, [open, items]);
 
   // Roving focus: ArrowDown/ArrowUp move through enabled items with wrap;
-  // Home/End jump to the first/last. Enter is the button's native activation.
+  // Home/End jump to the first/last. Tab/Shift+Tab are trapped and behave like
+  // the arrows, so focus can't escape the open menu to a background control
+  // (which would leave the menu visible but un-navigable). Enter is the button's
+  // native activation.
   function onMenuKeyDown(e: React.KeyboardEvent) {
-    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
+    if (!["ArrowDown", "ArrowUp", "Home", "End", "Tab"].includes(e.key)) return;
     const menu = menuRef.current;
     if (!menu) return;
     const focusable = Array.from(
@@ -57,10 +60,12 @@ export function ContextMenu() {
     const current = focusable.indexOf(
       document.activeElement as HTMLButtonElement,
     );
+    const forward =
+      e.key === "ArrowDown" || (e.key === "Tab" && !e.shiftKey);
     let next: number;
     if (e.key === "Home") next = 0;
     else if (e.key === "End") next = focusable.length - 1;
-    else if (e.key === "ArrowDown")
+    else if (forward)
       next = current < 0 ? 0 : (current + 1) % focusable.length;
     else
       next =

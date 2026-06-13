@@ -67,6 +67,20 @@ pub fn read_file(path: String) -> Result<String, String> {
 #[tauri::command]
 pub fn write_file(path: String, content: String) -> Result<(), String> {
     let path_ref = Path::new(&path);
+    // Refuse to clobber a file whose CURRENT on-disk bytes are not valid UTF-8.
+    // `read_file` decodes such a file lossily (every invalid byte became U+FFFD)
+    // so it can be viewed, but writing the editor's UTF-8 buffer back would
+    // silently and irreversibly corrupt the original encoding / binary content.
+    // A brand-new file (read errors) and an already-UTF-8 file are unaffected, so
+    // normal editing and the first save of a UTF-8 file proceed as before.
+    // `std::fs::read` follows symlinks, matching `read_file`.
+    if let Ok(existing) = std::fs::read(path_ref) {
+        if std::str::from_utf8(&existing).is_err() {
+            return Err(format!(
+                "{path}: refusing to save — the file is not valid UTF-8, and saving would corrupt its contents"
+            ));
+        }
+    }
     if let Some(parent) = path_ref.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
@@ -78,6 +92,17 @@ pub fn write_file(path: String, content: String) -> Result<(), String> {
 /// Atomically replace `path` with `bytes` via a same-directory temp file + fsync
 /// + rename. The temp file is removed on any failure so no partial files leak.
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    // If `path` is a symlink, write through to its real target. `std::fs::rename`
+    // does NOT follow a final-component symlink — renaming over the link would
+    // replace (destroy) the link entry with a fresh regular file and leave the
+    // real target's old content stale. Resolving first means we rename over the
+    // resolved file in its own directory, preserving the link. A broken link
+    // (canonicalize fails) falls back to the path as-is.
+    let resolved = match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => std::fs::canonicalize(path).ok(),
+        _ => None,
+    };
+    let path = resolved.as_deref().unwrap_or(path);
     let parent = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
         _ => PathBuf::from("."),
@@ -115,6 +140,20 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         return Err(e);
     }
     Ok(())
+}
+
+/// Resolve a path to its canonical, symlink-free absolute form. Best-effort: a
+/// path that cannot be canonicalized (does not exist, permission denied) is
+/// returned unchanged. The workspace-open flow uses this so the tree listing,
+/// git decorations, search, and the watcher all key off ONE canonical root —
+/// otherwise a root reached through a symlinked component (e.g. macOS `/tmp` ->
+/// `/private/tmp`) makes git's canonical paths disagree with the tree's paths
+/// and every decoration silently drops.
+#[tauri::command]
+pub fn canonicalize_path(path: String) -> String {
+    std::fs::canonicalize(&path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or(path)
 }
 
 /// Resolve a file path inside the app config dir (settings/keybindings persistence, M10).
@@ -214,6 +253,53 @@ mod tests {
         std::fs::write(&path, [b'h', b'i', 0xFF]).unwrap();
         let read = read_file(path).expect("lossy read should succeed");
         assert!(read.starts_with("hi"));
+    }
+
+    #[test]
+    fn write_file_refuses_to_overwrite_non_utf8_file() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let path = tmp.path().join("latin1.txt").to_string_lossy().to_string();
+        // A file that is not valid UTF-8 (Latin-1 'é' = 0xE9). read_file would
+        // decode it lossily; saving the editor buffer back must be refused so the
+        // original bytes are not destroyed.
+        std::fs::write(&path, [b'h', b'i', 0xE9]).unwrap();
+        let err = write_file(path.clone(), "hi\u{FFFD}".to_string()).unwrap_err();
+        assert!(err.contains("not valid UTF-8"), "got: {err}");
+        // The original bytes are untouched.
+        assert_eq!(std::fs::read(&path).unwrap(), [b'h', b'i', 0xE9]);
+    }
+
+    #[test]
+    fn write_file_allows_overwriting_utf8_and_creating_new() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        // Overwriting an existing valid-UTF-8 file is allowed.
+        let utf8 = tmp.path().join("ok.txt").to_string_lossy().to_string();
+        write_file(utf8.clone(), "first".to_string()).expect("create");
+        write_file(utf8.clone(), "second".to_string()).expect("overwrite utf8");
+        assert_eq!(read_file(utf8).expect("read"), "second");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_file_through_symlink_preserves_link_and_updates_target() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let target = tmp.path().join("real.txt");
+        let link = tmp.path().join("link.txt");
+        std::fs::write(&target, "old").unwrap();
+        symlink(&target, &link).unwrap();
+
+        // Saving through the symlink must write the real target's content and
+        // leave the symlink intact — not replace the link with a regular file.
+        write_file(link.to_string_lossy().to_string(), "new".to_string()).expect("write via link");
+
+        assert!(
+            std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(),
+            "symlink was destroyed by the save"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+        assert_eq!(std::fs::read_to_string(&link).unwrap(), "new");
     }
 
     #[test]

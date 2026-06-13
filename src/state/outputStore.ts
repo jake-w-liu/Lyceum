@@ -41,7 +41,13 @@ export const useOutputStore = create<OutputState>()((set) => ({
         ? {}
         : { lines: capLines([...s.lines, ...incoming]) },
     ),
-  clear: () => set({ lines: [] }),
+  clear: () => {
+    // Also drop buffered-but-not-yet-flushed streamed lines, otherwise a Clear
+    // during an active run is undone on the next animation frame when the
+    // pending buffer flushes the pre-clear output back into the store.
+    resetOutputBuffer();
+    set({ lines: [] });
+  },
   setRunning: (running) => set({ running }),
   setRunId: (runId) => set({ runId }),
 }));
@@ -73,6 +79,13 @@ function scheduleFlush(): void {
 export function appendOutputBuffered(line: string): void {
   outputBuffer.push(line);
   scheduleFlush();
+}
+
+/** Drop any buffered, not-yet-flushed streamed lines. Called by the store's
+ *  `clear()` so a Clear during a live run truly discards in-flight output. A
+ *  pending flush still fires but finds the buffer empty (a no-op). */
+export function resetOutputBuffer(): void {
+  outputBuffer = [];
 }
 
 /** Flush any buffered output lines immediately (call before a discrete message
