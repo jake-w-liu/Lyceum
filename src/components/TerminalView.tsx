@@ -41,12 +41,12 @@ function xtermThemeFromCss(el: HTMLElement) {
   const styles = getComputedStyle(el);
   const read = (name: string, fallback: string) =>
     styles.getPropertyValue(name).trim() || fallback;
-  const foreground = read("--fg", "#cccccc");
+  const foreground = read("--fg", "#bdc0ba");
   return {
-    background: read("--bg", "#1e1e1e"),
+    background: read("--bg", "#1c1c1c"),
     foreground,
     cursor: foreground,
-    selectionBackground: read("--selection", "#264f78"),
+    selectionBackground: read("--selection", "#2b5f75"),
   };
 }
 

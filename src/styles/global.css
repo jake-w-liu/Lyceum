@@ -91,11 +91,11 @@ kbd {
 }
 
 .activity-bar-item:hover {
-  color: #ffffff;
+  color: #fffffb;
 }
 
 .activity-bar-item.active {
-  color: #ffffff;
+  color: #fffffb;
   border-left-color: var(--activity-active-border);
 }
 
@@ -299,7 +299,7 @@ kbd {
 }
 
 .tree-error {
-  color: #f48771;
+  color: #f17c67;
 }
 
 /* Explorer toolbar + per-row actions + inline rename/create (gap pass) */
@@ -633,7 +633,7 @@ kbd {
   justify-content: center;
   align-items: flex-start;
   padding-top: 90px;
-  background: rgba(0, 0, 0, 0.35);
+  background: rgba(8, 8, 8, 0.35);
   z-index: 50;
 }
 
@@ -646,7 +646,7 @@ kbd {
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: 6px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 8px 24px rgba(8, 8, 8, 0.4);
   overflow: hidden;
 }
 
@@ -686,7 +686,7 @@ kbd {
 
 .modal-item.selected {
   background: var(--accent);
-  color: #ffffff;
+  color: #fffffb;
 }
 
 .modal-item:hover {
@@ -717,7 +717,7 @@ kbd {
 }
 
 .modal-item.selected .modal-item-dir {
-  color: rgba(255, 255, 255, 0.82);
+  color: rgba(255, 255, 251, 0.82);
 }
 
 .modal-empty {
@@ -968,7 +968,7 @@ kbd {
   width: 100%;
   height: 100%;
   min-height: 0;
-  background: #ffffff;
+  background: #fffffb;
 }
 
 .html-preview-frame {
@@ -1017,8 +1017,8 @@ kbd {
 }
 
 .output-stop {
-  border-color: rgba(244, 135, 113, 0.6);
-  color: #f48771;
+  border-color: rgba(241, 124, 103, 0.6);
+  color: #f17c67;
 }
 
 .output-log {
@@ -1087,7 +1087,7 @@ kbd {
      and the full width becomes reachable by horizontal scroll. */
   gap: 12px;
   padding: 12px;
-  background: #525659;
+  background: #535953;
   scroll-padding-top: 12px;
 }
 
@@ -1095,8 +1095,8 @@ kbd {
   position: relative;
   flex: 0 0 auto;
   margin-inline: auto;
-  background: #ffffff;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+  background: #fffffb;
+  box-shadow: 0 2px 8px rgba(8, 8, 8, 0.5);
 }
 
 .pdf-canvas {
@@ -1141,7 +1141,7 @@ kbd {
 }
 
 .pdf-text-layer ::selection {
-  background: rgba(0, 92, 255, 0.28);
+  background: rgba(0, 92, 175, 0.28);
 }
 
 .pdf-text-layer .endOfContent {
@@ -1179,8 +1179,8 @@ kbd {
 }
 
 .pdf-annotation-layer :is(.linkAnnotation, .buttonWidgetAnnotation.pushButton):not(.hasBorder) > a:hover {
-  background-color: rgba(255, 255, 0, 0.2);
-  box-shadow: 0 2px 10px rgba(255, 255, 0, 0.35);
+  background-color: rgba(251, 226, 81, 0.2);
+  box-shadow: 0 2px 10px rgba(251, 226, 81, 0.35);
 }
 
 .pdf-annotation-layer .textAnnotation img {
@@ -1213,15 +1213,15 @@ kbd {
 
 .pdf-error {
   padding: 16px;
-  color: #f48771;
+  color: #f17c67;
 }
 
 /* Non-fatal render error: a banner above the still-usable toolbar/canvas. */
 .pdf-error-inline {
   padding: 6px 12px;
   font-size: 12px;
-  background: rgba(244, 135, 113, 0.12);
-  border-bottom: 1px solid rgba(244, 135, 113, 0.4);
+  background: rgba(241, 124, 103, 0.12);
+  border-bottom: 1px solid rgba(241, 124, 103, 0.4);
 }
 
 /* Image preview */
@@ -1240,7 +1240,7 @@ kbd {
   align-items: center;
   justify-content: center;
   padding: 12px;
-  background: #2f3336;
+  background: #373c38;
 }
 
 .image-preview {
@@ -1250,7 +1250,7 @@ kbd {
   width: auto;
   height: auto;
   object-fit: contain;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 2px 10px rgba(8, 8, 8, 0.45);
 }
 
 /* Status bar */
@@ -1313,7 +1313,7 @@ kbd {
 .placeholder button {
   margin-top: 10px;
   background: var(--accent);
-  color: #ffffff;
+  color: #fffffb;
   border: none;
   padding: 6px 14px;
   border-radius: 2px;
@@ -1361,7 +1361,7 @@ kbd {
 }
 
 .modal-item.selected .modal-item-detail {
-  color: rgba(255, 255, 255, 0.82);
+  color: rgba(255, 255, 251, 0.82);
 }
 
 .modal-category-header {
@@ -1387,7 +1387,7 @@ kbd {
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: 6px;
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 6px 24px rgba(8, 8, 8, 0.4);
   display: flex;
   flex-direction: column;
   font-size: 13px;
@@ -1409,7 +1409,7 @@ kbd {
 
 .context-menu-item:hover:not(.disabled) {
   background: var(--accent);
-  color: #ffffff;
+  color: #fffffb;
 }
 
 .context-menu-item.disabled {
@@ -1443,15 +1443,15 @@ kbd {
 }
 
 .status-item-button:hover {
-  background: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 251, 0.16);
 }
 
 .status-spinner {
   display: inline-block;
   width: 10px;
   height: 10px;
-  border: 1.5px solid rgba(255, 255, 255, 0.4);
-  border-top-color: #ffffff;
+  border: 1.5px solid rgba(255, 255, 251, 0.4);
+  border-top-color: #fffffb;
   border-radius: 50%;
   animation: status-spin 0.8s linear infinite;
 }
@@ -1578,11 +1578,11 @@ kbd {
 
 .pdf-search-highlight {
   position: absolute;
-  background: rgba(250, 204, 21, 0.4);
+  background: rgba(255, 196, 8, 0.4);
   border-radius: 1px;
 }
 
 .pdf-search-highlight--active {
-  background: rgba(249, 115, 22, 0.55);
-  outline: 1px solid rgba(249, 115, 22, 0.9);
+  background: rgba(240, 94, 28, 0.55);
+  outline: 1px solid rgba(240, 94, 28, 0.9);
 }

@@ -5,46 +5,51 @@
  * `hc` (high contrast) are scaffolded here; the full theme switcher (and
  * Monaco theme sync) lands in M7. Set the active theme via the `data-theme`
  * attribute on <html>.
+ *
+ * Palette: every color in the app is a traditional Japanese (Nippon) color
+ * (nipponcolors.com). The dark neutral ramp is sumi -> aisumicha -> keshizumi
+ * -> dobunezumi; foreground is shironezumi; accent is hanada. When adding a
+ * color, pick the nearest Nippon color rather than introducing a new hex.
  */
 
 :root,
 :root[data-theme="dark"] {
   color-scheme: dark;
 
-  --bg: #1e1e1e;
-  --bg-elevated: #252526;
-  --bg-activity-bar: #333333;
-  --bg-tab-inactive: #2d2d2d;
-  --bg-tab-active: #1e1e1e;
-  --bg-statusbar: #007acc;
-  --bg-hover: #2a2d2e;
+  --bg: #1c1c1c;
+  --bg-elevated: #373c38;
+  --bg-activity-bar: #4f4f48;
+  --bg-tab-inactive: #434343;
+  --bg-tab-active: #1c1c1c;
+  --bg-statusbar: #005caf;
+  --bg-hover: #434343;
 
-  --fg: #cccccc;
-  --fg-muted: #8a8a8a;
-  --fg-statusbar: #ffffff;
+  --fg: #bdc0ba;
+  --fg-muted: #828282;
+  --fg-statusbar: #fffffb;
 
-  --border: #2b2b2b;
-  --accent: #0e639c;
-  --accent-hover: #1177bb;
-  --focus: #007fd4;
-  --activity-active-border: #ffffff;
-  --selection: #264f78;
-  --selection-fg: #ffffff;
+  --border: #434343;
+  --accent: #006284;
+  --accent-hover: #005caf;
+  --focus: #005caf;
+  --activity-active-border: #fffffb;
+  --selection: #2b5f75;
+  --selection-fg: #fffffb;
 
   /* Git decoration colors (Explorer): orange = modified, green = new. */
-  --git-modified: #e2c08d;
-  --git-added: #73c991;
-  --git-untracked: #73c991;
-  --git-deleted: #c74e39;
-  --git-conflict: #e4676b;
-  --git-renamed: #e2c08d;
-  --git-ignored: #8c8c8c;
-  --git-nested-modified: #4fc1ff;
-  --git-nested-added: #4ec9b0;
-  --git-nested-untracked: #4ec9b0;
-  --git-nested-deleted: #d670d6;
-  --git-nested-conflict: #d670d6;
-  --git-nested-renamed: #4fc1ff;
+  --git-modified: #d7b98e;
+  --git-added: #5dac81;
+  --git-untracked: #5dac81;
+  --git-deleted: #cc543a;
+  --git-conflict: #eb7a77;
+  --git-renamed: #d7b98e;
+  --git-ignored: #828282;
+  --git-nested-modified: #2ea9df;
+  --git-nested-added: #00aa90;
+  --git-nested-untracked: #00aa90;
+  --git-nested-deleted: #c1328e;
+  --git-nested-conflict: #c1328e;
+  --git-nested-renamed: #2ea9df;
 
   --ui-font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Helvetica Neue", sans-serif;
   --mono-font: "SF Mono", "JetBrains Mono", "Fira Code", "Cascadia Code", Menlo, Consolas, monospace;
@@ -53,77 +58,77 @@
 :root[data-theme="light"] {
   color-scheme: light;
 
-  --bg: #ffffff;
-  --bg-elevated: #f3f3f3;
-  --bg-activity-bar: #2c2c2c;
-  --bg-tab-inactive: #ececec;
-  --bg-tab-active: #ffffff;
-  --bg-statusbar: #007acc;
-  --bg-hover: #e8e8e8;
+  --bg: #fffffb;
+  --bg-elevated: #fcfaf2;
+  --bg-activity-bar: #434343;
+  --bg-tab-inactive: #d7c4bb;
+  --bg-tab-active: #fffffb;
+  --bg-statusbar: #005caf;
+  --bg-hover: #d7c4bb;
 
-  --fg: #333333;
-  --fg-muted: #6c6c6c;
-  --fg-statusbar: #ffffff;
+  --fg: #4f4f48;
+  --fg-muted: #656765;
+  --fg-statusbar: #fffffb;
 
-  --border: #e0e0e0;
-  --accent: #0e639c;
-  --accent-hover: #1177bb;
-  --focus: #007fd4;
-  --activity-active-border: #ffffff;
-  --selection: #add6ff;
-  --selection-fg: #000000;
+  --border: #bdc0ba;
+  --accent: #006284;
+  --accent-hover: #005caf;
+  --focus: #005caf;
+  --activity-active-border: #fffffb;
+  --selection: #7db9de;
+  --selection-fg: #080808;
 
   /* Darker shades for contrast on a light background. */
-  --git-modified: #895503;
-  --git-added: #388a34;
-  --git-untracked: #388a34;
-  --git-deleted: #ad0707;
-  --git-conflict: #ad0707;
-  --git-renamed: #895503;
-  --git-ignored: #8c8c8c;
-  --git-nested-modified: #006ab1;
-  --git-nested-added: #007a6a;
-  --git-nested-untracked: #007a6a;
-  --git-nested-deleted: #9a2497;
-  --git-nested-conflict: #9a2497;
-  --git-nested-renamed: #006ab1;
+  --git-modified: #9b6e23;
+  --git-added: #1b813e;
+  --git-untracked: #1b813e;
+  --git-deleted: #c73e3a;
+  --git-conflict: #c73e3a;
+  --git-renamed: #9b6e23;
+  --git-ignored: #828282;
+  --git-nested-modified: #005caf;
+  --git-nested-added: #00896c;
+  --git-nested-untracked: #00896c;
+  --git-nested-deleted: #c1328e;
+  --git-nested-conflict: #c1328e;
+  --git-nested-renamed: #005caf;
 }
 
 :root[data-theme="hc"] {
   color-scheme: dark;
 
-  --bg: #000000;
-  --bg-elevated: #0a0a0a;
-  --bg-activity-bar: #000000;
-  --bg-tab-inactive: #000000;
-  --bg-tab-active: #000000;
-  --bg-statusbar: #000000;
-  --bg-hover: #1f1f1f;
+  --bg: #080808;
+  --bg-elevated: #0c0c0c;
+  --bg-activity-bar: #080808;
+  --bg-tab-inactive: #080808;
+  --bg-tab-active: #080808;
+  --bg-statusbar: #080808;
+  --bg-hover: #1c1c1c;
 
-  --fg: #ffffff;
-  --fg-muted: #d4d4d4;
-  --fg-statusbar: #ffffff;
+  --fg: #fffffb;
+  --fg-muted: #bdc0ba;
+  --fg-statusbar: #fffffb;
 
-  --border: #6fc3df;
-  --accent: #0e639c;
-  --accent-hover: #1177bb;
-  --focus: #f38518;
-  --activity-active-border: #f38518;
-  --selection: #ffffff;
-  --selection-fg: #000000;
+  --border: #81c7d4;
+  --accent: #006284;
+  --accent-hover: #005caf;
+  --focus: #e98b2a;
+  --activity-active-border: #e98b2a;
+  --selection: #fffffb;
+  --selection-fg: #080808;
 
   /* High-contrast: bright decoration colors against pure black. */
-  --git-modified: #e2c08d;
-  --git-added: #89d185;
-  --git-untracked: #89d185;
-  --git-deleted: #f48771;
-  --git-conflict: #f48771;
-  --git-renamed: #e2c08d;
-  --git-ignored: #a0a0a0;
-  --git-nested-modified: #4fc1ff;
-  --git-nested-added: #4ec9b0;
-  --git-nested-untracked: #4ec9b0;
-  --git-nested-deleted: #ff7ad9;
-  --git-nested-conflict: #ff7ad9;
-  --git-nested-renamed: #4fc1ff;
+  --git-modified: #d7b98e;
+  --git-added: #86c166;
+  --git-untracked: #86c166;
+  --git-deleted: #f17c67;
+  --git-conflict: #f17c67;
+  --git-renamed: #d7b98e;
+  --git-ignored: #91989f;
+  --git-nested-modified: #2ea9df;
+  --git-nested-added: #00aa90;
+  --git-nested-untracked: #00aa90;
+  --git-nested-deleted: #c1328e;
+  --git-nested-conflict: #c1328e;
+  --git-nested-renamed: #2ea9df;
 }
