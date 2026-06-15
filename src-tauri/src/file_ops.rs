@@ -6,7 +6,7 @@
 // strings that include the offending path so the frontend can surface a message.
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Monotonic counter making temp-file names unique within this process.
@@ -161,7 +161,18 @@ pub fn canonicalize_path(path: String) -> String {
 pub fn app_config_path(app: tauri::AppHandle, name: String) -> Result<String, String> {
     use tauri::Manager;
     let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
-    Ok(dir.join(name).to_string_lossy().to_string())
+    config_child_path(&dir, &name).map(|path| path.to_string_lossy().to_string())
+}
+
+fn config_child_path(dir: &Path, name: &str) -> Result<PathBuf, String> {
+    let path = Path::new(name);
+    let mut components = path.components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(file_name)), None) if !file_name.is_empty() => {
+            Ok(dir.join(file_name))
+        }
+        _ => Err(format!("invalid config file name: {name}")),
+    }
 }
 
 /// Read a file's raw bytes (used by the PDF viewer, M6). Files above
@@ -270,6 +281,20 @@ mod tests {
     }
 
     #[test]
+    fn config_child_path_accepts_simple_file_names_only() {
+        let root = Path::new("/app/config");
+
+        assert_eq!(
+            config_child_path(root, "settings.json").unwrap(),
+            root.join("settings.json")
+        );
+        assert!(config_child_path(root, "../settings.json").is_err());
+        assert!(config_child_path(root, "nested/settings.json").is_err());
+        assert!(config_child_path(root, "/tmp/settings.json").is_err());
+        assert!(config_child_path(root, "").is_err());
+    }
+
+    #[test]
     fn write_file_allows_overwriting_utf8_and_creating_new() {
         let tmp = tempfile::tempdir().expect("create temp dir");
         // Overwriting an existing valid-UTF-8 file is allowed.
@@ -295,7 +320,10 @@ mod tests {
         write_file(link.to_string_lossy().to_string(), "new".to_string()).expect("write via link");
 
         assert!(
-            std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(),
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
             "symlink was destroyed by the save"
         );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");

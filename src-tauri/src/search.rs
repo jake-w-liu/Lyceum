@@ -209,7 +209,8 @@ pub fn search_in_dir(root: &Path, query: &str, max: usize) -> Result<Vec<SearchM
                 // advancing past each match, while still respecting the cap.
                 let mut search_from = 0usize;
                 while matches.len() < max && search_from < raw_line.len() {
-                    let Some((found, found_end)) = find_ci(&raw_line[search_from..], &needle) else {
+                    let Some((found, found_end)) = find_ci(&raw_line[search_from..], &needle)
+                    else {
                         break;
                     };
                     // `byte_offset` indexes the original line on a char boundary.

@@ -90,7 +90,7 @@ function rewriteRootRelativeUrls(
     for (const el of Array.from(doc.querySelectorAll(`[${attr}]`))) {
       const value = el.getAttribute(attr);
       if (value && isRootRelativeUrl(value)) {
-        el.setAttribute(attr, fileAssetUrl(joinRootPath(workspaceRoot, value)));
+        el.setAttribute(attr, workspaceAssetUrl(workspaceRoot, value));
       }
     }
   }
@@ -115,7 +115,7 @@ function rewriteSrcset(value: string, workspaceRoot: string): string {
       const spaceIdx = trimmed.search(/\s/);
       const url = spaceIdx === -1 ? trimmed : trimmed.slice(0, spaceIdx);
       if (!isRootRelativeUrl(url)) return trimmed;
-      const rewritten = fileAssetUrl(joinRootPath(workspaceRoot, url));
+      const rewritten = workspaceAssetUrl(workspaceRoot, url);
       const descriptor = spaceIdx === -1 ? "" : trimmed.slice(spaceIdx);
       return `${rewritten}${descriptor}`;
     })
@@ -133,8 +133,46 @@ function parentDir(path: string): string {
 
 function joinRootPath(root: string, urlPath: string): string {
   const sep = root.includes("\\") ? "\\" : "/";
-  const child = urlPath.replace(/^\/+/, "").replace(/\//g, sep);
+  const child = rootRelativeSegments(urlPath).join(sep);
+  if (!child) return root;
   return root.endsWith(sep) ? `${root}${child}` : `${root}${sep}${child}`;
+}
+
+function workspaceAssetUrl(workspaceRoot: string, value: string): string {
+  const parsed = parseRootRelativeUrl(value);
+  return `${fileAssetUrl(joinRootPath(workspaceRoot, parsed.pathname))}${parsed.suffix}`;
+}
+
+function parseRootRelativeUrl(value: string): { pathname: string; suffix: string } {
+  try {
+    const url = new URL(value, "https://lyceum.invalid");
+    return { pathname: url.pathname, suffix: `${url.search}${url.hash}` };
+  } catch {
+    return { pathname: value, suffix: "" };
+  }
+}
+
+function rootRelativeSegments(urlPath: string): string[] {
+  const out: string[] = [];
+  for (const raw of urlPath.replace(/^\/+/, "").split("/")) {
+    if (!raw) continue;
+    const decoded = safeDecodeUrlSegment(raw);
+    if (decoded === ".") continue;
+    if (decoded === "..") {
+      out.pop();
+      continue;
+    }
+    out.push(decoded.includes("/") || decoded.includes("\\") ? raw : decoded);
+  }
+  return out;
+}
+
+function safeDecodeUrlSegment(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
 }
 
 function fileAssetUrl(path: string): string {

@@ -1010,7 +1010,10 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
             .collect();
         assert!(names.contains(&"readme.md".to_string()), "names: {names:?}");
-        assert!(!names.contains(&"Readme.md".to_string()), "names: {names:?}");
+        assert!(
+            !names.contains(&"Readme.md".to_string()),
+            "names: {names:?}"
+        );
         assert_eq!(fs::read(&to).unwrap(), b"data");
         // No temp file was stranded.
         assert!(!names.iter().any(|n| n.contains("lyceum-case-rename")));

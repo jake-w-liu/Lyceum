@@ -1,6 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { legacyConfigPath } from "./settingsPersistence";
+import { legacyConfigPath, saveLayout } from "./settingsPersistence";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("settingsPersistence", () => {
   it("maps the old bundle-id config directory to the new one for migration", () => {
@@ -20,5 +24,13 @@ describe("settingsPersistence", () => {
     expect(
       legacyConfigPath("/Users/jake/Library/Application Support/dev.other/settings.json"),
     ).toBeNull();
+  });
+
+  it("keeps best-effort saves quiet outside Tauri", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await saveLayout();
+
+    expect(errorSpy).not.toHaveBeenCalled();
   });
 });

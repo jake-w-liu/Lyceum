@@ -661,9 +661,12 @@ mod tests {
         let tex = tmp.path().join("paper.tex");
         std::fs::write(&tex, "\\documentclass{article}").unwrap();
 
-        let plan =
-            plan_latex_build_impl(&tex, "latexmk -pdf -jobname report main.tex", OsStr::new(""))
-                .unwrap();
+        let plan = plan_latex_build_impl(
+            &tex,
+            "latexmk -pdf -jobname report main.tex",
+            OsStr::new(""),
+        )
+        .unwrap();
 
         assert_eq!(plan.pdf_path, tmp.path().join("report.pdf"));
     }
@@ -674,8 +677,8 @@ mod tests {
         let tex = tmp.path().join("paper.tex");
         std::fs::write(&tex, "\\documentclass{article}").unwrap();
 
-        let plan = plan_latex_build_impl(&tex, "latexmk -pdf -silent main.tex", OsStr::new(""))
-            .unwrap();
+        let plan =
+            plan_latex_build_impl(&tex, "latexmk -pdf -silent main.tex", OsStr::new("")).unwrap();
 
         assert_eq!(plan.pdf_path, tmp.path().join("paper.pdf"));
     }

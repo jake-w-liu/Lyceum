@@ -6,7 +6,11 @@ import {
   useContextMenuStore,
 } from "../state/contextMenuStore";
 
-afterEach(() => useContextMenuStore.setState(initialContextMenuData, false));
+afterEach(() => {
+  act(() => {
+    useContextMenuStore.setState(initialContextMenuData, false);
+  });
+});
 
 describe("ContextMenu", () => {
   it("renders nothing when closed", () => {

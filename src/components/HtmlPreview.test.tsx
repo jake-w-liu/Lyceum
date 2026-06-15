@@ -51,6 +51,19 @@ describe("HtmlPreview", () => {
     expect(doc).toContain('<base href="file:///workspace/pages/">');
   });
 
+  it("keeps normalized root-relative assets inside the workspace root", () => {
+    const doc = buildHtmlPreviewDocument(
+      '<img src="/../secret.png"><link href="/./css/../app.css?v=1#top">',
+      "/workspace/pages/index.html",
+      "/workspace",
+    );
+
+    expect(doc).toContain('src="file:///workspace/secret.png"');
+    expect(doc).toContain('href="file:///workspace/app.css?v=1#top"');
+    expect(doc).not.toContain("file:///secret.png");
+    expect(doc).not.toContain("file:///workspace/../");
+  });
+
   it("rewrites root-relative URLs inside srcset, preserving descriptors", () => {
     const doc = buildHtmlPreviewDocument(
       '<img src="/img/logo.png" srcset="/img/logo.png 1x, /img/logo@2x.png 2x">',

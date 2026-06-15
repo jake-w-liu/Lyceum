@@ -92,7 +92,9 @@ export function ContextMenu() {
         top = Math.max(margin, window.innerHeight - height - margin);
       }
     }
-    setPos({ left, top });
+    setPos((current) =>
+      current.left === left && current.top === top ? current : { left, top },
+    );
   }, [open, x, y, items]);
 
   // Dismiss on Escape, on any scroll (the menu is anchored to a point that would

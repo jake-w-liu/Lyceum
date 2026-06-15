@@ -122,6 +122,7 @@ fn normalize_terminal_input(data: &str) -> Vec<u8> {
 
 /// Spawn a new PTY session running a shell, streaming its output to the frontend.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri command signature mirrors the IPC payload.
 pub fn terminal_create(
     app: AppHandle,
     window: tauri::Window,
@@ -179,11 +180,31 @@ pub fn terminal_create(
             return Err(e.to_string());
         }
     };
+    let writer = Arc::new(Mutex::new(writer));
 
     let gen = SESSION_GEN.fetch_add(1, Ordering::Relaxed);
     let label = window.label().to_string();
     let data_event = format!("terminal:data:{id}");
     let exit_event = format!("terminal:exit:{id}");
+
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        if sessions.contains_key(&key) {
+            drop(sessions);
+            let _ = killer.kill();
+            let _ = child.wait();
+            return Err(format!("terminal already exists: {id}"));
+        }
+        sessions.insert(
+            key.clone(),
+            Session {
+                master: pair.master,
+                writer,
+                killer,
+                gen,
+            },
+        );
+    }
 
     // Reader thread: pull raw bytes off the PTY and hand them to the emitter
     // thread through a channel. Splitting read from emit lets the emitter
@@ -244,17 +265,6 @@ pub fn terminal_create(
         let _ = app_for_thread.emit_to(label.as_str(), &exit_event, ());
     });
 
-    // A duplicate id was rejected above, so this insert never replaces a live
-    // session (terminal commands run serially on the main thread).
-    state.sessions.lock().unwrap().insert(
-        key,
-        Session {
-            master: pair.master,
-            writer: Arc::new(Mutex::new(writer)),
-            killer,
-            gen,
-        },
-    );
     Ok(())
 }
 

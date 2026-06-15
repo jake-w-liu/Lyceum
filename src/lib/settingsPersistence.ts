@@ -21,7 +21,20 @@ const WORKSPACE_FILE = "workspace.json";
 const LAYOUT_FILE = "layout.json";
 
 function configPath(name: string): Promise<string> {
+  if (!isTauriRuntimeAvailable()) {
+    return Promise.reject(new Error("Tauri runtime unavailable"));
+  }
   return invoke<string>("app_config_path", { name });
+}
+
+function isTauriRuntimeAvailable(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+function logPersistenceError(message: string, error: unknown): void {
+  if (isTauriRuntimeAvailable()) {
+    console.error(message, error);
+  }
 }
 
 export function legacyConfigPath(path: string): string | null {
@@ -126,7 +139,7 @@ export async function saveSettings(): Promise<void> {
     dirtySettingsKeys.clear();
     await writeFile(path, JSON.stringify(merged, null, 2));
   } catch (e) {
-    console.error("Failed to save settings", e);
+    logPersistenceError("Failed to save settings", e);
   }
 }
 
@@ -168,7 +181,7 @@ export async function saveLayout(): Promise<void> {
     dirtyLayoutKeys.clear();
     await writeFile(path, JSON.stringify(merged, null, 2));
   } catch (e) {
-    console.error("Failed to save layout", e);
+    logPersistenceError("Failed to save layout", e);
   }
 }
 

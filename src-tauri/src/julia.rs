@@ -330,6 +330,8 @@ fn kill_pid(pid: u32) {
     {
         let _ = Command::new("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status();
     }
     #[cfg(not(windows))]
@@ -342,9 +344,13 @@ fn kill_pid(pid: u32) {
         // directly as a fallback for any child not in its own group.
         let _ = Command::new("kill")
             .args(["-TERM", &format!("-{pid}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status();
         let _ = Command::new("kill")
             .args(["-TERM", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status();
     }
 }
@@ -360,18 +366,23 @@ fn kill_process_group(pid: u32) {
     {
         let _ = Command::new("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status();
     }
     #[cfg(not(windows))]
     {
         let _ = Command::new("kill")
             .args(["-TERM", &format!("-{pid}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status();
     }
 }
 
 /// Run a Julia file or inline code, streaming output to the frontend.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri command signature mirrors the IPC payload.
 pub fn run_julia(
     app: AppHandle,
     window: tauri::Window,
@@ -422,6 +433,7 @@ pub fn run_julia(
 /// and its exit code as `<exit_event>`, emitted to the window labelled `label`.
 /// Registers the child in `runs` (keyed by `key`, see `run_key`) so it can be
 /// cancelled, and removes it on exit.
+#[allow(clippy::too_many_arguments)] // Explicitly carries all process-stream ownership handles.
 pub(crate) fn stream_child(
     app: AppHandle,
     label: String,
@@ -495,10 +507,7 @@ pub(crate) fn stream_child(
             }
             let _ = tx.send(());
         });
-        if rx
-            .recv_timeout(std::time::Duration::from_secs(2))
-            .is_err()
-        {
+        if rx.recv_timeout(std::time::Duration::from_secs(2)).is_err() {
             // The pumps did not finish draining within the timeout: a grandchild
             // inherited the pipe and is keeping it open after the leader exited.
             // On the natural-exit path nothing else will ever close it, so the
@@ -729,6 +738,8 @@ mod tests {
         for _ in 0..50 {
             let reaped = Command::new("kill")
                 .args(["-0", &grandchild_pid.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .status()
                 .map(|s| !s.success())
                 .unwrap_or(true);

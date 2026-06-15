@@ -338,7 +338,11 @@ mod tests {
         let root = tmp.path();
         fs::create_dir(root.join(".git")).unwrap();
         fs::create_dir(root.join("pkg")).unwrap();
-        fs::write(root.join("pkg").join(".git"), b"gitdir: ../.git/modules/pkg").unwrap();
+        fs::write(
+            root.join("pkg").join(".git"),
+            b"gitdir: ../.git/modules/pkg",
+        )
+        .unwrap();
         fs::create_dir(root.join("node_modules")).unwrap();
         fs::create_dir(root.join("node_modules").join("dep")).unwrap();
         fs::create_dir(root.join("node_modules").join("dep").join(".git")).unwrap();

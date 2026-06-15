@@ -269,11 +269,7 @@ pub fn lsp_send(
 
 /// Kill and remove a server (idempotent).
 #[tauri::command]
-pub fn lsp_stop(
-    window: tauri::Window,
-    state: State<LspManager>,
-    id: String,
-) -> Result<(), String> {
+pub fn lsp_stop(window: tauri::Window, state: State<LspManager>, id: String) -> Result<(), String> {
     if let Some(mut session) = state
         .servers
         .lock()
