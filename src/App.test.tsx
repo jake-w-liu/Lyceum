@@ -36,6 +36,29 @@ vi.mock("./components/TerminalPanel", () => ({ TerminalPanel: () => null }));
 
 const ROOT = "/ws";
 
+function rectWithHeight(height: number): DOMRect {
+  return {
+    x: 0,
+    y: 0,
+    width: 1000,
+    height,
+    top: 0,
+    right: 1000,
+    bottom: height,
+    left: 0,
+    toJSON: () => ({}),
+  } as DOMRect;
+}
+
+function pointerEvent(type: string, clientX: number, clientY: number): Event {
+  const event = new Event(type, { bubbles: true, cancelable: true });
+  Object.defineProperties(event, {
+    clientX: { value: clientX },
+    clientY: { value: clientY },
+  });
+  return event;
+}
+
 const reset = () => {
   useLayoutStore.setState(initialLayoutData, false);
   usePreviewStore.setState(initialPreviewData, false);
@@ -90,6 +113,34 @@ describe("App shell", () => {
       await vi.dynamicImportSettled();
     });
     expect(screen.getByLabelText("Panel")).not.toHaveAttribute("hidden");
+  });
+
+  it("stops upward bottom-panel resizing at the editor tab bar", async () => {
+    useLayoutStore.setState(
+      {
+        ...initialLayoutData,
+        bottomPanelVisible: true,
+        bottomPanelHeight: 240,
+      },
+      false,
+    );
+
+    const { container } = render(<App />);
+    await screen.findByTestId("status-platform");
+
+    const center = container.querySelector(".center") as HTMLElement;
+    const tabBar = container.querySelector(
+      ".editor-area > .tab-bar",
+    ) as HTMLElement;
+    vi.spyOn(center, "getBoundingClientRect").mockReturnValue(rectWithHeight(600));
+    vi.spyOn(tabBar, "getBoundingClientRect").mockReturnValue(rectWithHeight(35));
+
+    const resizer = screen.getByRole("separator", { name: "Resize panel" });
+    fireEvent(resizer, pointerEvent("pointerdown", 0, 500));
+    fireEvent(window, pointerEvent("pointermove", 0, -500));
+    fireEvent(window, pointerEvent("pointerup", 0, -500));
+
+    expect(useLayoutStore.getState().bottomPanelHeight).toBe(565);
   });
 
   it("does not open a side preview panel with modifier + Shift + V and no previewable tab", async () => {

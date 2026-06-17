@@ -20,12 +20,14 @@ export function Resizer({
   function handlePointerDown(e: ReactPointerEvent<HTMLDivElement>): void {
     e.preventDefault();
 
-    let lastX = e.clientX;
-    let lastY = e.clientY;
+    let lastX = Number.isFinite(e.clientX) ? e.clientX : 0;
+    let lastY = Number.isFinite(e.clientY) ? e.clientY : 0;
 
     function move(ev: PointerEvent): void {
+      if (!Number.isFinite(ev.clientX) || !Number.isFinite(ev.clientY)) return;
       const dx = ev.clientX - lastX;
       const dy = ev.clientY - lastY;
+      if (!Number.isFinite(dx) || !Number.isFinite(dy)) return;
       lastX = ev.clientX;
       lastY = ev.clientY;
       onDelta(dx, dy);
