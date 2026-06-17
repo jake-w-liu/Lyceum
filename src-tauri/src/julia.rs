@@ -336,22 +336,18 @@ fn kill_pid(pid: u32) {
     }
     #[cfg(not(windows))]
     {
-        // Children are spawned in their own process group (see
-        // `configure_process_group`), so signal the whole group first (negative
-        // pid) to terminate grandchildren too — otherwise cancelling a build
-        // leaves the heavyweight compiler subtree (pdflatex/biber) running
-        // orphaned while the UI reports the run as ended. Then signal the pid
-        // directly as a fallback for any child not in its own group.
-        let _ = Command::new("kill")
-            .args(["-TERM", &format!("-{pid}")])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        let _ = Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let Some(raw_pid) = to_pid_t(pid) else {
+            return;
+        };
+        // Children spawned by `run_julia`/latex builds are placed in a process
+        // group whose id is their pid. Only send a group signal after verifying
+        // that relationship; otherwise a stale or unrelated process group with
+        // the same numeric id could receive SIGTERM.
+        if process_group_id(raw_pid) == Some(raw_pid) {
+            send_sigterm(-raw_pid);
+        }
+        // Fallback for any child that was not placed into its own process group.
+        send_sigterm(raw_pid);
     }
 }
 
@@ -372,11 +368,32 @@ fn kill_process_group(pid: u32) {
     }
     #[cfg(not(windows))]
     {
-        let _ = Command::new("kill")
-            .args(["-TERM", &format!("-{pid}")])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        if let Some(raw_pid) = to_pid_t(pid) {
+            send_sigterm(-raw_pid);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn to_pid_t(pid: u32) -> Option<libc::pid_t> {
+    let raw_pid = libc::pid_t::try_from(pid).ok()?;
+    (raw_pid > 0).then_some(raw_pid)
+}
+
+#[cfg(not(windows))]
+fn process_group_id(pid: libc::pid_t) -> Option<libc::pid_t> {
+    // SAFETY: getpgid is called with a positive pid obtained from a live child
+    // or a caller-validated pid. It returns -1 on error; no memory is touched.
+    let pgid = unsafe { libc::getpgid(pid) };
+    (pgid > 0).then_some(pgid)
+}
+
+#[cfg(not(windows))]
+fn send_sigterm(pid: libc::pid_t) {
+    // SAFETY: libc::kill only asks the OS to signal a pid/process group. Errors
+    // are intentionally ignored because cancellation is best-effort.
+    unsafe {
+        libc::kill(pid, libc::SIGTERM);
     }
 }
 
