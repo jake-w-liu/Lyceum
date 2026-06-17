@@ -3,6 +3,6 @@
 
   <path d="M292 204h126v440h326v120H292z" fill="#ebd3a2"/>
   <path d="M418 204h58v440h-58z" fill="#635a3a" opacity=".28"/>
-  <path d="M492 692c70-40 150-40 236 0" fill="none" stroke="#ae5224" stroke-width="34" stroke-linecap="round"/>
+  <path d="M512 688h208" fill="none" stroke="#ae5224" stroke-width="42" stroke-linecap="round"/>
   <rect x="654" y="236" width="108" height="108" rx="28" fill="#f3a257"/>
 </svg>
