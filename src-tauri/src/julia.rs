@@ -583,11 +583,18 @@ mod tests {
             resolve_julia_with_env(Some("/opt/julia".into()), None, None),
             "/opt/julia"
         );
+
+        let default = resolve_julia_with_env(None, None, None);
         assert_eq!(
             resolve_julia_with_env(Some(String::new()), None, None),
-            "julia"
+            default
         );
-        assert_eq!(resolve_julia_with_env(None, None, None), "julia");
+
+        let search_path = augmented_path(None, None);
+        let expected_default = find_program_in_path("julia", &search_path)
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "julia".to_string());
+        assert_eq!(default, expected_default);
     }
 
     #[test]
