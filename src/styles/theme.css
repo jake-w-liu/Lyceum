@@ -1,18 +1,16 @@
 /*
  * Theme tokens as CSS custom properties.
  *
- * The default (no/`dark` attribute) is a VS Code-like dark theme. `light` and
- * `hc` (high contrast) are scaffolded here; the full theme switcher (and
- * Monaco theme sync) lands in M7. Set the active theme via the `data-theme`
- * attribute on <html>.
+ * The default (no/`dark` attribute) is a quiet editor theme. `light` and `hc`
+ * (high contrast) are scaffolded here; the full theme switcher (and Monaco
+ * theme sync) lands in M7. Set the active theme via the `data-theme` attribute
+ * on <html>.
  *
- * Palette: every CHROMATIC color (accents, git decorations, status bar,
- * selection, highlights) is a traditional Japanese (Nippon) color
- * (nipponcolors.com) — e.g. accent hanada, statusbar/focus ruri, git modified
- * tonoko / added wakatake / deleted ake. The neutral grey ramp (backgrounds,
- * borders, foreground) is a plain tuned neutral scale for crisp panel/tab
- * separation, anchored on sumi (#1c1c1c) for the dark editor background. When
- * adding a colored token, pick the nearest Nippon color; greys stay neutral.
+ * Palette: the brand system follows Sanzo Wada / Haishoku Soukan combination
+ * #343: Vandar Poel's Blue (#064f6e), Ivory Buff (#ebd3a2), Burnt Sienna
+ * (#ae5224), and Deep Grayish Olive (#635a3a). Interaction and semantic tokens
+ * use nearby Wada colors where needed. Greys remain tuned neutrals for dense
+ * editor separation and accessibility.
  */
 
 :root,
@@ -24,35 +22,45 @@
   --bg-activity-bar: #2d2d2d;
   --bg-tab-inactive: #2a2a2a;
   --bg-tab-active: #1c1c1c;
-  --bg-statusbar: #0d5661;
+  --bg-statusbar: #064f6e;
   --bg-hover: #2f2f2f;
 
   --fg: #d4d4d4;
   --fg-muted: #8a8a8a;
-  --fg-statusbar: #fffffb;
+  --fg-statusbar: #ebd3a2;
 
   --border: #363636;
-  --accent: #006284;
-  --accent-hover: #005caf;
-  --focus: #005caf;
-  --activity-active-border: #fffffb;
-  --selection: #2b5f75;
-  --selection-fg: #fffffb;
+  --accent: #064f6e;
+  --accent-hover: #12354e;
+  --accent-warm: #ae5224;
+  --focus: #f3a257;
+  --activity-active-border: #f3a257;
+  --activity-active-fg: #ebd3a2;
+  --selection: #40456a;
+  --selection-fg: #ebd3a2;
+  --on-accent: #fffffb;
+  --on-accent-muted: rgba(255, 255, 251, 0.82);
+  --danger: #da525d;
+  --danger-bg: rgba(218, 82, 93, 0.12);
+  --danger-border: rgba(218, 82, 93, 0.46);
+  --pdf-highlight: rgba(243, 162, 87, 0.42);
+  --pdf-highlight-active: rgba(174, 82, 36, 0.58);
+  --pdf-highlight-active-border: rgba(174, 82, 36, 0.92);
 
-  /* Git decoration colors (Explorer): orange = modified, green = new. */
-  --git-modified: #d7b98e;
-  --git-added: #5dac81;
-  --git-untracked: #5dac81;
-  --git-deleted: #cc543a;
-  --git-conflict: #eb7a77;
-  --git-renamed: #d7b98e;
+  /* Git decoration colors (Explorer): Wada semantic colors. */
+  --git-modified: #f99d1b;
+  --git-added: #00978d;
+  --git-untracked: #00978d;
+  --git-deleted: #da525d;
+  --git-conflict: #f68c50;
+  --git-renamed: #f99d1b;
   --git-ignored: #828282;
-  --git-nested-modified: #2ea9df;
-  --git-nested-added: #00aa90;
-  --git-nested-untracked: #00aa90;
-  --git-nested-deleted: #c1328e;
-  --git-nested-conflict: #c1328e;
-  --git-nested-renamed: #2ea9df;
+  --git-nested-modified: #f3a257;
+  --git-nested-added: #099197;
+  --git-nested-untracked: #099197;
+  --git-nested-deleted: #a62c37;
+  --git-nested-conflict: #ae5224;
+  --git-nested-renamed: #f3a257;
 
   --ui-font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Helvetica Neue", sans-serif;
   --mono-font: "SF Mono", "JetBrains Mono", "Fira Code", "Cascadia Code", Menlo, Consolas, monospace;
@@ -66,35 +74,45 @@
   --bg-activity-bar: #2c2c2c;
   --bg-tab-inactive: #ececec;
   --bg-tab-active: #ffffff;
-  --bg-statusbar: #0d5661;
+  --bg-statusbar: #064f6e;
   --bg-hover: #e8e8e8;
 
   --fg: #2b2b2b;
   --fg-muted: #6c6c6c;
-  --fg-statusbar: #fffffb;
+  --fg-statusbar: #ebd3a2;
 
   --border: #d0d0d0;
-  --accent: #006284;
-  --accent-hover: #005caf;
-  --focus: #005caf;
-  --activity-active-border: #fffffb;
-  --selection: #7db9de;
+  --accent: #064f6e;
+  --accent-hover: #12354e;
+  --accent-warm: #ae5224;
+  --focus: #ae5224;
+  --activity-active-border: #f3a257;
+  --activity-active-fg: #ebd3a2;
+  --selection: #ebd3a2;
   --selection-fg: #080808;
+  --on-accent: #fffffb;
+  --on-accent-muted: rgba(255, 255, 251, 0.82);
+  --danger: #a62c37;
+  --danger-bg: rgba(166, 44, 55, 0.1);
+  --danger-border: rgba(166, 44, 55, 0.38);
+  --pdf-highlight: rgba(243, 162, 87, 0.42);
+  --pdf-highlight-active: rgba(174, 82, 36, 0.5);
+  --pdf-highlight-active-border: rgba(174, 82, 36, 0.78);
 
   /* Darker shades for contrast on a light background. */
-  --git-modified: #9b6e23;
-  --git-added: #1b813e;
-  --git-untracked: #1b813e;
-  --git-deleted: #c73e3a;
-  --git-conflict: #c73e3a;
-  --git-renamed: #9b6e23;
+  --git-modified: #ae5224;
+  --git-added: #009465;
+  --git-untracked: #009465;
+  --git-deleted: #a62c37;
+  --git-conflict: #ae5224;
+  --git-renamed: #ae5224;
   --git-ignored: #828282;
-  --git-nested-modified: #005caf;
-  --git-nested-added: #00896c;
-  --git-nested-untracked: #00896c;
-  --git-nested-deleted: #c1328e;
-  --git-nested-conflict: #c1328e;
-  --git-nested-renamed: #005caf;
+  --git-nested-modified: #005b8d;
+  --git-nested-added: #00978d;
+  --git-nested-untracked: #00978d;
+  --git-nested-deleted: #a62c37;
+  --git-nested-conflict: #ae5224;
+  --git-nested-renamed: #005b8d;
 }
 
 :root[data-theme="hc"] {
@@ -112,26 +130,36 @@
   --fg-muted: #bdc0ba;
   --fg-statusbar: #fffffb;
 
-  --border: #81c7d4;
-  --accent: #006284;
-  --accent-hover: #005caf;
-  --focus: #e98b2a;
-  --activity-active-border: #e98b2a;
+  --border: #ebd3a2;
+  --accent: #064f6e;
+  --accent-hover: #12354e;
+  --accent-warm: #ae5224;
+  --focus: #f3a257;
+  --activity-active-border: #f3a257;
+  --activity-active-fg: #fffffb;
   --selection: #fffffb;
   --selection-fg: #080808;
+  --on-accent: #fffffb;
+  --on-accent-muted: rgba(255, 255, 251, 0.82);
+  --danger: #f68c50;
+  --danger-bg: rgba(246, 140, 80, 0.18);
+  --danger-border: rgba(246, 140, 80, 0.7);
+  --pdf-highlight: rgba(243, 162, 87, 0.52);
+  --pdf-highlight-active: rgba(246, 140, 80, 0.66);
+  --pdf-highlight-active-border: rgba(246, 140, 80, 0.95);
 
   /* High-contrast: bright decoration colors against pure black. */
-  --git-modified: #d7b98e;
-  --git-added: #86c166;
-  --git-untracked: #86c166;
-  --git-deleted: #f17c67;
-  --git-conflict: #f17c67;
-  --git-renamed: #d7b98e;
+  --git-modified: #f3a257;
+  --git-added: #00b49b;
+  --git-untracked: #00b49b;
+  --git-deleted: #f68c50;
+  --git-conflict: #f68c50;
+  --git-renamed: #f3a257;
   --git-ignored: #91989f;
-  --git-nested-modified: #2ea9df;
-  --git-nested-added: #00aa90;
-  --git-nested-untracked: #00aa90;
-  --git-nested-deleted: #c1328e;
-  --git-nested-conflict: #c1328e;
-  --git-nested-renamed: #2ea9df;
+  --git-nested-modified: #f99d1b;
+  --git-nested-added: #00978d;
+  --git-nested-untracked: #00978d;
+  --git-nested-deleted: #da525d;
+  --git-nested-conflict: #ae5224;
+  --git-nested-renamed: #f99d1b;
 }

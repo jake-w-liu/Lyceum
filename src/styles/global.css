@@ -91,11 +91,11 @@ kbd {
 }
 
 .activity-bar-item:hover {
-  color: #fffffb;
+  color: var(--activity-active-fg);
 }
 
 .activity-bar-item.active {
-  color: #fffffb;
+  color: var(--activity-active-fg);
   border-left-color: var(--activity-active-border);
 }
 
@@ -299,7 +299,7 @@ kbd {
 }
 
 .tree-error {
-  color: #f17c67;
+  color: var(--danger);
 }
 
 /* Explorer toolbar + per-row actions + inline rename/create (gap pass) */
@@ -686,7 +686,7 @@ kbd {
 
 .modal-item.selected {
   background: var(--accent);
-  color: #fffffb;
+  color: var(--on-accent);
 }
 
 .modal-item:hover {
@@ -717,7 +717,7 @@ kbd {
 }
 
 .modal-item.selected .modal-item-dir {
-  color: rgba(255, 255, 251, 0.82);
+  color: var(--on-accent-muted);
 }
 
 .modal-empty {
@@ -952,7 +952,7 @@ kbd {
 }
 
 .markdown-preview a {
-  color: var(--accent-hover);
+  color: var(--focus);
 }
 
 .markdown-preview blockquote {
@@ -1017,8 +1017,8 @@ kbd {
 }
 
 .output-stop {
-  border-color: rgba(241, 124, 103, 0.6);
-  color: #f17c67;
+  border-color: var(--danger-border);
+  color: var(--danger);
 }
 
 .output-log {
@@ -1141,7 +1141,7 @@ kbd {
 }
 
 .pdf-text-layer ::selection {
-  background: rgba(0, 92, 175, 0.28);
+  background: color-mix(in srgb, var(--accent) 34%, transparent);
 }
 
 .pdf-text-layer .endOfContent {
@@ -1179,8 +1179,8 @@ kbd {
 }
 
 .pdf-annotation-layer :is(.linkAnnotation, .buttonWidgetAnnotation.pushButton):not(.hasBorder) > a:hover {
-  background-color: rgba(251, 226, 81, 0.2);
-  box-shadow: 0 2px 10px rgba(251, 226, 81, 0.35);
+  background-color: var(--pdf-highlight);
+  box-shadow: 0 2px 10px var(--pdf-highlight);
 }
 
 .pdf-annotation-layer .textAnnotation img {
@@ -1213,15 +1213,15 @@ kbd {
 
 .pdf-error {
   padding: 16px;
-  color: #f17c67;
+  color: var(--danger);
 }
 
 /* Non-fatal render error: a banner above the still-usable toolbar/canvas. */
 .pdf-error-inline {
   padding: 6px 12px;
   font-size: 12px;
-  background: rgba(241, 124, 103, 0.12);
-  border-bottom: 1px solid rgba(241, 124, 103, 0.4);
+  background: var(--danger-bg);
+  border-bottom: 1px solid var(--danger-border);
 }
 
 /* Image preview */
@@ -1313,10 +1313,10 @@ kbd {
 .placeholder button {
   margin-top: 10px;
   background: var(--accent);
-  color: #fffffb;
+  color: var(--on-accent);
   border: none;
   padding: 6px 14px;
-  border-radius: 2px;
+  border-radius: 4px;
   cursor: pointer;
 }
 
@@ -1338,7 +1338,7 @@ kbd {
 
 .resizer:hover,
 .resizer:active {
-  background: var(--accent);
+  background: var(--focus);
 }
 
 .resizer-vertical {
@@ -1361,7 +1361,7 @@ kbd {
 }
 
 .modal-item.selected .modal-item-detail {
-  color: rgba(255, 255, 251, 0.82);
+  color: var(--on-accent-muted);
 }
 
 .modal-category-header {
@@ -1409,7 +1409,7 @@ kbd {
 
 .context-menu-item:hover:not(.disabled) {
   background: var(--accent);
-  color: #fffffb;
+  color: var(--on-accent);
 }
 
 .context-menu-item.disabled {
@@ -1443,15 +1443,15 @@ kbd {
 }
 
 .status-item-button:hover {
-  background: rgba(255, 255, 251, 0.16);
+  background: rgba(235, 211, 162, 0.18);
 }
 
 .status-spinner {
   display: inline-block;
   width: 10px;
   height: 10px;
-  border: 1.5px solid rgba(255, 255, 251, 0.4);
-  border-top-color: #fffffb;
+  border: 1.5px solid rgba(235, 211, 162, 0.44);
+  border-top-color: var(--fg-statusbar);
   border-radius: 50%;
   animation: status-spin 0.8s linear infinite;
 }
@@ -1578,11 +1578,11 @@ kbd {
 
 .pdf-search-highlight {
   position: absolute;
-  background: rgba(255, 196, 8, 0.4);
+  background: var(--pdf-highlight);
   border-radius: 1px;
 }
 
 .pdf-search-highlight--active {
-  background: rgba(240, 94, 28, 0.55);
-  outline: 1px solid rgba(240, 94, 28, 0.9);
+  background: var(--pdf-highlight-active);
+  outline: 1px solid var(--pdf-highlight-active-border);
 }

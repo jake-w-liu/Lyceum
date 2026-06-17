@@ -46,7 +46,7 @@ function xtermThemeFromCss(el: HTMLElement) {
     background: read("--bg", "#1c1c1c"),
     foreground,
     cursor: foreground,
-    selectionBackground: read("--selection", "#2b5f75"),
+    selectionBackground: read("--selection", "#40456a"),
   };
 }
 
