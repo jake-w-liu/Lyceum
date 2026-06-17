@@ -1513,12 +1513,7 @@ mod tests {
 
         let err = restore_trash_batch_impl(root, vec![item]).unwrap_err();
 
-        assert!(
-            err.contains("path traversal")
-                || err.contains("outside workspace")
-                || err.contains("trash item outside Lyceum trash"),
-            "{err}"
-        );
+        assert!(err.contains("path traversal") || err.contains("outside workspace"));
     }
 
     #[test]
@@ -1537,7 +1532,12 @@ mod tests {
 
         let err = restore_trash_batch_impl(root, vec![item]).unwrap_err();
 
-        assert!(err.contains("path traversal") || err.contains("outside workspace"));
+        assert!(
+            err.contains("path traversal")
+                || err.contains("outside workspace")
+                || err.contains("trash item outside Lyceum trash"),
+            "{err}"
+        );
     }
 
     #[cfg(unix)]
