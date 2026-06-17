@@ -6,7 +6,9 @@ use std::sync::Mutex;
 use notify::event::{EventKind, MetadataKind, ModifyKind};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
+
+use crate::path_access::{self, PathAccessManager};
 
 const WORKSPACE_FS_CHANGE_EVENT: &str = "workspace:fs-change";
 
@@ -68,21 +70,12 @@ pub fn watch_workspace(
     app: AppHandle,
     window: tauri::Window,
     state: State<'_, WorkspaceWatchManager>,
+    access: State<'_, PathAccessManager>,
     root: String,
 ) -> Result<(), String> {
     let root_path = canonical_dir(&root)?;
-    // Widen the asset protocol scope to the opened workspace. The static config
-    // scope is empty, so preview `asset:` URLs can only reach folders the user
-    // actually opened (and workspaces outside $HOME, e.g. /tmp, work too).
-    // A failure here breaks HTML preview (`asset:` URLs stay out of scope) but
-    // must not break watching, so log it and continue.
-    if let Err(err) = app.asset_protocol_scope().allow_directory(&root_path, true) {
-        eprintln!(
-            "failed to add {} to the asset protocol scope (HTML preview may not load): {err}",
-            root_path.display()
-        );
-    }
     let label = window.label().to_string();
+    path_access::authorize_workspace_root_impl(&app, &label, &access, root_path.clone())?;
     // Dedup check under the lock, then RELEASE it before building the watcher.
     // notify's recursive `watch()` is synchronous and can block for a noticeable
     // time (large trees, network/FUSE mounts, slow disks). Holding `active`
@@ -160,8 +153,10 @@ pub fn watch_workspace(
 
 #[tauri::command]
 pub fn unwatch_workspace(
+    app: AppHandle,
     window: tauri::Window,
     state: State<'_, WorkspaceWatchManager>,
+    access: State<'_, PathAccessManager>,
     root: Option<String>,
 ) -> Result<(), String> {
     let label = window.label();
@@ -188,6 +183,7 @@ pub fn unwatch_workspace(
         }
     };
     drop(removed);
+    path_access::revoke_workspace_root_impl(&app, label, &access, root.as_deref())?;
     Ok(())
 }
 

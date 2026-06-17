@@ -507,18 +507,21 @@ Lyceum follows Tauri v2's capability/permission model — the WebView gets the
   filesystem, terminal, LSP, and process work is done through **our own
   `#[tauri::command]` functions**, which are themselves gated by the command
   allowlist in `lib.rs`.
-- **No arbitrary execution from the WebView.** The WebView cannot spawn processes
-  or open arbitrary files directly; it can only invoke the specific, audited
-  commands listed in `lib.rs`. Process launching (shells, Julia, language servers)
-  is constrained to configured paths (`shellPath`, `juliaPath`,
-  `latexBuildCommand`).
-- **Path validation.** `file_ops.rs`, `fs_ops.rs`, and `walk.rs` validate command
-  inputs enough for local desktop use; config-file paths are resolved through
-  the Tauri app-config dir.
-- **CSP.** `tauri.conf.json` currently sets `security.csp = null` for Monaco,
-  xterm, PDF.js workers, and Tauri asset loading. This is acceptable for the
-  bundled, trusted local frontend in v1, and is tracked as a hardening item in
-  `docs/RISKS.md`.
+- **No arbitrary execution from the WebView.** The WebView cannot pass an
+  arbitrary program to the LSP or LaTeX build backends. LSP startup selects from
+  backend-known server ids (`julia`, `pyright`, `csharp`), Julia uses the
+  configured `juliaPath`, and LaTeX custom commands are parsed and accepted only
+  when the executable is one of `latexmk`, `tectonic`, `pdflatex`, `xelatex`, or
+  `lualatex`.
+- **Path validation.** `path_access.rs` stores per-window authorized workspace
+  roots. `file_ops.rs`, `fs_ops.rs`, `walk.rs`, `search.rs`, `git.rs`, LSP, and
+  LaTeX build commands canonicalize inputs and reject paths outside the roots
+  the window has authorized through the workspace flow, while app-config files
+  are limited to the Tauri app-config directory.
+- **CSP.** `tauri.conf.json` sets an explicit Content Security Policy: scripts
+  are limited to the bundled app, workers may load from `blob:`, previews may
+  load `blob:`, `data:`, and Tauri `asset:` content, and `object-src` is denied.
+  HTML previews use a sandboxed iframe without `allow-same-origin`.
 - **Serializable errors only.** Commands return `Result<T, AppError>` with no raw
   OS handles crossing the IPC boundary; the frontend receives only opaque ids and
   data.

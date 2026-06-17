@@ -33,13 +33,21 @@ vi.mock("pdfjs-dist/build/pdf.worker.min.mjs?url", () => ({
 vi.mock("pdfjs-dist", () => ({
   GlobalWorkerOptions: {},
   getDocument: pdfMocks.getDocument,
-  AnnotationLayer: vi.fn().mockImplementation(({ div }) => ({
+  AnnotationLayer: vi.fn().mockImplementation(function AnnotationLayerMock({
+    div,
+  }: {
+    div: HTMLDivElement;
+  }) {
+    return {
     render: (params: unknown) => pdfMocks.annotationLayerRender(params, div),
-  })),
-  TextLayer: vi.fn().mockImplementation(() => ({
-    cancel: pdfMocks.textLayerCancel,
-    render: pdfMocks.textLayerRender,
-  })),
+    };
+  }),
+  TextLayer: vi.fn().mockImplementation(function TextLayerMock() {
+    return {
+      cancel: pdfMocks.textLayerCancel,
+      render: pdfMocks.textLayerRender,
+    };
+  }),
 }));
 
 import PdfViewer from "./PdfViewer";

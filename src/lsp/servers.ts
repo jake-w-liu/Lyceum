@@ -5,7 +5,6 @@ export interface LspServerConfig {
   languageId: string;
   fileExtensions: string[];
   rootMarkers: string[];
-  build: (opts: { juliaPath?: string | null }) => { cmd: string; args: string[] };
 }
 
 export const LSP_SERVERS: LspServerConfig[] = [
@@ -14,29 +13,18 @@ export const LSP_SERVERS: LspServerConfig[] = [
     languageId: "julia",
     fileExtensions: ["jl"],
     rootMarkers: ["Project.toml", "JuliaProject.toml"],
-    build: (o) => ({
-      cmd: o.juliaPath && o.juliaPath.length > 0 ? o.juliaPath : "julia",
-      args: [
-        "--startup-file=no",
-        "--history-file=no",
-        "-e",
-        "using LanguageServer; runserver()",
-      ],
-    }),
   },
   {
     id: "pyright",
     languageId: "python",
     fileExtensions: ["py"],
     rootMarkers: ["pyproject.toml", "setup.py", "requirements.txt"],
-    build: () => ({ cmd: "pyright-langserver", args: ["--stdio"] }),
   },
   {
     id: "csharp",
     languageId: "csharp",
     fileExtensions: ["cs"],
     rootMarkers: [".sln", ".csproj"],
-    build: () => ({ cmd: "csharp-ls", args: [] }),
   },
 ];
 

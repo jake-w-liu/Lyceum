@@ -37,7 +37,11 @@ export function useCommandKeybindings(): void {
         isMac(),
         useKeymapStore.getState().keymap,
       );
-      if (!id) return;
+      if (id === null) return;
+      if (id === "") {
+        e.preventDefault();
+        return;
+      }
       // While a modal (Command Palette / Quick Open) owns the keyboard, only let
       // the dismiss command through — otherwise chords like Cmd+S / Cmd+W /
       // Cmd+Enter fire editor commands while the user is typing in the modal.

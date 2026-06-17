@@ -11,6 +11,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, State};
+
+use crate::path_access::{self, PathAccessManager};
 
 const LYCEUM_TRASH_DIR: &str = ".lyceum-trash";
 static TRASH_BATCH_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -102,17 +105,33 @@ pub fn read_dir_entries(dir: &Path) -> Result<Vec<DirEntryDto>, String> {
 /// Read the immediate children of a directory path. Used by the file explorer
 /// to lazily expand folders.
 #[tauri::command]
-pub fn read_directory(path: String) -> Result<Vec<DirEntryDto>, String> {
-    read_dir_entries(Path::new(&path))
+pub fn read_directory(
+    app: AppHandle,
+    window: tauri::Window,
+    access: State<'_, PathAccessManager>,
+    path: String,
+) -> Result<Vec<DirEntryDto>, String> {
+    let dir = path_access::ensure_existing_dir_allowed(&app, &window, &access, Path::new(&path))?;
+    read_dir_entries(&dir)
 }
 
 /// Create an empty file at `path`. Errors if it already exists. Parent
 /// directories are created as needed.
 #[tauri::command]
-pub fn create_file(path: String) -> Result<(), String> {
-    let target = Path::new(&path);
+pub fn create_file(
+    app: AppHandle,
+    window: tauri::Window,
+    access: State<'_, PathAccessManager>,
+    path: String,
+) -> Result<(), String> {
+    let target =
+        path_access::ensure_write_target_allowed(&app, &window, &access, Path::new(&path))?;
+    create_file_impl(&target)
+}
+
+fn create_file_impl(target: &Path) -> Result<(), String> {
     if path_entry_exists(target) {
-        return Err(format!("already exists: {path}"));
+        return Err(format!("already exists: {}", target.display()));
     }
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
@@ -124,9 +143,9 @@ pub fn create_file(path: String) -> Result<(), String> {
         .map(|_| ())
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::AlreadyExists {
-                format!("already exists: {path}")
+                format!("already exists: {}", target.display())
             } else {
-                format!("{path}: {e}")
+                format!("{}: {e}", target.display())
             }
         })
 }
@@ -136,19 +155,39 @@ pub fn create_file(path: String) -> Result<(), String> {
 /// succeeds on an existing directory and the Explorer reports a duplicate-named
 /// "New Folder" as freshly created, misleading the user into the existing dir.
 #[tauri::command]
-pub fn create_directory(path: String) -> Result<(), String> {
-    let target = Path::new(&path);
+pub fn create_directory(
+    app: AppHandle,
+    window: tauri::Window,
+    access: State<'_, PathAccessManager>,
+    path: String,
+) -> Result<(), String> {
+    let target =
+        path_access::ensure_write_target_allowed(&app, &window, &access, Path::new(&path))?;
+    create_directory_impl(&target)
+}
+
+fn create_directory_impl(target: &Path) -> Result<(), String> {
     if path_entry_exists(target) {
-        return Err(format!("already exists: {path}"));
+        return Err(format!("already exists: {}", target.display()));
     }
-    std::fs::create_dir_all(&path).map_err(|e| format!("{path}: {e}"))
+    std::fs::create_dir_all(target).map_err(|e| format!("{}: {e}", target.display()))
 }
 
 /// Rename/move `from` to `to`. Errors if the destination already exists.
 #[tauri::command]
-pub fn rename_path(from: String, to: String) -> Result<(), String> {
-    let from_path = Path::new(&from);
-    let to_path = Path::new(&to);
+pub fn rename_path(
+    app: AppHandle,
+    window: tauri::Window,
+    access: State<'_, PathAccessManager>,
+    from: String,
+    to: String,
+) -> Result<(), String> {
+    path_access::ensure_existing_allowed(&app, &window, &access, Path::new(&from))?;
+    path_access::ensure_write_target_allowed(&app, &window, &access, Path::new(&to))?;
+    rename_path_impl(Path::new(&from), Path::new(&to))
+}
+
+fn rename_path_impl(from_path: &Path, to_path: &Path) -> Result<(), String> {
     if path_entry_exists(to_path) {
         // A case-only rename on a case-insensitive filesystem (macOS/Windows):
         // `to` resolves to the SAME on-disk entry as `from`, so the destination-
@@ -158,9 +197,10 @@ pub fn rename_path(from: String, to: String) -> Result<(), String> {
         if is_case_only_rename(from_path, to_path) {
             return rename_case_only(from_path, to_path);
         }
-        return Err(format!("already exists: {to}"));
+        return Err(format!("already exists: {}", to_path.display()));
     }
-    std::fs::rename(&from, &to).map_err(|e| format!("{from} -> {to}: {e}"))
+    std::fs::rename(from_path, to_path)
+        .map_err(|e| format!("{} -> {}: {e}", from_path.display(), to_path.display()))
 }
 
 /// True when `from` and `to` differ only in the letter case of the final
@@ -211,26 +251,55 @@ fn rename_case_only(from: &Path, to: &Path) -> Result<(), String> {
 /// Move one or more workspace paths into an existing destination directory.
 #[tauri::command]
 pub fn move_paths(
+    app: AppHandle,
+    window: tauri::Window,
+    access: State<'_, PathAccessManager>,
     root: String,
     paths: Vec<String>,
     destination_dir: String,
 ) -> Result<Vec<MovedPathDto>, String> {
-    move_paths_impl(Path::new(&root), paths, Path::new(&destination_dir))
+    let root_path =
+        path_access::ensure_existing_dir_allowed(&app, &window, &access, Path::new(&root))?;
+    move_paths_impl(&root_path, paths, Path::new(&destination_dir))
 }
 
 #[tauri::command]
-pub fn move_paths_to_trash(root: String, paths: Vec<String>) -> Result<TrashBatchDto, String> {
-    move_paths_to_trash_impl(Path::new(&root), paths)
+pub fn move_paths_to_trash(
+    app: AppHandle,
+    window: tauri::Window,
+    access: State<'_, PathAccessManager>,
+    root: String,
+    paths: Vec<String>,
+) -> Result<TrashBatchDto, String> {
+    let root_path =
+        path_access::ensure_existing_dir_allowed(&app, &window, &access, Path::new(&root))?;
+    move_paths_to_trash_impl(&root_path, paths)
 }
 
 #[tauri::command]
-pub fn restore_trash_batch(root: String, items: Vec<TrashItemDto>) -> Result<(), String> {
-    restore_trash_batch_impl(Path::new(&root), items)
+pub fn restore_trash_batch(
+    app: AppHandle,
+    window: tauri::Window,
+    access: State<'_, PathAccessManager>,
+    root: String,
+    items: Vec<TrashItemDto>,
+) -> Result<(), String> {
+    let root_path =
+        path_access::ensure_existing_dir_allowed(&app, &window, &access, Path::new(&root))?;
+    restore_trash_batch_impl(&root_path, items)
 }
 
 #[tauri::command]
-pub fn redo_trash_batch(root: String, items: Vec<TrashItemDto>) -> Result<(), String> {
-    redo_trash_batch_impl(Path::new(&root), items)
+pub fn redo_trash_batch(
+    app: AppHandle,
+    window: tauri::Window,
+    access: State<'_, PathAccessManager>,
+    root: String,
+    items: Vec<TrashItemDto>,
+) -> Result<(), String> {
+    let root_path =
+        path_access::ensure_existing_dir_allowed(&app, &window, &access, Path::new(&root))?;
+    redo_trash_batch_impl(&root_path, items)
 }
 
 fn move_paths_to_trash_impl(root: &Path, paths: Vec<String>) -> Result<TrashBatchDto, String> {
@@ -906,11 +975,11 @@ mod tests {
         let path = tmp.path().join("nested").join("new.txt");
         let path_str = path.to_string_lossy().to_string();
 
-        create_file(path_str.clone()).expect("create file");
+        create_file_impl(&path).expect("create file");
         assert!(path.is_file());
         assert_eq!(fs::read(&path).unwrap().len(), 0);
 
-        let result = create_file(path_str);
+        let result = create_file_impl(Path::new(&path_str));
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("already exists"));
     }
@@ -920,7 +989,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("create temp dir");
         let path = tmp.path().join("a").join("b").join("c");
 
-        create_directory(path.to_string_lossy().to_string()).expect("create directory");
+        create_directory_impl(&path).expect("create directory");
         assert!(path.is_dir());
     }
 
@@ -931,20 +1000,13 @@ mod tests {
         let to = tmp.path().join("to.txt");
         fs::write(&from, b"hello").unwrap();
 
-        rename_path(
-            from.to_string_lossy().to_string(),
-            to.to_string_lossy().to_string(),
-        )
-        .expect("rename file");
+        rename_path_impl(&from, &to).expect("rename file");
         assert!(!from.exists());
         assert_eq!(fs::read(&to).unwrap(), b"hello");
 
         let other = tmp.path().join("other.txt");
         fs::write(&other, b"x").unwrap();
-        let result = rename_path(
-            other.to_string_lossy().to_string(),
-            to.to_string_lossy().to_string(),
-        );
+        let result = rename_path_impl(&other, &to);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("already exists"));
     }
@@ -961,10 +1023,7 @@ mod tests {
         symlink(tmp.path().join("missing.txt"), &to).unwrap();
         assert!(!to.exists());
 
-        let result = rename_path(
-            from.to_string_lossy().to_string(),
-            to.to_string_lossy().to_string(),
-        );
+        let result = rename_path_impl(&from, &to);
 
         assert!(result.unwrap_err().contains("already exists"));
         assert_eq!(fs::read(&from).unwrap(), b"hello");
@@ -981,7 +1040,7 @@ mod tests {
         fs::create_dir(&dir).unwrap();
         fs::write(dir.join("existing.txt"), b"x").unwrap();
 
-        let result = create_directory(dir.to_string_lossy().to_string());
+        let result = create_directory_impl(&dir);
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("already exists"));
@@ -997,11 +1056,7 @@ mod tests {
         let to = dir.join("readme.md");
         fs::write(&from, b"data").unwrap();
 
-        rename_path(
-            from.to_string_lossy().to_string(),
-            to.to_string_lossy().to_string(),
-        )
-        .expect("case-only rename should succeed");
+        rename_path_impl(&from, &to).expect("case-only rename should succeed");
 
         // The on-disk entry now carries the new case (verified via the directory
         // listing, which is reliable on both case-sensitive and -insensitive FS).

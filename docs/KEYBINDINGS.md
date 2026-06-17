@@ -137,8 +137,9 @@ This lets the same chord do different things in different contexts. For example,
 
 - When multiple bindings match a chord, the **last matching entry wins**. User overrides are loaded
   after the defaults, so a user entry for an existing chord takes precedence.
-- When several active bindings share a chord, a more specific `when` clause wins; ties fall back to
-  definition order (user entries last).
+- When several active bindings share a chord, the last active entry wins. Put a
+  narrower `when` clause later in the file when it should override a broader
+  binding for the same chord.
 - A binding fires only if its `when` clause (if present) evaluates true in the current context.
 - To **unbind** a default chord, add a user entry that maps the chord to the empty command
   (`{ "key": "mod+g", "command": "" }`); the empty command shadows the default and does nothing.

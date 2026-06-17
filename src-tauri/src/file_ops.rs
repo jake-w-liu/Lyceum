@@ -9,6 +9,10 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use tauri::{AppHandle, State};
+
+use crate::path_access::{self, PathAccessManager};
+
 /// Monotonic counter making temp-file names unique within this process.
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -42,18 +46,33 @@ fn human_size(bytes: u64) -> String {
 /// above `MAX_TEXT_FILE_SIZE` are refused (stat'd before reading) so a huge
 /// log/dataset cannot wedge the editor.
 #[tauri::command]
-pub fn read_file(path: String) -> Result<String, String> {
-    let meta = std::fs::metadata(&path).map_err(|e| format!("{path}: {e}"))?;
+pub fn read_file(
+    app: AppHandle,
+    window: tauri::Window,
+    access: State<'_, PathAccessManager>,
+    path: String,
+) -> Result<String, String> {
+    let path_ref = Path::new(&path);
+    let canonical = path_access::ensure_existing_file_allowed(&app, &window, &access, path_ref)?;
+    read_file_impl(&canonical)
+}
+
+fn read_file_impl(path: &Path) -> Result<String, String> {
+    let display = path.display().to_string();
+    let meta = std::fs::metadata(path).map_err(|e| format!("{display}: {e}"))?;
     if meta.len() > MAX_TEXT_FILE_SIZE {
         return Err(format!(
-            "{path}: file too large to open ({}, limit {})",
+            "{display}: file too large to open ({}, limit {})",
             human_size(meta.len()),
             human_size(MAX_TEXT_FILE_SIZE)
         ));
     }
+    if !meta.is_file() {
+        return Err(format!("not a regular file: {display}"));
+    }
     // Read the bytes once and decode in place: the lossy fallback reuses the
     // already-read buffer instead of reading the file a second time.
-    let bytes = std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
+    let bytes = std::fs::read(path).map_err(|e| format!("{display}: {e}"))?;
     match String::from_utf8(bytes) {
         Ok(s) => Ok(s),
         Err(e) => Ok(String::from_utf8_lossy(e.as_bytes()).into_owned()),
@@ -65,8 +84,19 @@ pub fn read_file(path: String) -> Result<String, String> {
 /// renamed over the target, so the on-disk file is always either the complete
 /// old or the complete new version — never a truncated mix.
 #[tauri::command]
-pub fn write_file(path: String, content: String) -> Result<(), String> {
-    let path_ref = Path::new(&path);
+pub fn write_file(
+    app: AppHandle,
+    window: tauri::Window,
+    access: State<'_, PathAccessManager>,
+    path: String,
+    content: String,
+) -> Result<(), String> {
+    let target =
+        path_access::ensure_write_target_allowed(&app, &window, &access, Path::new(&path))?;
+    write_file_impl(&target, &content).map_err(|e| format!("{path}: {e}"))
+}
+
+fn write_file_impl(path_ref: &Path, content: &str) -> Result<(), String> {
     // Refuse to clobber a file whose CURRENT on-disk bytes are not valid UTF-8.
     // `read_file` decodes such a file lossily (every invalid byte became U+FFFD)
     // so it can be viewed, but writing the editor's UTF-8 buffer back would
@@ -74,10 +104,16 @@ pub fn write_file(path: String, content: String) -> Result<(), String> {
     // A brand-new file (read errors) and an already-UTF-8 file are unaffected, so
     // normal editing and the first save of a UTF-8 file proceed as before.
     // `std::fs::read` follows symlinks, matching `read_file`.
+    if let Ok(meta) = std::fs::metadata(path_ref) {
+        if !meta.is_file() {
+            return Err(format!("not a regular file: {}", path_ref.display()));
+        }
+    }
     if let Ok(existing) = std::fs::read(path_ref) {
         if std::str::from_utf8(&existing).is_err() {
             return Err(format!(
-                "{path}: refusing to save — the file is not valid UTF-8, and saving would corrupt its contents"
+                "{}: refusing to save — the file is not valid UTF-8, and saving would corrupt its contents",
+                path_ref.display()
             ));
         }
     }
@@ -86,7 +122,7 @@ pub fn write_file(path: String, content: String) -> Result<(), String> {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
     }
-    write_atomic(path_ref, content.as_bytes()).map_err(|e| format!("{path}: {e}"))
+    write_atomic(path_ref, content.as_bytes()).map_err(|e| e.to_string())
 }
 
 /// Atomically replace `path` with `bytes` via a same-directory temp file + fsync
@@ -161,6 +197,7 @@ pub fn canonicalize_path(path: String) -> String {
 pub fn app_config_path(app: tauri::AppHandle, name: String) -> Result<String, String> {
     use tauri::Manager;
     let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     config_child_path(&dir, &name).map(|path| path.to_string_lossy().to_string())
 }
 
@@ -179,6 +216,9 @@ fn config_child_path(dir: &Path, name: &str) -> Result<PathBuf, String> {
 /// `MAX_BINARY_FILE_SIZE` are refused (stat'd before reading).
 fn read_file_bytes_impl(path: &str) -> Result<Vec<u8>, String> {
     let meta = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("not a regular file: {path}"));
+    }
     if meta.len() > MAX_BINARY_FILE_SIZE {
         return Err(format!(
             "{path}: file too large to open ({}, limit {})",
@@ -193,8 +233,17 @@ fn read_file_bytes_impl(path: &str) -> Result<Vec<u8>, String> {
 /// so the bytes travel as an `ArrayBuffer` — not a JSON `number[]` that would be
 /// materialized once as boxed numbers and copied again into a `Uint8Array`.
 #[tauri::command]
-pub fn read_file_bytes(path: String) -> Result<tauri::ipc::Response, String> {
-    Ok(tauri::ipc::Response::new(read_file_bytes_impl(&path)?))
+pub fn read_file_bytes(
+    app: AppHandle,
+    window: tauri::Window,
+    access: State<'_, PathAccessManager>,
+    path: String,
+) -> Result<tauri::ipc::Response, String> {
+    let canonical =
+        path_access::ensure_existing_file_allowed(&app, &window, &access, Path::new(&path))?;
+    Ok(tauri::ipc::Response::new(read_file_bytes_impl(
+        &canonical.to_string_lossy(),
+    )?))
 }
 
 #[cfg(test)]
@@ -207,14 +256,14 @@ mod tests {
         let path = tmp.path().join("note.txt").to_string_lossy().to_string();
         let content = "hello\nworld\n";
 
-        write_file(path.clone(), content.to_string()).expect("write file");
-        let read = read_file(path).expect("read file");
+        write_file_impl(Path::new(&path), content).expect("write file");
+        let read = read_file_impl(Path::new(&path)).expect("read file");
         assert_eq!(read, content);
     }
 
     #[test]
     fn read_file_on_nonexistent_path_returns_err() {
-        let result = read_file("/this/path/should/not/exist/lyceum.txt".to_string());
+        let result = read_file_impl(Path::new("/this/path/should/not/exist/lyceum.txt"));
         assert!(result.is_err());
     }
 
@@ -226,8 +275,11 @@ mod tests {
             .join("nested/sub/dir/config.json")
             .to_string_lossy()
             .to_string();
-        write_file(path.clone(), "{}".to_string()).expect("write nested file");
-        assert_eq!(read_file(path).expect("read nested file"), "{}");
+        write_file_impl(Path::new(&path), "{}").expect("write nested file");
+        assert_eq!(
+            read_file_impl(Path::new(&path)).expect("read nested file"),
+            "{}"
+        );
     }
 
     #[test]
@@ -244,9 +296,9 @@ mod tests {
     fn write_file_atomically_overwrites_existing_content() {
         let tmp = tempfile::tempdir().expect("create temp dir");
         let path = tmp.path().join("doc.txt").to_string_lossy().to_string();
-        write_file(path.clone(), "old contents".to_string()).expect("initial write");
-        write_file(path.clone(), "new".to_string()).expect("overwrite");
-        assert_eq!(read_file(path).expect("read"), "new");
+        write_file_impl(Path::new(&path), "old contents").expect("initial write");
+        write_file_impl(Path::new(&path), "new").expect("overwrite");
+        assert_eq!(read_file_impl(Path::new(&path)).expect("read"), "new");
         // No temp files should be left behind in the directory.
         let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
             .unwrap()
@@ -262,7 +314,7 @@ mod tests {
         let path = tmp.path().join("latin1.txt").to_string_lossy().to_string();
         // 0xFF is not valid UTF-8; lossy decode should not error.
         std::fs::write(&path, [b'h', b'i', 0xFF]).unwrap();
-        let read = read_file(path).expect("lossy read should succeed");
+        let read = read_file_impl(Path::new(&path)).expect("lossy read should succeed");
         assert!(read.starts_with("hi"));
     }
 
@@ -274,7 +326,7 @@ mod tests {
         // decode it lossily; saving the editor buffer back must be refused so the
         // original bytes are not destroyed.
         std::fs::write(&path, [b'h', b'i', 0xE9]).unwrap();
-        let err = write_file(path.clone(), "hi\u{FFFD}".to_string()).unwrap_err();
+        let err = write_file_impl(Path::new(&path), "hi\u{FFFD}").unwrap_err();
         assert!(err.contains("not valid UTF-8"), "got: {err}");
         // The original bytes are untouched.
         assert_eq!(std::fs::read(&path).unwrap(), [b'h', b'i', 0xE9]);
@@ -299,9 +351,9 @@ mod tests {
         let tmp = tempfile::tempdir().expect("create temp dir");
         // Overwriting an existing valid-UTF-8 file is allowed.
         let utf8 = tmp.path().join("ok.txt").to_string_lossy().to_string();
-        write_file(utf8.clone(), "first".to_string()).expect("create");
-        write_file(utf8.clone(), "second".to_string()).expect("overwrite utf8");
-        assert_eq!(read_file(utf8).expect("read"), "second");
+        write_file_impl(Path::new(&utf8), "first").expect("create");
+        write_file_impl(Path::new(&utf8), "second").expect("overwrite utf8");
+        assert_eq!(read_file_impl(Path::new(&utf8)).expect("read"), "second");
     }
 
     #[cfg(unix)]
@@ -317,7 +369,7 @@ mod tests {
 
         // Saving through the symlink must write the real target's content and
         // leave the symlink intact — not replace the link with a regular file.
-        write_file(link.to_string_lossy().to_string(), "new".to_string()).expect("write via link");
+        write_file_impl(&link, "new").expect("write via link");
 
         assert!(
             std::fs::symlink_metadata(&link)
@@ -334,11 +386,11 @@ mod tests {
     fn write_file_creates_new_file_with_matching_contents() {
         let tmp = tempfile::tempdir().expect("create temp dir");
         let path = tmp.path().join("created.txt").to_string_lossy().to_string();
-        assert!(read_file(path.clone()).is_err());
+        assert!(read_file_impl(Path::new(&path)).is_err());
 
         let content = "fresh contents";
-        write_file(path.clone(), content.to_string()).expect("write file");
-        let read = read_file(path).expect("read file");
+        write_file_impl(Path::new(&path), content).expect("write file");
+        let read = read_file_impl(Path::new(&path)).expect("read file");
         assert_eq!(read, content);
     }
 }

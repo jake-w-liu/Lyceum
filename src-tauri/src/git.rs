@@ -19,6 +19,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use serde::Serialize;
+use tauri::{AppHandle, State};
+
+use crate::path_access::{self, PathAccessManager};
 
 /// Result of a workspace git-status query. `files` maps absolute paths to a
 /// status string the frontend understands.
@@ -188,7 +191,12 @@ fn path_is_within(path: &Path, root: &Path) -> bool {
 /// when `root` is not inside or containing a git work tree (or git is unavailable) this
 /// returns `{ is_repo: false, files: {} }` rather than an error.
 #[tauri::command]
-pub fn git_status(root: String) -> GitStatusDto {
+pub fn git_status(
+    app: AppHandle,
+    window: tauri::Window,
+    access: State<'_, PathAccessManager>,
+    root: String,
+) -> GitStatusDto {
     let empty = || GitStatusDto {
         is_repo: false,
         root_repo: None,
@@ -203,7 +211,11 @@ pub fn git_status(root: String) -> GitStatusDto {
     // `path_is_within` would reject every file and ALL decorations would silently
     // drop. Canonicalizing here makes both sides agree. (The workspace-open flow
     // also canonicalizes the root so the Explorer tree's keys match these.)
-    let root_path = std::fs::canonicalize(&root).unwrap_or_else(|_| PathBuf::from(&root));
+    let root_path =
+        match path_access::ensure_existing_dir_allowed(&app, &window, &access, Path::new(&root)) {
+            Ok(path) => path,
+            Err(_) => return empty(),
+        };
     let root_path = root_path.as_path();
     if !root_path.is_dir() {
         return empty();

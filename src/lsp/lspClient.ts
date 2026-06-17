@@ -10,6 +10,7 @@ import { lspSend, lspStart, lspStop, onLspExit, onLspMessage } from "./lspBridge
 import { serverForLanguage } from "./servers";
 import { buildInitializeParams } from "./lspProtocol";
 import { useLspStatusStore } from "../state/lspStatusStore";
+import { authorizeWorkspaceRoot } from "../lib/ipc";
 
 export interface LspSession {
   id: string;
@@ -106,7 +107,6 @@ export async function ensureServer(
   if (!config) return null;
 
   const id = `lsp-${languageId}-${(lspInstanceSeq += 1)}`;
-  const { cmd, args } = config.build({ juliaPath });
   useLspStatusStore.getState().setStatus(languageId, "starting");
 
   const rpc = createRpcClient({ send: (message) => void lspSend(id, message) });
@@ -168,7 +168,8 @@ export async function ensureServer(
         rpc.dispose("stopped during startup");
         return;
       }
-      await lspStart(id, cmd, args, rootPath);
+      if (rootPath) await authorizeWorkspaceRoot(rootPath);
+      await lspStart(id, config.id, rootPath, juliaPath);
       // Stopped during the start IPC: the server we just spawned would be a zombie
       // (stop's lspStop ran before it existed). Kill it — but only if no newer
       // session now owns this language id, since a replacement's lspStart already

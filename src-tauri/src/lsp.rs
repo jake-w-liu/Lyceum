@@ -8,11 +8,15 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use serde::Deserialize;
 use tauri::{AppHandle, Emitter, Manager, State};
+
+use crate::path_access::{self, PathAccessManager};
 
 /// Monotonic generation stamp for sessions. The reader thread only removes its
 /// own session from the map when the stored generation still matches, so a new
@@ -156,17 +160,31 @@ impl LspManager {
 }
 
 /// Spawn a language server, streaming its framed stdout messages to the frontend.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LspStartRequest {
+    id: String,
+    server_id: String,
+    cwd: Option<String>,
+    julia_path: Option<String>,
+}
+
 #[tauri::command]
 pub fn lsp_start(
     app: AppHandle,
     window: tauri::Window,
     state: State<LspManager>,
-    id: String,
-    command: String,
-    args: Vec<String>,
-    cwd: Option<String>,
+    access: State<'_, PathAccessManager>,
+    request: LspStartRequest,
 ) -> Result<(), String> {
+    let LspStartRequest {
+        id,
+        server_id,
+        cwd,
+        julia_path,
+    } = request;
     let key = session_key(&window, &id);
+    let (command, args) = lsp_command(&server_id, julia_path)?;
     let mut cmd = Command::new(&command);
     cmd.args(&args)
         .stdin(Stdio::piped())
@@ -174,7 +192,9 @@ pub fn lsp_start(
         .stderr(Stdio::inherit());
     if let Some(dir) = cwd {
         if !dir.is_empty() {
-            cmd.current_dir(dir);
+            let cwd =
+                path_access::ensure_existing_dir_allowed(&app, &window, &access, Path::new(&dir))?;
+            cmd.current_dir(cwd);
         }
     }
 
@@ -182,13 +202,30 @@ pub fn lsp_start(
     let stdin = child.stdin.take().ok_or("failed to capture stdin")?;
     let mut stdout = child.stdout.take().ok_or("failed to capture stdout")?;
 
-    // Reader thread: frame stdout, emit each message, then emit exit on EOF.
     let gen = SESSION_GEN.fetch_add(1, Ordering::Relaxed);
     let label = window.label().to_string();
     let app_for_thread = app.clone();
     let key_for_thread = key.clone();
     let message_event = format!("lsp:message:{id}");
     let exit_event = format!("lsp:exit:{id}");
+
+    // Insert the session before starting the reader thread. A server can exit
+    // immediately after spawn; if the reader observed EOF before the map entry
+    // existed, it could not reap/remove the child and the dead session would
+    // remain cached until an explicit stop.
+    if let Some(mut old) = state.servers.lock().unwrap().insert(
+        key,
+        LspSession {
+            stdin: Arc::new(Mutex::new(Box::new(stdin))),
+            child,
+            gen,
+        },
+    ) {
+        let _ = old.child.kill();
+        let _ = old.child.wait();
+    }
+
+    // Reader thread: frame stdout, emit each message, then emit exit on EOF.
     std::thread::spawn(move || {
         let mut decoder = LspDecoder::default();
         let mut buf = [0u8; 4096];
@@ -222,23 +259,30 @@ pub fn lsp_start(
         }
         let _ = app_for_thread.emit_to(label.as_str(), &exit_event, ());
     });
-
-    // If a server with this id already exists, kill AND reap it first so its
-    // child exits, its reader thread reaches EOF, and no zombie is left behind.
-    // (The frontend normally uses a unique id per spawn and stops the old one
-    // explicitly; this is a belt-and-suspenders cleanup.)
-    if let Some(mut old) = state.servers.lock().unwrap().insert(
-        key,
-        LspSession {
-            stdin: Arc::new(Mutex::new(Box::new(stdin))),
-            child,
-            gen,
-        },
-    ) {
-        let _ = old.child.kill();
-        let _ = old.child.wait();
-    }
     Ok(())
+}
+
+fn lsp_command(
+    server_id: &str,
+    julia_path: Option<String>,
+) -> Result<(String, Vec<String>), String> {
+    match server_id {
+        "julia" => Ok((
+            crate::julia::resolve_julia(julia_path),
+            vec![
+                "--startup-file=no".to_string(),
+                "--history-file=no".to_string(),
+                "-e".to_string(),
+                "using LanguageServer; runserver()".to_string(),
+            ],
+        )),
+        "pyright" => Ok((
+            "pyright-langserver".to_string(),
+            vec!["--stdio".to_string()],
+        )),
+        "csharp" => Ok(("csharp-ls".to_string(), Vec::new())),
+        other => Err(format!("unsupported language server: {other}")),
+    }
 }
 
 /// Frame and write a JSON-RPC message to a server's stdin.
@@ -290,6 +334,22 @@ mod tests {
     #[test]
     fn encode_message_frames_body() {
         assert_eq!(encode_message("hello"), b"Content-Length: 5\r\n\r\nhello");
+    }
+
+    #[test]
+    fn lsp_command_allows_only_known_servers() {
+        let (cmd, args) = lsp_command("pyright", None).expect("pyright");
+        assert_eq!(cmd, "pyright-langserver");
+        assert_eq!(args, vec!["--stdio"]);
+
+        let (cmd, args) =
+            lsp_command("julia", Some("/opt/julia/bin/julia".to_string())).expect("julia");
+        assert_eq!(cmd, "/opt/julia/bin/julia");
+        assert!(args
+            .iter()
+            .any(|arg| arg == "using LanguageServer; runserver()"));
+
+        assert!(lsp_command("sh", None).is_err());
     }
 
     #[test]

@@ -1,12 +1,7 @@
 // Tests for LSP server configurations and selectors.
 
 import { describe, expect, it } from "vitest";
-import {
-  LSP_SERVERS,
-  serverForExtension,
-  serverForLanguage,
-  serverForPath,
-} from "./servers";
+import { serverForExtension, serverForLanguage, serverForPath } from "./servers";
 
 describe("LSP server selectors", () => {
   it("resolves servers by path extension", () => {
@@ -26,10 +21,9 @@ describe("LSP server selectors", () => {
     expect(serverForPath("/w/readme.md")).toBeUndefined();
   });
 
-  it("builds the julia command honoring juliaPath", () => {
-    const julia = LSP_SERVERS.find((s) => s.id === "julia")!;
-    expect(julia.build({ juliaPath: "/opt/julia" }).cmd).toBe("/opt/julia");
-    expect(julia.build({}).cmd).toBe("julia");
-    expect(julia.build({}).args).toContain("-e");
+  it("exposes stable backend server ids", () => {
+    expect(serverForLanguage("julia")?.id).toBe("julia");
+    expect(serverForLanguage("python")?.id).toBe("pyright");
+    expect(serverForLanguage("csharp")?.id).toBe("csharp");
   });
 });

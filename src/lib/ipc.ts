@@ -6,6 +6,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { useWorkspaceStore } from "../state/workspaceStore";
 
 export interface AppInfo {
   name: string;
@@ -57,6 +58,34 @@ const FALLBACK_APP_INFO: AppInfo = {
   arch: "unknown",
 };
 
+function normalizePathForCompare(path: string): string {
+  const normalized = path.replace(/\\/g, "/");
+  if (normalized === "/") return normalized;
+  return normalized.replace(/\/+$/, "") || normalized;
+}
+
+function isSameOrDescendant(path: string, root: string): boolean {
+  const p = normalizePathForCompare(path);
+  const r = normalizePathForCompare(root);
+  return p === r || p.startsWith(r.endsWith("/") ? r : `${r}/`);
+}
+
+export async function authorizeWorkspaceRoot(root: string): Promise<string> {
+  try {
+    const result = await invoke<string>("authorize_workspace_root", { root });
+    return typeof result === "string" ? result : root;
+  } catch {
+    return root;
+  }
+}
+
+async function ensureCurrentWorkspaceAccess(path: string): Promise<void> {
+  const root = useWorkspaceStore.getState().rootPath;
+  if (root && isSameOrDescendant(path, root)) {
+    await authorizeWorkspaceRoot(root);
+  }
+}
+
 /**
  * Fetch app/platform info from the Rust backend (`get_app_info`).
  * Returns a safe fallback when not running inside Tauri.
@@ -81,6 +110,7 @@ export async function quitApp(): Promise<void> {
 
 /** List the immediate children of a directory (file explorer, M2). */
 export async function readDirectory(path: string): Promise<DirEntry[]> {
+  await ensureCurrentWorkspaceAccess(path);
   return invoke<DirEntry[]>("read_directory", { path });
 }
 
@@ -96,16 +126,19 @@ export async function unwatchWorkspace(root?: string): Promise<void> {
 
 /** List the immediate children of a directory (file explorer, M2). */
 export async function listWorkspaceFiles(root: string): Promise<string[]> {
+  await authorizeWorkspaceRoot(root);
   return invoke<string[]>("list_workspace_files", { root });
 }
 
 /** Read a UTF-8 file's contents (editor open, M3). */
 export async function readFile(path: string): Promise<string> {
+  await ensureCurrentWorkspaceAccess(path);
   return invoke<string>("read_file", { path });
 }
 
 /** Write a UTF-8 file's contents (editor save, M3). */
 export async function writeFile(path: string, content: string): Promise<void> {
+  await ensureCurrentWorkspaceAccess(path);
   await invoke("write_file", { path, content });
 }
 
@@ -115,6 +148,7 @@ export async function writeFile(path: string, content: string): Promise<void> {
  * `number[]` and no second full-size copy.
  */
 export async function readFileBytes(path: string): Promise<Uint8Array> {
+  await ensureCurrentWorkspaceAccess(path);
   const buf = await invoke<ArrayBuffer>("read_file_bytes", { path });
   return new Uint8Array(buf);
 }
@@ -126,16 +160,20 @@ export async function runCancel(id: string): Promise<void> {
 
 /** Create a new empty file (errors if it already exists). */
 export async function createFile(path: string): Promise<void> {
+  await ensureCurrentWorkspaceAccess(path);
   await invoke("create_file", { path });
 }
 
 /** Create a directory (and any missing parents). */
 export async function createDirectory(path: string): Promise<void> {
+  await ensureCurrentWorkspaceAccess(path);
   await invoke("create_directory", { path });
 }
 
 /** Rename/move a path (errors if the destination exists). */
 export async function renamePath(from: string, to: string): Promise<void> {
+  await ensureCurrentWorkspaceAccess(from);
+  await ensureCurrentWorkspaceAccess(to);
   await invoke("rename_path", { from, to });
 }
 
@@ -145,6 +183,7 @@ export async function movePaths(
   paths: string[],
   destinationDir: string,
 ): Promise<MovedPath[]> {
+  await authorizeWorkspaceRoot(root);
   return invoke<MovedPath[]>("move_paths", { root, paths, destinationDir });
 }
 
@@ -153,6 +192,7 @@ export async function movePathsToTrash(
   root: string,
   paths: string[],
 ): Promise<TrashBatch> {
+  await authorizeWorkspaceRoot(root);
   return invoke<TrashBatch>("move_paths_to_trash", { root, paths });
 }
 
@@ -161,6 +201,7 @@ export async function restoreTrashBatch(
   root: string,
   items: TrashItem[],
 ): Promise<void> {
+  await authorizeWorkspaceRoot(root);
   await invoke("restore_trash_batch", { root, items });
 }
 
@@ -169,6 +210,7 @@ export async function redoTrashBatch(
   root: string,
   items: TrashItem[],
 ): Promise<void> {
+  await authorizeWorkspaceRoot(root);
   await invoke("redo_trash_batch", { root, items });
 }
 
@@ -210,6 +252,7 @@ export interface GitStatus {
  * those nested decorations.
  */
 export async function gitStatus(root: string): Promise<GitStatus> {
+  await authorizeWorkspaceRoot(root);
   return invoke<GitStatus>("git_status", { root });
 }
 
@@ -218,6 +261,7 @@ export async function searchWorkspace(
   root: string,
   query: string,
 ): Promise<SearchMatch[]> {
+  await authorizeWorkspaceRoot(root);
   return invoke<SearchMatch[]>("search_workspace", { root, query });
 }
 

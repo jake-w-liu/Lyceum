@@ -85,6 +85,14 @@ function seedWorkspaceScopedUi(root: string, dirty = false) {
   useLspStatusStore.getState().setStatus("typescript", "ready");
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 describe("useWorkspaceLifecycle", () => {
   beforeEach(() => {
     resetStores();
@@ -178,6 +186,41 @@ describe("useWorkspaceLifecycle", () => {
     );
     expect(useEditorStore.getState().docs).toEqual([]);
     expect(usePreviewStore.getState().pdfPath).toBeNull();
+  });
+
+  it("ignores a stale dirty-switch confirmation after a newer switch attempt", async () => {
+    seedWorkspaceScopedUi("/old", true);
+    const first = deferred<boolean>();
+    const second = deferred<boolean>();
+    askMock
+      .mockReset()
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise);
+    renderHook(() => useWorkspaceLifecycle());
+
+    act(() => {
+      useWorkspaceStore.getState().openWorkspace("/first");
+    });
+    act(() => {
+      useWorkspaceStore.getState().openWorkspace("/second");
+    });
+
+    expect(useWorkspaceStore.getState().rootPath).toBe("/old");
+
+    await act(async () => {
+      first.resolve(true);
+      await first.promise;
+    });
+    expect(useWorkspaceStore.getState().rootPath).toBe("/old");
+
+    await act(async () => {
+      second.resolve(true);
+      await second.promise;
+    });
+
+    await waitFor(() =>
+      expect(useWorkspaceStore.getState().rootPath).toBe("/second"),
+    );
   });
 
   describe("window close guard", () => {

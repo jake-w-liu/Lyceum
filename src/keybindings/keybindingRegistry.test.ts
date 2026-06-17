@@ -1,7 +1,12 @@
 // Tests for the keybinding matcher and when-clause evaluator.
 
 import { describe, expect, it } from "vitest";
-import { evaluateWhen, formatChord, matchKeybinding } from "./keybindingRegistry";
+import {
+  DEFAULT_KEYMAP,
+  evaluateWhen,
+  formatChord,
+  matchKeybinding,
+} from "./keybindingRegistry";
 
 describe("formatChord", () => {
   it("uses symbol glyphs on macOS", () => {
@@ -121,6 +126,18 @@ describe("matchKeybinding escape when-clause", () => {
   });
 });
 
+describe("matchKeybinding user unbinds", () => {
+  it("lets an empty command override consume a default chord", () => {
+    const e = new KeyboardEvent("keydown", { key: "p", ctrlKey: true });
+    expect(
+      matchKeybinding(e, {}, false, [
+        ...DEFAULT_KEYMAP,
+        { key: "mod+p", command: "" },
+      ]),
+    ).toBe("");
+  });
+});
+
 describe("matchKeybinding mod resolution", () => {
   it("mac metaKey+b => workbench.toggleSidebar", () => {
     const e = new KeyboardEvent("keydown", { key: "b", metaKey: true });
@@ -195,5 +212,23 @@ describe("evaluateWhen", () => {
   it("'a && b' needs both", () => {
     expect(evaluateWhen("a && b", { a: true })).toBe(false);
     expect(evaluateWhen("a && b", { a: true, b: true })).toBe(true);
+  });
+
+  it("honors parentheses over default operator precedence", () => {
+    expect(evaluateWhen("a && (b || c)", { a: true, c: true })).toBe(true);
+    expect(evaluateWhen("(a || b) && c", { a: true })).toBe(false);
+  });
+
+  it("supports boolean equality", () => {
+    expect(evaluateWhen("editorFocus == true", { editorFocus: true })).toBe(
+      true,
+    );
+    expect(evaluateWhen("modalOpen == false", {})).toBe(true);
+    expect(evaluateWhen("modalOpen == false", { modalOpen: true })).toBe(false);
+  });
+
+  it("returns false for malformed when expressions", () => {
+    expect(evaluateWhen("a && (b ||", { a: true, b: true })).toBe(false);
+    expect(evaluateWhen("a ?? b", { a: true, b: true })).toBe(false);
   });
 });

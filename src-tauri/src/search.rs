@@ -8,8 +8,19 @@ use serde::Serialize;
 use std::collections::HashSet;
 use std::path::Path;
 
+use tauri::{AppHandle, State};
+
+use crate::path_access::{self, PathAccessManager};
+
 /// Directory names that are skipped entirely (not descended into).
-const SKIP_DIRS: [&str; 5] = [".git", "node_modules", "target", "dist", ".vite"];
+const SKIP_DIRS: [&str; 6] = [
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    ".vite",
+    ".lyceum-trash",
+];
 
 /// Files larger than this are skipped, so a single huge file (a multi-GB log or
 /// dataset that happens to be valid UTF-8) cannot be slurped wholesale into a
@@ -242,8 +253,15 @@ pub fn search_in_dir(root: &Path, query: &str, max: usize) -> Result<Vec<SearchM
 /// Search workspace file contents under `root` for `query`, capped at 1000
 /// matches.
 #[tauri::command]
-pub fn search_workspace(root: String, query: String) -> Result<Vec<SearchMatch>, String> {
-    search_in_dir(Path::new(&root), &query, 1000)
+pub fn search_workspace(
+    app: AppHandle,
+    window: tauri::Window,
+    access: State<'_, PathAccessManager>,
+    root: String,
+    query: String,
+) -> Result<Vec<SearchMatch>, String> {
+    let root = path_access::ensure_existing_dir_allowed(&app, &window, &access, Path::new(&root))?;
+    search_in_dir(&root, &query, 1000)
 }
 
 #[cfg(test)]
@@ -299,6 +317,25 @@ mod tests {
         assert_eq!(matches.len(), 1);
         assert!(matches[0].path.ends_with("keep.txt"));
         assert!(!matches.iter().any(|m| m.path.contains("node_modules")));
+    }
+
+    #[test]
+    fn excludes_lyceum_trash() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        fs::create_dir(root.join(".lyceum-trash")).unwrap();
+        fs::write(root.join("keep.txt"), b"target line\n").unwrap();
+        fs::write(
+            root.join(".lyceum-trash").join("deleted.txt"),
+            b"target line\n",
+        )
+        .unwrap();
+
+        let matches = search_in_dir(root, "target", 1000).expect("search");
+
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].path.ends_with("keep.txt"));
+        assert!(!matches.iter().any(|m| m.path.contains(".lyceum-trash")));
     }
 
     #[test]

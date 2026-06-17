@@ -42,36 +42,140 @@ export const DEFAULT_KEYMAP: Keybinding[] = [
 const MODIFIER_TOKENS = new Set(["mod", "cmd", "ctrl", "alt", "shift", "meta"]);
 
 export function evaluateWhen(expr: string | undefined, ctx: KeyContext): boolean {
-  if (expr === undefined) {
-    return true;
-  }
+  if (expr === undefined) return true;
   const trimmed = expr.trim();
-  if (trimmed === "") {
+  if (trimmed === "") return true;
+  const parser = new WhenParser(tokenizeWhen(trimmed), ctx);
+  return parser.parse();
+}
+
+type WhenToken =
+  | { type: "ident"; value: string }
+  | { type: "bool"; value: boolean }
+  | { type: "and" | "or" | "not" | "eq" | "lparen" | "rparen" | "invalid" };
+
+function tokenizeWhen(expr: string): WhenToken[] {
+  const tokens: WhenToken[] = [];
+  let i = 0;
+  while (i < expr.length) {
+    const ch = expr[i];
+    if (/\s/.test(ch)) {
+      i += 1;
+    } else if (expr.startsWith("&&", i)) {
+      tokens.push({ type: "and" });
+      i += 2;
+    } else if (expr.startsWith("||", i)) {
+      tokens.push({ type: "or" });
+      i += 2;
+    } else if (expr.startsWith("==", i)) {
+      tokens.push({ type: "eq" });
+      i += 2;
+    } else if (ch === "!") {
+      tokens.push({ type: "not" });
+      i += 1;
+    } else if (ch === "(") {
+      tokens.push({ type: "lparen" });
+      i += 1;
+    } else if (ch === ")") {
+      tokens.push({ type: "rparen" });
+      i += 1;
+    } else if (/[A-Za-z_]/.test(ch)) {
+      let end = i + 1;
+      while (end < expr.length && /[A-Za-z0-9_.-]/.test(expr[end])) end += 1;
+      const value = expr.slice(i, end);
+      if (value === "true" || value === "false") {
+        tokens.push({ type: "bool", value: value === "true" });
+      } else {
+        tokens.push({ type: "ident", value });
+      }
+      i = end;
+    } else {
+      tokens.push({ type: "invalid" });
+      i += 1;
+    }
+  }
+  return tokens;
+}
+
+class WhenParser {
+  private pos = 0;
+
+  constructor(
+    private readonly tokens: WhenToken[],
+    private readonly ctx: KeyContext,
+  ) {}
+
+  parse(): boolean {
+    const result = this.parseOr();
+    return result !== null && this.pos === this.tokens.length ? result : false;
+  }
+
+  private parseOr(): boolean | null {
+    let value = this.parseAnd();
+    if (value === null) return null;
+    while (this.match("or")) {
+      const right = this.parseAnd();
+      if (right === null) return null;
+      value = value || right;
+    }
+    return value;
+  }
+
+  private parseAnd(): boolean | null {
+    let value = this.parseEquality();
+    if (value === null) return null;
+    while (this.match("and")) {
+      const right = this.parseEquality();
+      if (right === null) return null;
+      value = value && right;
+    }
+    return value;
+  }
+
+  private parseEquality(): boolean | null {
+    let value = this.parseUnary();
+    if (value === null) return null;
+    while (this.match("eq")) {
+      const right = this.parseUnary();
+      if (right === null) return null;
+      value = value === right;
+    }
+    return value;
+  }
+
+  private parseUnary(): boolean | null {
+    if (this.match("not")) {
+      const value = this.parseUnary();
+      return value === null ? null : !value;
+    }
+    return this.parsePrimary();
+  }
+
+  private parsePrimary(): boolean | null {
+    const token = this.tokens[this.pos];
+    if (!token) return null;
+    if (token.type === "ident") {
+      this.pos += 1;
+      return this.ctx[token.value] === true;
+    }
+    if (token.type === "bool") {
+      this.pos += 1;
+      return token.value;
+    }
+    if (token.type === "lparen") {
+      this.pos += 1;
+      const value = this.parseOr();
+      if (value === null || !this.match("rparen")) return null;
+      return value;
+    }
+    return null;
+  }
+
+  private match(type: WhenToken["type"]): boolean {
+    if (this.tokens[this.pos]?.type !== type) return false;
+    this.pos += 1;
     return true;
   }
-  const terms = trimmed.split("||");
-  for (const term of terms) {
-    const factors = term.split("&&");
-    let termValue = true;
-    for (const factor of factors) {
-      const token = factor.trim();
-      let negated = false;
-      let id = token;
-      if (id.startsWith("!")) {
-        negated = true;
-        id = id.slice(1).trim();
-      }
-      const value = ctx[id] === true;
-      if ((negated ? !value : value) === false) {
-        termValue = false;
-        break;
-      }
-    }
-    if (termValue) {
-      return true;
-    }
-  }
-  return false;
 }
 
 interface Chord {

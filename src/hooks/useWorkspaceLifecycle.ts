@@ -38,12 +38,14 @@ export function useWorkspaceLifecycle(): void {
   // Guard workspace switches behind a discard confirmation for dirty docs.
   useEffect(() => {
     let previousRoot = useWorkspaceStore.getState().rootPath;
+    let switchSeq = 0;
     let applying = false;
     return useWorkspaceStore.subscribe((state) => {
       if (applying) return;
       const nextRoot = state.rootPath;
       if (nextRoot === previousRoot) return;
       if (hasDirtyWorkspaceDocs()) {
+        const requestSeq = ++switchSeq;
         // The native ask dialog is async, so we cannot block the subscriber:
         // revert the root synchronously, then re-apply the switch only if the
         // user confirms discarding.
@@ -56,6 +58,7 @@ export function useWorkspaceLifecycle(): void {
         void askDiscard("Discard unsaved changes before switching folders?").then(
           (ok) => {
             if (!ok) return;
+            if (requestSeq !== switchSeq) return;
             // The user may have switched/closed again while the dialog was up.
             if (useWorkspaceStore.getState().rootPath !== previousRoot) return;
             previousRoot = nextRoot;
@@ -70,6 +73,7 @@ export function useWorkspaceLifecycle(): void {
         );
         return;
       }
+      switchSeq += 1;
       previousRoot = nextRoot;
       resetWorkspaceScopedUi();
     });

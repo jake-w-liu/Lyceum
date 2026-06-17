@@ -7,8 +7,19 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use tauri::{AppHandle, State};
+
+use crate::path_access::{self, PathAccessManager};
+
 /// Directory names that are skipped entirely (not descended into).
-const SKIP_DIRS: [&str; 5] = [".git", "node_modules", "target", "dist", ".vite"];
+const SKIP_DIRS: [&str; 6] = [
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    ".vite",
+    ".lyceum-trash",
+];
 
 /// Recursively collect absolute file paths under `root`, skipping a fixed set of
 /// directories. Stops once `max` files have been collected, then sorts the
@@ -88,8 +99,14 @@ pub fn list_files(root: &Path, max: usize) -> Result<Vec<String>, String> {
 /// List workspace files (absolute paths) under `root` for quick-open, capped at
 /// 5000 entries.
 #[tauri::command]
-pub fn list_workspace_files(root: String) -> Result<Vec<String>, String> {
-    list_files(Path::new(&root), 5000)
+pub fn list_workspace_files(
+    app: AppHandle,
+    window: tauri::Window,
+    access: State<'_, PathAccessManager>,
+    root: String,
+) -> Result<Vec<String>, String> {
+    let root = path_access::ensure_existing_dir_allowed(&app, &window, &access, Path::new(&root))?;
+    list_files(&root, 5000)
 }
 
 #[cfg(test)]
@@ -121,6 +138,20 @@ mod tests {
         assert!(files.iter().any(|f| f.ends_with("src/b.rs")));
         assert!(!files.iter().any(|f| f.contains("node_modules")));
         assert!(!files.iter().any(|f| f.contains(".git")));
+    }
+
+    #[test]
+    fn excludes_lyceum_trash() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        fs::create_dir(root.join(".lyceum-trash")).unwrap();
+        fs::write(root.join("keep.txt"), b"x").unwrap();
+        fs::write(root.join(".lyceum-trash").join("deleted.txt"), b"x").unwrap();
+
+        let files = list_files(root, 5000).expect("walk");
+
+        assert!(files.iter().any(|f| f.ends_with("keep.txt")));
+        assert!(!files.iter().any(|f| f.contains(".lyceum-trash")));
     }
 
     #[test]

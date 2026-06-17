@@ -9,11 +9,13 @@ import { listenScoped } from "../lib/windowEvents";
 
 export async function lspStart(
   id: string,
-  command: string,
-  args: string[],
+  serverId: string,
   cwd: string | null,
+  juliaPath: string | null,
 ): Promise<void> {
-  await invoke("lsp_start", { id, command, args, cwd });
+  await invoke("lsp_start", {
+    request: { id, serverId, cwd, juliaPath },
+  });
 }
 
 // Sends can target a server that already exited (e.g. a debounced didChange

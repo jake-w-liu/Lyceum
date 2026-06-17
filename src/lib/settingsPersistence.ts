@@ -90,8 +90,10 @@ export async function loadKeybindings(): Promise<void> {
 // read-modify-write the shared config file so a different key changed in another
 // window (which shares the SAME config file but does NOT sync stores) survives
 // instead of being clobbered by a last-writer-wins full overwrite.
-const dirtySettingsKeys = new Set<string>();
-const dirtyLayoutKeys = new Set<string>();
+const dirtySettingsKeys = new Map<string, number>();
+const dirtyLayoutKeys = new Map<string, number>();
+let settingsDirtyRevision = 0;
+let layoutDirtyRevision = 0;
 // True while `loadLayout` applies the persisted layout, so the layout
 // subscription ignores that programmatic setState (neither marks keys dirty nor
 // schedules a redundant save).
@@ -118,13 +120,22 @@ async function readConfigObject(name: string): Promise<Record<string, unknown>> 
 function mergeForWrite(
   mine: Record<string, unknown>,
   onDisk: Record<string, unknown>,
-  dirty: Set<string>,
+  dirty: ReadonlyMap<string, number>,
 ): Record<string, unknown> {
   const merged: Record<string, unknown> = { ...mine };
   for (const k of Object.keys(onDisk)) {
     if (!dirty.has(k)) merged[k] = onDisk[k];
   }
   return merged;
+}
+
+function clearSavedDirtyKeys(
+  dirty: Map<string, number>,
+  saved: ReadonlyMap<string, number>,
+): void {
+  for (const [key, revision] of saved) {
+    if (dirty.get(key) === revision) dirty.delete(key);
+  }
 }
 
 export async function saveSettings(): Promise<void> {
@@ -135,9 +146,10 @@ export async function saveSettings(): Promise<void> {
       string,
       unknown
     >;
-    const merged = mergeForWrite(mine, onDisk, dirtySettingsKeys);
-    dirtySettingsKeys.clear();
+    const dirtyAtStart = new Map(dirtySettingsKeys);
+    const merged = mergeForWrite(mine, onDisk, dirtyAtStart);
     await writeFile(path, JSON.stringify(merged, null, 2));
+    clearSavedDirtyKeys(dirtySettingsKeys, dirtyAtStart);
   } catch (e) {
     logPersistenceError("Failed to save settings", e);
   }
@@ -177,9 +189,10 @@ export async function saveLayout(): Promise<void> {
       string,
       unknown
     >;
-    const merged = mergeForWrite(mine, onDisk, dirtyLayoutKeys);
-    dirtyLayoutKeys.clear();
+    const dirtyAtStart = new Map(dirtyLayoutKeys);
+    const merged = mergeForWrite(mine, onDisk, dirtyAtStart);
     await writeFile(path, JSON.stringify(merged, null, 2));
+    clearSavedDirtyKeys(dirtyLayoutKeys, dirtyAtStart);
   } catch (e) {
     logPersistenceError("Failed to save layout", e);
   }
@@ -230,32 +243,48 @@ export async function openLaunchDir(): Promise<void> {
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let layoutSaveTimer: ReturnType<typeof setTimeout> | null = null;
 let persistenceInitialized = false;
+let persistenceUnsubscribes: Array<() => void> = [];
+
+export function resetSettingsPersistenceForTests(): void {
+  if (saveTimer) clearTimeout(saveTimer);
+  if (layoutSaveTimer) clearTimeout(layoutSaveTimer);
+  saveTimer = null;
+  layoutSaveTimer = null;
+  for (const unsubscribe of persistenceUnsubscribes) unsubscribe();
+  persistenceUnsubscribes = [];
+  persistenceInitialized = false;
+  dirtySettingsKeys.clear();
+  dirtyLayoutKeys.clear();
+  settingsDirtyRevision = 0;
+  layoutDirtyRevision = 0;
+  applyingPersistedLayout = false;
+}
 
 /** Subscribe stores so changes are persisted (debounced) and theme stays synced. */
 export function initSettingsPersistence(): void {
   if (persistenceInitialized) return;
   persistenceInitialized = true;
-  useSettingsStore.subscribe((s, prev) => {
+  persistenceUnsubscribes.push(useSettingsStore.subscribe((s, prev) => {
     const cur = s.settings as unknown as Record<string, unknown>;
     const old = prev.settings as unknown as Record<string, unknown>;
     for (const k of Object.keys(cur)) {
-      if (cur[k] !== old[k]) dirtySettingsKeys.add(k);
+      if (cur[k] !== old[k]) dirtySettingsKeys.set(k, ++settingsDirtyRevision);
     }
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(() => void saveSettings(), 400);
-  });
+  }));
   // Subscribe layout persistence BEFORE loading, so a layout change made during
   // loadLayout's async round-trip is recorded and persisted (not lost). The
   // restore's own setState is ignored via `applyingPersistedLayout`, so it
   // doesn't re-save what was just read.
-  useLayoutStore.subscribe((s, prev) => {
+  persistenceUnsubscribes.push(useLayoutStore.subscribe((s, prev) => {
     if (applyingPersistedLayout) return;
     const cur = persistedLayoutData(s) as unknown as Record<string, unknown>;
     const old = persistedLayoutData(prev) as unknown as Record<string, unknown>;
     let changed = false;
     for (const k of Object.keys(cur)) {
       if (cur[k] !== old[k]) {
-        dirtyLayoutKeys.add(k);
+        dirtyLayoutKeys.set(k, ++layoutDirtyRevision);
         changed = true;
       }
     }
@@ -264,18 +293,18 @@ export function initSettingsPersistence(): void {
     if (!changed) return;
     if (layoutSaveTimer) clearTimeout(layoutSaveTimer);
     layoutSaveTimer = setTimeout(() => void saveLayout(), 400);
-  });
+  }));
   void loadLayout();
   // Theme changed via the palette → reflect into settings (which persists it).
-  useThemeStore.subscribe((s) => {
+  persistenceUnsubscribes.push(useThemeStore.subscribe((s) => {
     if (useSettingsStore.getState().settings.theme !== s.theme) {
       useSettingsStore.getState().setSetting("theme", s.theme);
     }
-  });
+  }));
   // Persist the opened folder for restore-on-startup.
-  useWorkspaceStore.subscribe((s, prev) => {
+  persistenceUnsubscribes.push(useWorkspaceStore.subscribe((s, prev) => {
     if (s.rootPath !== prev.rootPath) void saveLastWorkspace(s.rootPath);
-  });
+  }));
   // Flush a pending debounced save when the window is closing, so a settings
   // change made within the debounce window isn't lost on quit.
   if (typeof window !== "undefined") {

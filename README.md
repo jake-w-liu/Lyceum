@@ -27,7 +27,7 @@ A lightweight, VS Code-inspired **research IDE** built with Tauri, with a Julia-
 - **Styling:** plain CSS with CSS custom properties for theming. No heavy UI framework.
 - **LSP:** a generic JSON-RPC LSP client. The Rust backend spawns language servers over stdio and bridges messages to the frontend via Tauri commands/events — Julia LanguageServer.jl first, then Python (`pyright`), then C# (`csharp-ls` or OmniSharp).
 - **Commands & keybindings:** a TypeScript command registry (every action is a command) plus a keybinding registry that maps shortcuts to command ids. Keybindings and settings are persisted as JSON in the OS app-config dir via Tauri.
-- **Testing:** Vitest + React Testing Library (frontend); `cargo test` (Rust). Per the no-bug policy, every feature ships with tests.
+- **Testing:** Vitest + React Testing Library (frontend); `cargo test` (Rust). CI also runs npm audit, Rust clippy/fmt, cargo-audit, a production build, and a bundle-size gate.
 
 ## Local Install And Build
 
@@ -40,7 +40,8 @@ cross-compile installers from another platform.
 
 Install these on every platform:
 
-- **Node.js LTS** and npm — frontend toolchain and the local Tauri CLI.
+- **Node.js 20.19+ or 22.12+** and npm — frontend toolchain and the local
+  Tauri CLI. The repo pins Node `22.12.0` in `.nvmrc`.
 - **Rust stable** with Cargo — Rust backend and native packaging.
 
 Then install the OS-specific Tauri dependencies.
@@ -63,7 +64,7 @@ curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | sh
 
 Install:
 
-- Node.js LTS
+- Node.js 20.19+ or 22.12+
 - Rust via `rustup`, using the **MSVC** toolchain
 - Microsoft C++ Build Tools with **Desktop development with C++**
 - Microsoft Edge WebView2 Runtime if it is not already installed
@@ -132,12 +133,12 @@ if your distribution is not listed here.
 ### 2. Clone And Install Dependencies
 
 ```bash
-git clone <repo-url> lyceum
+git clone https://github.com/jake-w-liu/Lyceum.git lyceum
 cd lyceum
-npm install
+npm ci
 ```
 
-`npm install` installs the frontend dependencies. Cargo downloads Rust crates
+`npm ci` installs the locked frontend dependencies. Cargo downloads Rust crates
 automatically on the first Rust/Tauri build.
 
 ### 3. Run In Development
@@ -201,6 +202,9 @@ Local builds are useful for testing, but public installers should be signed.
 
 For GitHub Releases, attach the platform installers as release assets. A user
 can then download the installer for their OS from the release page.
+The manual **Release Artifacts** GitHub workflow builds and uploads unsigned
+platform artifacts; production distribution still needs the platform signing
+credentials above.
 
 ### Optional Runtime Tools
 
@@ -217,11 +221,13 @@ These are not required to build Lyceum itself:
 ## Performance
 
 Startup stays fast because the heavy editors are code-split into lazy chunks and
-loaded only when first used — the **initial JS bundle is ~70 kB gzipped**, while
+loaded only when first used — the verified **initial JS bundle is ~88 kB
+gzipped**, while
 Monaco, PDF.js, image preview, xterm.js, and markdown-it live in separate chunks
 fetched on demand. There is no Electron (the app uses the OS-native WebView via Tauri), no
 extension marketplace, and no background indexing in v1. `src/perf.test.ts`
-guards the lazy-loading so it can't silently regress.
+guards lazy loading, and `npm run check:bundle` enforces the initial
+JavaScript/CSS gzip budgets against `dist/index.html`.
 
 ## Run tests
 
@@ -229,8 +235,17 @@ guards the lazy-loading so it can't silently regress.
 # Frontend (Vitest + React Testing Library)
 npm test
 
+# Frontend typecheck + tests + production build + bundle budget
+npm run check
+
+# Frontend dependency advisory gate
+npm run audit
+
 # Backend (Rust)
-cd src-tauri && cargo test
+(cd src-tauri && cargo test)
+
+# Backend formatting and lint gate
+(cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings)
 ```
 
 Per the no-bug policy, every feature ships with tests.

@@ -16,6 +16,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::julia::{self, RunManager};
+use crate::path_access::{self, PathAccessManager};
 
 const STOCK_LATEX_BUILD_COMMAND: &str = "latexmk -pdf main.tex";
 const LATEX_TOOL_ORDER: [&str; 5] = ["latexmk", "tectonic", "pdflatex", "xelatex", "lualatex"];
@@ -63,12 +64,15 @@ pub fn run_latex_build(
     app: AppHandle,
     window: tauri::Window,
     state: State<RunManager>,
+    access: State<PathAccessManager>,
     id: String,
     tex_path: String,
     configured_command: String,
 ) -> Result<LatexBuildPlanDto, String> {
     let path = process_path();
-    let plan = plan_latex_build_impl(Path::new(&tex_path), &configured_command, &path)?;
+    let tex_path =
+        path_access::ensure_existing_file_allowed(&app, &window, &access, Path::new(&tex_path))?;
+    let plan = plan_latex_build_impl(&tex_path, &configured_command, &path)?;
     let removed_stale_pdf = remove_stale_pdf(&plan.pdf_path)?;
 
     let label = window.label().to_string();
@@ -172,15 +176,15 @@ fn plan_latex_build_impl(
     // honor those so stale-removal, the "wrote …" message, and auto-open all point
     // at the real artifact instead of the default next-to-source path.
     let pdf_path = custom_pdf_path(&command, &tex_name, &cwd).unwrap_or(pdf_path);
-    let (program, args) = shell_command(&command);
+    let (program, args, tool) = parse_custom_latex_command(&command)?;
     Ok(LatexBuildPlan {
         program,
         args,
         cwd,
         pdf_path,
         command,
-        tool: "custom".to_string(),
-        source: "shell".to_string(),
+        tool,
+        source: "custom".to_string(),
     })
 }
 
@@ -317,6 +321,33 @@ fn custom_pdf_path(command: &str, tex_name: &str, cwd: &Path) -> Option<PathBuf>
         None => cwd.to_path_buf(),
     };
     Some(dir.join(format!("{base}.pdf")))
+}
+
+fn parse_custom_latex_command(command: &str) -> Result<(String, Vec<String>, String), String> {
+    let tokens: Vec<String> = shell_token_spans(command)
+        .iter()
+        .map(|span| strip_shell_quotes(&command[span.start..span.end]).to_string())
+        .collect();
+    let (program, args) = tokens
+        .split_first()
+        .ok_or_else(|| "latexBuildCommand must start with a LaTeX compiler".to_string())?;
+    let tool = latex_tool_name(program).ok_or_else(|| {
+        format!(
+            "latexBuildCommand must start with one of: {}",
+            LATEX_TOOL_ORDER.join(", ")
+        )
+    })?;
+    Ok((program.clone(), args.to_vec(), tool))
+}
+
+fn latex_tool_name(program: &str) -> Option<String> {
+    let name = Path::new(program).file_name()?.to_str()?;
+    let name = name.strip_suffix(".exe").unwrap_or(name);
+    let lower = name.to_ascii_lowercase();
+    LATEX_TOOL_ORDER
+        .iter()
+        .find(|tool| **tool == lower)
+        .map(|tool| (*tool).to_string())
 }
 
 /// Extract a flag's value, supporting `-flag=value` (returns `(value, false)`)
@@ -463,20 +494,6 @@ fn shell_token_spans(command: &str) -> Vec<TokenSpan> {
     spans
 }
 
-fn shell_command(command: &str) -> (String, Vec<String>) {
-    if cfg!(windows) {
-        (
-            "cmd".to_string(),
-            vec!["/C".to_string(), command.to_string()],
-        )
-    } else {
-        (
-            "sh".to_string(),
-            vec!["-c".to_string(), command.to_string()],
-        )
-    }
-}
-
 fn display_command(program: &str, args: &[String]) -> String {
     std::iter::once(quote_shell_executable(program))
         .chain(args.iter().map(|arg| quote_shell_arg(arg)))
@@ -593,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_build_retargets_current_tex_file_and_uses_shell() {
+    fn custom_build_retargets_current_tex_file_without_shell() {
         let tmp = tempfile::tempdir().unwrap();
         let tex = tmp.path().join("paper.tex");
         std::fs::write(&tex, "\\documentclass{article}").unwrap();
@@ -601,10 +618,11 @@ mod tests {
         let plan =
             plan_latex_build_impl(&tex, "latexmk -pdf -silent main.tex", OsStr::new("")).unwrap();
 
-        assert_eq!(plan.program, if cfg!(windows) { "cmd" } else { "sh" });
+        assert_eq!(plan.program, "latexmk");
+        assert_eq!(plan.args, vec!["-pdf", "-silent", "paper.tex"]);
         assert!(plan.command.ends_with("\"paper.tex\""));
-        assert_eq!(plan.tool, "custom");
-        assert_eq!(plan.source, "shell");
+        assert_eq!(plan.tool, "latexmk");
+        assert_eq!(plan.source, "custom");
     }
 
     #[test]
@@ -624,6 +642,9 @@ mod tests {
             plan.command,
             r#""/Applications/TeX Tools/latexmk" -pdf "new paper.tex" -silent"#
         );
+        assert_eq!(plan.program, "/Applications/TeX Tools/latexmk");
+        assert_eq!(plan.args, vec!["-pdf", "new paper.tex", "-silent"]);
+        assert_eq!(plan.tool, "latexmk");
     }
 
     #[test]
@@ -635,6 +656,20 @@ mod tests {
         let plan = plan_latex_build_impl(&tex, "tectonic --keep-logs", OsStr::new("")).unwrap();
 
         assert_eq!(plan.command, r#"tectonic --keep-logs "paper.tex""#);
+        assert_eq!(plan.program, "tectonic");
+        assert_eq!(plan.args, vec!["--keep-logs", "paper.tex"]);
+    }
+
+    #[test]
+    fn custom_build_rejects_non_latex_programs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tex = tmp.path().join("paper.tex");
+        std::fs::write(&tex, "\\documentclass{article}").unwrap();
+
+        let err = plan_latex_build_impl(&tex, "sh -c 'latexmk -pdf main.tex'", OsStr::new(""))
+            .unwrap_err();
+
+        assert!(err.contains("latexBuildCommand must start with one of"));
     }
 
     #[test]

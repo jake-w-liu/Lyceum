@@ -13,6 +13,7 @@ mod julia;
 mod latex;
 mod lsp;
 mod menu;
+mod path_access;
 mod search;
 mod terminal;
 mod walk;
@@ -99,6 +100,7 @@ pub fn run() {
         .manage(lsp::LspManager::default())
         .manage(julia::RunManager::default())
         .manage(workspace_watch::WorkspaceWatchManager::default())
+        .manage(path_access::PathAccessManager::default())
         .setup(|app| {
             let menu = menu::build_app_menu(app.handle())?;
             app.set_menu(menu)?;
@@ -123,6 +125,9 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
                 let label = window.label();
+                window
+                    .state::<path_access::PathAccessManager>()
+                    .remove_window(window.app_handle(), label);
                 window
                     .state::<workspace_watch::WorkspaceWatchManager>()
                     .remove_window(label);
@@ -169,6 +174,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_app_info,
             get_launch_dir,
+            path_access::authorize_workspace_root,
+            path_access::revoke_workspace_root,
             fs_ops::read_directory,
             fs_ops::create_file,
             fs_ops::create_directory,
