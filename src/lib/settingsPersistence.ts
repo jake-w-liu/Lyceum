@@ -260,6 +260,21 @@ export function resetSettingsPersistenceForTests(): void {
   applyingPersistedLayout = false;
 }
 
+export async function flushSettingsPersistence(): Promise<void> {
+  const pending: Promise<void>[] = [];
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    pending.push(saveSettings());
+  }
+  if (layoutSaveTimer) {
+    clearTimeout(layoutSaveTimer);
+    layoutSaveTimer = null;
+    pending.push(saveLayout());
+  }
+  await Promise.all(pending);
+}
+
 /** Subscribe stores so changes are persisted (debounced) and theme stays synced. */
 export function initSettingsPersistence(): void {
   if (persistenceInitialized) return;
@@ -309,16 +324,7 @@ export function initSettingsPersistence(): void {
   // change made within the debounce window isn't lost on quit.
   if (typeof window !== "undefined") {
     window.addEventListener("beforeunload", () => {
-      if (saveTimer) {
-        clearTimeout(saveTimer);
-        saveTimer = null;
-        void saveSettings();
-      }
-      if (layoutSaveTimer) {
-        clearTimeout(layoutSaveTimer);
-        layoutSaveTimer = null;
-        void saveLayout();
-      }
+      void flushSettingsPersistence();
     });
   }
 }

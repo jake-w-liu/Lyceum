@@ -25,7 +25,10 @@ const SKIP_DIRS: [&str; 6] = [
 /// directories. Stops once `max` files have been collected, then sorts the
 /// result. Returns an error string if `root` is not a directory.
 pub fn list_files(root: &Path, max: usize) -> Result<Vec<String>, String> {
-    if !root.is_dir() {
+    let root_canonical = root
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", root.display()))?;
+    if !root_canonical.is_dir() {
         return Err(format!("not a directory: {}", root.display()));
     }
 
@@ -34,9 +37,7 @@ pub fn list_files(root: &Path, max: usize) -> Result<Vec<String>, String> {
     // Canonical paths of directories already walked. Guards against descending
     // the same tree twice and against symlink cycles. Seeded with `root`.
     let mut visited: HashSet<PathBuf> = HashSet::new();
-    if let Ok(canon) = root.canonicalize() {
-        visited.insert(canon);
-    }
+    visited.insert(root_canonical.clone());
 
     while let Some(dir) = stack.pop() {
         if files.len() >= max {
@@ -76,6 +77,9 @@ pub fn list_files(root: &Path, max: usize) -> Result<Vec<String>, String> {
                 // symlink (or two paths) is walked at most once.
                 match path.canonicalize() {
                     Ok(canon) => {
+                        if !canon.starts_with(&root_canonical) {
+                            continue;
+                        }
                         if !visited.insert(canon) {
                             continue;
                         }
@@ -86,6 +90,12 @@ pub fn list_files(root: &Path, max: usize) -> Result<Vec<String>, String> {
             } else {
                 if files.len() >= max {
                     break;
+                }
+                let Ok(canon) = path.canonicalize() else {
+                    continue;
+                };
+                if !canon.starts_with(&root_canonical) {
+                    continue;
                 }
                 files.push(path.to_string_lossy().to_string());
             }
@@ -114,6 +124,14 @@ mod tests {
     use super::*;
     use std::fs;
 
+    fn path_ends_with(path: &str, suffix: &[&str]) -> bool {
+        let mut suffix_path = PathBuf::new();
+        for part in suffix {
+            suffix_path.push(part);
+        }
+        Path::new(path).ends_with(suffix_path)
+    }
+
     #[test]
     fn errors_on_non_directory() {
         let result = list_files(Path::new("/this/path/should/not/exist/lyceum"), 5000);
@@ -134,8 +152,8 @@ mod tests {
 
         let files = list_files(root, 5000).expect("walk");
 
-        assert!(files.iter().any(|f| f.ends_with("src/a.rs")));
-        assert!(files.iter().any(|f| f.ends_with("src/b.rs")));
+        assert!(files.iter().any(|f| path_ends_with(f, &["src", "a.rs"])));
+        assert!(files.iter().any(|f| path_ends_with(f, &["src", "b.rs"])));
         assert!(!files.iter().any(|f| f.contains("node_modules")));
         assert!(!files.iter().any(|f| f.contains(".git")));
     }
@@ -215,6 +233,35 @@ mod tests {
 
         let files = list_files(root, 5000).expect("walk terminates");
         assert!(files.iter().any(|f| f.ends_with("f.txt")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_directory_outside_root_is_not_listed() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let outside = tempfile::tempdir().expect("create outside dir");
+        let root = tmp.path();
+        fs::write(outside.path().join("secret.txt"), b"x").unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("outside-link")).unwrap();
+
+        let files = list_files(root, 5000).expect("walk");
+
+        assert!(files.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_file_outside_root_is_not_listed() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let outside = tempfile::tempdir().expect("create outside dir");
+        let root = tmp.path();
+        let secret = outside.path().join("secret.txt");
+        fs::write(&secret, b"x").unwrap();
+        std::os::unix::fs::symlink(&secret, root.join("secret-link.txt")).unwrap();
+
+        let files = list_files(root, 5000).expect("walk");
+
+        assert!(files.is_empty());
     }
 
     #[cfg(unix)]

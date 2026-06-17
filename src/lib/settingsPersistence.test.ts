@@ -15,12 +15,14 @@ vi.mock("./ipc", () => ({
 }));
 
 import {
+  flushSettingsPersistence,
   initSettingsPersistence,
   legacyConfigPath,
   resetSettingsPersistenceForTests,
   saveLayout,
   saveSettings,
 } from "./settingsPersistence";
+import { initialLayoutData, useLayoutStore } from "../state/layoutStore";
 import {
   DEFAULT_SETTINGS,
   initialSettingsData,
@@ -38,6 +40,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   vi.useRealTimers();
+  useLayoutStore.setState(initialLayoutData, false);
   useSettingsStore.setState(initialSettingsData, false);
 });
 
@@ -130,5 +133,42 @@ describe("settingsPersistence", () => {
     await saveSettings();
 
     expect(JSON.parse(disk).fontSize).toBe(15);
+  });
+
+  it("flushes pending debounced settings and layout saves", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("__TAURI_INTERNALS__", {});
+    invokeMock.mockImplementation(async (_cmd: string, args: { name: string }) =>
+      `/config/${args.name}`,
+    );
+    readFileMock.mockImplementation(async (path: string) => {
+      if (path.endsWith("settings.json")) return JSON.stringify(DEFAULT_SETTINGS);
+      return "{}";
+    });
+    writeFileMock.mockResolvedValue(undefined);
+
+    initSettingsPersistence();
+    useSettingsStore
+      .getState()
+      .setSetting("fontSize", DEFAULT_SETTINGS.fontSize + 1);
+    useLayoutStore.getState().setSidebarWidth(333);
+
+    await flushSettingsPersistence();
+    await flushPromises();
+
+    expect(writeFileMock).toHaveBeenCalledTimes(2);
+    expect(writeFileMock).toHaveBeenCalledWith(
+      "/config/settings.json",
+      expect.stringContaining(`"fontSize": ${DEFAULT_SETTINGS.fontSize + 1}`),
+    );
+    expect(writeFileMock).toHaveBeenCalledWith(
+      "/config/layout.json",
+      expect.stringContaining('"sidebarWidth": 333'),
+    );
+
+    vi.advanceTimersByTime(400);
+    await flushPromises();
+
+    expect(writeFileMock).toHaveBeenCalledTimes(2);
   });
 });

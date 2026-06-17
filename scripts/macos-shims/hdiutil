@@ -2,6 +2,24 @@
 set -u
 
 real_hdiutil="/usr/bin/hdiutil"
+shim_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+without_shim_path() {
+  local entries=()
+  local filtered=()
+  local entry
+
+  IFS=':' read -r -a entries <<< "${PATH:-}"
+  for entry in "${entries[@]}"; do
+    [[ "$entry" == "$shim_dir" ]] && continue
+    filtered+=("$entry")
+  done
+
+  local IFS=':'
+  printf '%s' "${filtered[*]}"
+}
+
+export PATH="$(without_shim_path)"
 
 if [[ "${1:-}" == "detach" && "$#" -ge 2 ]]; then
   output="$("$real_hdiutil" "$@" 2>&1)"

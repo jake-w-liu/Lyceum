@@ -26,6 +26,11 @@ vi.mock("@tauri-apps/api/window", () => ({
   }),
 }));
 
+const flushSettingsPersistenceMock = vi.hoisted(() => vi.fn(async () => {}));
+vi.mock("../lib/settingsPersistence", () => ({
+  flushSettingsPersistence: flushSettingsPersistenceMock,
+}));
+
 import { initialEditorData, useEditorStore } from "../state/editorStore";
 import { initialGitData, useGitStore } from "../state/gitStore";
 import {
@@ -97,6 +102,7 @@ describe("useWorkspaceLifecycle", () => {
   beforeEach(() => {
     resetStores();
     askMock.mockReset().mockResolvedValue(true);
+    flushSettingsPersistenceMock.mockReset().mockResolvedValue(undefined);
     onCloseRequestedMock.mockClear();
     destroyMock.mockClear();
   });
@@ -236,6 +242,33 @@ describe("useWorkspaceLifecycle", () => {
 
       expect(askMock).not.toHaveBeenCalled();
       expect(preventDefault).toHaveBeenCalledTimes(1);
+      await waitFor(() =>
+        expect(flushSettingsPersistenceMock).toHaveBeenCalledTimes(1),
+      );
+      await waitFor(() => expect(destroyMock).toHaveBeenCalledTimes(1));
+    });
+
+    it("waits for pending persistence to flush before destroying", async () => {
+      const flush = deferred<void>();
+      flushSettingsPersistenceMock.mockReturnValueOnce(flush.promise);
+      seedWorkspaceScopedUi("/old", false);
+      renderHook(() => useWorkspaceLifecycle());
+      await waitFor(() => expect(getCloseHandler()).not.toBeNull());
+
+      const preventDefault = vi.fn();
+      await act(async () => {
+        await getCloseHandler()!({ preventDefault });
+      });
+
+      expect(preventDefault).toHaveBeenCalledTimes(1);
+      expect(flushSettingsPersistenceMock).toHaveBeenCalledTimes(1);
+      expect(destroyMock).not.toHaveBeenCalled();
+
+      await act(async () => {
+        flush.resolve();
+        await flush.promise;
+      });
+
       await waitFor(() => expect(destroyMock).toHaveBeenCalledTimes(1));
     });
 
@@ -255,6 +288,7 @@ describe("useWorkspaceLifecycle", () => {
         expect.anything(),
       );
       expect(preventDefault).toHaveBeenCalledTimes(1);
+      expect(flushSettingsPersistenceMock).not.toHaveBeenCalled();
       expect(destroyMock).not.toHaveBeenCalled();
     });
 

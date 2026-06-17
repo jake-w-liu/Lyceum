@@ -17,6 +17,7 @@ import { initialPreviewData, usePreviewStore } from "../state/previewStore";
 import { initialSearchData, useSearchStore } from "../state/searchStore";
 import { initialTreeData, useTreeStore } from "../state/treeStore";
 import { useWorkspaceStore } from "../state/workspaceStore";
+import { flushSettingsPersistence } from "../lib/settingsPersistence";
 
 export function resetWorkspaceScopedUi(): void {
   useEditorStore.setState(initialEditorData, false);
@@ -103,6 +104,11 @@ export function useWorkspaceLifecycle(): void {
             }
             closing = true;
             try {
+              await flushSettingsPersistence();
+              if (disposed) {
+                closing = false;
+                return;
+              }
               await currentWindow.destroy();
             } catch {
               closing = false;

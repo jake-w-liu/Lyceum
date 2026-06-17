@@ -466,6 +466,24 @@ fn restore_trash_batch_impl(root: &Path, items: Vec<TrashItemDto>) -> Result<(),
                 return Err(format!("{}: {e}", parent.display()));
             }
         }
+        if let Err(e) = validate_restore_pair(&root, &original, &trashed) {
+            rollback_moves(&done);
+            return Err(e);
+        }
+        if !path_entry_exists(&trashed) {
+            rollback_moves(&done);
+            return Err(format!(
+                "restore source no longer exists: {}",
+                trashed.display()
+            ));
+        }
+        if path_entry_exists(&original) {
+            rollback_moves(&done);
+            return Err(format!(
+                "restore destination already exists: {}",
+                original.display()
+            ));
+        }
         if let Err(e) = move_entry(&trashed, &original) {
             rollback_moves(&done);
             return Err(format!(
@@ -525,6 +543,24 @@ fn redo_trash_batch_impl(root: &Path, items: Vec<TrashItemDto>) -> Result<(), St
                 rollback_moves(&done);
                 return Err(format!("{}: {e}", parent.display()));
             }
+        }
+        if let Err(e) = validate_restore_pair(&root, &original, &trashed) {
+            rollback_moves(&done);
+            return Err(e);
+        }
+        if !path_entry_exists(&original) {
+            rollback_moves(&done);
+            return Err(format!(
+                "redo source does not exist: {}",
+                original.display()
+            ));
+        }
+        if path_entry_exists(&trashed) {
+            rollback_moves(&done);
+            return Err(format!(
+                "redo destination already exists: {}",
+                trashed.display()
+            ));
         }
         if let Err(e) = move_entry(&original, &trashed) {
             rollback_moves(&done);
@@ -1477,7 +1513,12 @@ mod tests {
 
         let err = restore_trash_batch_impl(root, vec![item]).unwrap_err();
 
-        assert!(err.contains("path traversal") || err.contains("outside workspace"));
+        assert!(
+            err.contains("path traversal")
+                || err.contains("outside workspace")
+                || err.contains("trash item outside Lyceum trash"),
+            "{err}"
+        );
     }
 
     #[test]

@@ -6,7 +6,7 @@
 
 use serde::Serialize;
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tauri::{AppHandle, State};
 
@@ -123,16 +123,20 @@ pub fn search_in_dir(root: &Path, query: &str, max: usize) -> Result<Vec<SearchM
     if query.is_empty() {
         return Ok(Vec::new());
     }
+    let root_canonical = root
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", root.display()))?;
+    if !root_canonical.is_dir() {
+        return Err(format!("not a directory: {}", root.display()));
+    }
 
     let needle = query.to_lowercase();
     let mut matches: Vec<SearchMatch> = Vec::new();
-    let mut stack: Vec<std::path::PathBuf> = vec![root.to_path_buf()];
+    let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
     // Canonical paths of directories already walked. Guards against descending
     // the same tree twice and against symlink cycles (mirrors walk.rs).
-    let mut visited: HashSet<std::path::PathBuf> = HashSet::new();
-    if let Ok(canon) = root.canonicalize() {
-        visited.insert(canon);
-    }
+    let mut visited: HashSet<PathBuf> = HashSet::new();
+    visited.insert(root_canonical.clone());
 
     while let Some(dir) = stack.pop() {
         if matches.len() >= max {
@@ -170,6 +174,9 @@ pub fn search_in_dir(root: &Path, query: &str, max: usize) -> Result<Vec<SearchM
                 // symlink (or two paths) is searched at most once.
                 match path.canonicalize() {
                     Ok(canon) => {
+                        if !canon.starts_with(&root_canonical) {
+                            continue;
+                        }
                         if !visited.insert(canon) {
                             continue;
                         }
@@ -189,7 +196,13 @@ pub fn search_in_dir(root: &Path, query: &str, max: usize) -> Result<Vec<SearchM
             // (which reports the symlink's own tiny size) — otherwise a symlink to a
             // multi-GB file would pass the cap and then be slurped by read_to_string,
             // which DOES follow the link. Skip outright if the target can't be stat'd.
-            let Ok(meta) = std::fs::metadata(&path) else {
+            let Ok(canonical_file) = path.canonicalize() else {
+                continue;
+            };
+            if !canonical_file.starts_with(&root_canonical) {
+                continue;
+            }
+            let Ok(meta) = std::fs::metadata(&canonical_file) else {
                 continue;
             };
             // Only read regular files. A non-regular entry — a FIFO/named pipe,
@@ -204,7 +217,7 @@ pub fn search_in_dir(root: &Path, query: &str, max: usize) -> Result<Vec<SearchM
             if meta.len() > MAX_FILE_SIZE {
                 continue;
             }
-            let contents = match std::fs::read_to_string(&path) {
+            let contents = match std::fs::read_to_string(&canonical_file) {
                 Ok(c) => c,
                 Err(_) => continue,
             };
@@ -269,6 +282,14 @@ mod tests {
     use super::*;
     use std::fs;
 
+    fn path_ends_with(path: &str, suffix: &[&str]) -> bool {
+        let mut suffix_path = PathBuf::new();
+        for part in suffix {
+            suffix_path.push(part);
+        }
+        Path::new(path).ends_with(suffix_path)
+    }
+
     #[test]
     fn finds_substring_with_path_line_and_column() {
         let tmp = tempfile::tempdir().expect("create temp dir");
@@ -284,7 +305,7 @@ mod tests {
 
         assert_eq!(matches.len(), 1);
         let m = &matches[0];
-        assert!(m.path.ends_with("src/a.txt"));
+        assert!(path_ends_with(&m.path, &["src", "a.txt"]));
         assert_eq!(m.line, 2);
         assert_eq!(m.column, 5);
         assert_eq!(m.text, "the quick fox");
@@ -430,6 +451,39 @@ mod tests {
         // symlink that resolves to it are skipped by the cap.
         assert_eq!(matches.len(), 1);
         assert!(matches[0].path.ends_with("small.txt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_directory_outside_root_is_not_searched() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let outside = tempfile::tempdir().expect("create outside dir");
+        let root = tmp.path();
+        fs::write(outside.path().join("secret.txt"), b"needle\n").unwrap();
+        symlink(outside.path(), root.join("outside-link")).unwrap();
+
+        let matches = search_in_dir(root, "needle", 1000).expect("search");
+
+        assert!(matches.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_file_outside_root_is_not_searched() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let outside = tempfile::tempdir().expect("create outside dir");
+        let root = tmp.path();
+        let secret = outside.path().join("secret.txt");
+        fs::write(&secret, b"needle\n").unwrap();
+        symlink(&secret, root.join("secret-link.txt")).unwrap();
+
+        let matches = search_in_dir(root, "needle", 1000).expect("search");
+
+        assert!(matches.is_empty());
     }
 
     #[test]

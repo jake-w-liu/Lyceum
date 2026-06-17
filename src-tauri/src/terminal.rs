@@ -352,8 +352,13 @@ mod tests {
     #[test]
     fn resolve_shell_falls_back_to_env_then_default() {
         assert_eq!(resolve_shell(None, Some("/bin/fish".into())), "/bin/fish");
-        assert_eq!(resolve_shell(Some(String::new()), None), "/bin/sh");
-        assert_eq!(resolve_shell(None, None), "/bin/sh");
+        let default_shell = if cfg!(windows) {
+            "powershell.exe"
+        } else {
+            "/bin/sh"
+        };
+        assert_eq!(resolve_shell(Some(String::new()), None), default_shell);
+        assert_eq!(resolve_shell(None, None), default_shell);
     }
 
     #[test]

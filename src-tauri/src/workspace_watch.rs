@@ -204,8 +204,32 @@ fn event_path_for_requested_root(
     path: &Path,
 ) -> String {
     match path.strip_prefix(canonical_root) {
-        Ok(relative) => requested_root.join(relative).to_string_lossy().to_string(),
+        Ok(relative) => join_requested_root_text(requested_root, relative),
         Err(_) => path.to_string_lossy().to_string(),
+    }
+}
+
+fn join_requested_root_text(requested_root: &Path, relative: &Path) -> String {
+    let root = requested_root.to_string_lossy();
+    let separator = if root.contains('/') && !root.contains('\\') {
+        "/"
+    } else {
+        std::path::MAIN_SEPARATOR_STR
+    };
+    let mut out = root.trim_end_matches(['/', '\\']).to_string();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            continue;
+        };
+        if !out.is_empty() && !out.ends_with('/') && !out.ends_with('\\') {
+            out.push_str(separator);
+        }
+        out.push_str(&name.to_string_lossy());
+    }
+    if out.is_empty() {
+        root.to_string()
+    } else {
+        out
     }
 }
 

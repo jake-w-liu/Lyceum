@@ -10,6 +10,7 @@ if (process.platform !== "darwin") {
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const bundleRoot = path.join(repoRoot, "src-tauri", "target", "release", "bundle");
 const bundleImagePattern = /^.+\.dmg$/;
+const bundleAppPattern = /^.+\.app$/;
 
 for (const mount of mountedStaleImages()) {
   try {
@@ -30,6 +31,16 @@ for (const dir of ["macos", "dmg"]) {
     const image = path.join(absoluteDir, name);
     rmSync(image, { force: true });
     console.log(`[cleanup-macos-bundle] removed ${path.relative(repoRoot, image)}`);
+  }
+}
+
+const macosDir = path.join(bundleRoot, "macos");
+if (existsSync(macosDir)) {
+  for (const name of readdirSync(macosDir)) {
+    if (!bundleAppPattern.test(name)) continue;
+    const appBundle = path.join(macosDir, name);
+    rmSync(appBundle, { recursive: true, force: true });
+    console.log(`[cleanup-macos-bundle] removed ${path.relative(repoRoot, appBundle)}`);
   }
 }
 

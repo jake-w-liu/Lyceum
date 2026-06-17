@@ -72,7 +72,9 @@ pub fn run_latex_build(
     let path = process_path();
     let tex_path =
         path_access::ensure_existing_file_allowed(&app, &window, &access, Path::new(&tex_path))?;
-    let plan = plan_latex_build_impl(&tex_path, &configured_command, &path)?;
+    let mut plan = plan_latex_build_impl(&tex_path, &configured_command, &path)?;
+    plan.pdf_path =
+        path_access::ensure_write_target_allowed(&app, &window, &access, &plan.pdf_path)?;
     let removed_stale_pdf = remove_stale_pdf(&plan.pdf_path)?;
 
     let label = window.label().to_string();
