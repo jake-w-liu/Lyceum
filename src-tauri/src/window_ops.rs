@@ -27,6 +27,7 @@ fn next_window_label<R: Runtime>(app: &AppHandle<R>) -> String {
     )
 }
 
+#[cfg(target_os = "macos")]
 fn focus_first_window<R: Runtime>(app: &AppHandle<R>) -> bool {
     let Some(window) = app.webview_windows().into_values().next() else {
         return false;
@@ -53,6 +54,7 @@ pub fn open_new_window<R: Runtime>(app: &AppHandle<R>) -> Result<WebviewWindow<R
     Ok(window)
 }
 
+#[cfg(target_os = "macos")]
 pub fn focus_or_open_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     if focus_first_window(app) {
         Ok(())
