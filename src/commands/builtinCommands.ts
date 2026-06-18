@@ -27,7 +27,11 @@ import { newWindow } from "../lib/ipc";
 import { runActiveCode } from "../lib/codeRun";
 import { runLatexBuild } from "../lib/latexBuild";
 import { stopActiveRun } from "../lib/run";
-import { saveSettings, settingsFilePath } from "../lib/settingsPersistence";
+import {
+  flushSettingsPersistence,
+  saveSettings,
+  settingsFilePath,
+} from "../lib/settingsPersistence";
 import { runEditorAction } from "../lib/editorBridge";
 import { useTreeStore } from "../state/treeStore";
 import {
@@ -73,6 +77,7 @@ export function registerBuiltinCommands(): void {
       ) {
         return;
       }
+      await flushSettingsPersistence();
       await quitApp();
     },
   });

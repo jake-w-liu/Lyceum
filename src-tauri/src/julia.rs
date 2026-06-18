@@ -1,7 +1,8 @@
 // Process run support. Built-in run profiles use `run_process` and stream
 // stdout/stderr to the frontend as `run:output:<id>` events, with a
 // `run:exit:<id>` carrying the exit code. The legacy `run_julia` command is kept
-// for compatibility with older frontends.
+// for compatibility with older frontends, but still goes through the same backend
+// executable/cwd authorization discipline as the generic run command.
 //
 // Running children are tracked in `RunManager` (id -> pid) so a long-running or
 // hung run can be cancelled from the UI via `run_cancel`; entries are removed on
@@ -509,19 +510,25 @@ fn send_signal(pid: libc::pid_t, signal: libc::c_int) {
 fn schedule_sigkill_escalation(pid: libc::pid_t, signalled_group: bool) {
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(2));
-        if signalled_group && process_group_id(pid) == Some(pid) {
-            send_signal(-pid, libc::SIGKILL);
-        }
-        if process_exists(pid) {
-            send_signal(pid, libc::SIGKILL);
+        for target in sigkill_escalation_targets(pid, signalled_group, process_group_id) {
+            send_signal(target, libc::SIGKILL);
         }
     });
 }
 
 #[cfg(not(windows))]
-fn process_exists(pid: libc::pid_t) -> bool {
-    // SAFETY: signal 0 performs existence/permission probing only.
-    unsafe { libc::kill(pid, 0) == 0 }
+fn sigkill_escalation_targets(
+    pid: libc::pid_t,
+    signalled_group: bool,
+    process_group_id: impl Fn(libc::pid_t) -> Option<libc::pid_t>,
+) -> Vec<libc::pid_t> {
+    // Never send delayed SIGKILL to the bare pid: after the initial SIGTERM the
+    // child may exit and the OS may reuse that pid for an unrelated process.
+    if signalled_group && process_group_id(pid) == Some(pid) {
+        vec![-pid]
+    } else {
+        Vec::new()
+    }
 }
 
 /// Run a configured process profile, streaming output to the frontend.
@@ -589,6 +596,7 @@ pub fn run_julia(
     app: AppHandle,
     window: tauri::Window,
     state: State<RunManager>,
+    access: State<'_, PathAccessManager>,
     id: String,
     julia_path: Option<String>,
     file: Option<String>,
@@ -596,6 +604,12 @@ pub fn run_julia(
     cwd: Option<String>,
 ) -> Result<(), String> {
     let program = resolve_julia(julia_path);
+    validate_run_profile_programs("julia", &program, &[])?;
+    if code.is_none() {
+        if let Some(path) = file.as_deref().filter(|path| !path.is_empty()) {
+            path_access::ensure_existing_file_allowed(&app, &window, &access, Path::new(path))?;
+        }
+    }
     let args = julia_args(file.as_deref(), code.as_deref());
     let path = augmented_path(
         env::var_os("PATH").as_deref(),
@@ -610,7 +624,9 @@ pub fn run_julia(
         .stderr(Stdio::piped());
     if let Some(dir) = cwd {
         if !dir.is_empty() {
-            command.current_dir(dir);
+            let cwd =
+                path_access::ensure_existing_dir_allowed(&app, &window, &access, Path::new(&dir))?;
+            command.current_dir(cwd);
         }
     }
     configure_process_group(&mut command);
@@ -967,6 +983,23 @@ mod tests {
         // The orphaned 0xC3 was retained; its continuation byte completes 'é'.
         assert!(s.feed(&[0xA9]).is_empty());
         assert_eq!(s.finish(), Some("é".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sigkill_escalation_never_targets_bare_pid_after_delay() {
+        assert_eq!(
+            sigkill_escalation_targets(123, false, |_| Some(123)),
+            Vec::<libc::pid_t>::new()
+        );
+        assert_eq!(
+            sigkill_escalation_targets(123, true, |_| Some(456)),
+            Vec::<libc::pid_t>::new()
+        );
+        assert_eq!(
+            sigkill_escalation_targets(123, true, |_| Some(123)),
+            vec![-123]
+        );
     }
 
     #[cfg(unix)]

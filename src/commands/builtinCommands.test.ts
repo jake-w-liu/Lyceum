@@ -12,6 +12,11 @@ import { initialSettingsData, useSettingsStore } from "../state/settingsStore";
 const runLatexBuildMock = vi.hoisted(() => vi.fn());
 const runActiveCodeMock = vi.hoisted(() => vi.fn());
 const writePtyMock = vi.hoisted(() => vi.fn());
+const persistenceMock = vi.hoisted(() => ({
+  flushSettingsPersistence: vi.fn(async (): Promise<void> => undefined),
+  saveSettings: vi.fn(async (): Promise<void> => undefined),
+  settingsFilePath: vi.fn(async (): Promise<string> => "/config/settings.json"),
+}));
 const invokeMock = vi.hoisted(() =>
   vi.fn(async (..._args: unknown[]) => undefined),
 );
@@ -24,6 +29,11 @@ vi.mock("../lib/codeRun", () => ({
 }));
 vi.mock("../lib/terminal", () => ({
   writePty: (...args: unknown[]) => writePtyMock(...args),
+}));
+vi.mock("../lib/settingsPersistence", () => ({
+  flushSettingsPersistence: () => persistenceMock.flushSettingsPersistence(),
+  saveSettings: () => persistenceMock.saveSettings(),
+  settingsFilePath: () => persistenceMock.settingsFilePath(),
 }));
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
@@ -44,6 +54,12 @@ beforeEach(() => {
   runLatexBuildMock.mockClear();
   runActiveCodeMock.mockClear();
   writePtyMock.mockClear();
+  persistenceMock.flushSettingsPersistence.mockClear();
+  persistenceMock.flushSettingsPersistence.mockResolvedValue(undefined);
+  persistenceMock.saveSettings.mockClear();
+  persistenceMock.saveSettings.mockResolvedValue(undefined);
+  persistenceMock.settingsFilePath.mockClear();
+  persistenceMock.settingsFilePath.mockResolvedValue("/config/settings.json");
   invokeMock.mockClear();
   askMock.mockReset().mockResolvedValue(true);
 });
@@ -193,9 +209,30 @@ describe("builtinCommands", () => {
   });
 
   describe("quit", () => {
-    it("invokes quit_app directly when no docs are dirty", async () => {
+    it("flushes settings before invoking quit_app when no docs are dirty", async () => {
       await commandRegistry.execute("quit");
+      expect(persistenceMock.flushSettingsPersistence).toHaveBeenCalledTimes(1);
       expect(askMock).not.toHaveBeenCalled();
+      expect(invokeMock).toHaveBeenCalledWith("quit_app");
+    });
+
+    it("awaits settings flush before invoking quit_app", async () => {
+      let resolveFlush: (() => void) | undefined;
+      persistenceMock.flushSettingsPersistence.mockReturnValueOnce(
+        new Promise<void>((resolve) => {
+          resolveFlush = resolve;
+        }),
+      );
+
+      const quit = commandRegistry.execute("quit");
+      await Promise.resolve();
+
+      expect(persistenceMock.flushSettingsPersistence).toHaveBeenCalledTimes(1);
+      expect(invokeMock).not.toHaveBeenCalledWith("quit_app");
+
+      resolveFlush?.();
+      await quit;
+
       expect(invokeMock).toHaveBeenCalledWith("quit_app");
     });
 
@@ -214,6 +251,7 @@ describe("builtinCommands", () => {
         "Discard unsaved changes and quit?",
         expect.anything(),
       );
+      expect(persistenceMock.flushSettingsPersistence).not.toHaveBeenCalled();
       expect(invokeMock).not.toHaveBeenCalledWith("quit_app");
     });
 
@@ -228,6 +266,7 @@ describe("builtinCommands", () => {
 
       await commandRegistry.execute("quit");
 
+      expect(persistenceMock.flushSettingsPersistence).toHaveBeenCalledTimes(1);
       expect(invokeMock).toHaveBeenCalledWith("quit_app");
     });
   });
