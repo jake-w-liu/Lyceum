@@ -30,7 +30,12 @@ function isKeybinding(b: unknown): b is Keybinding {
     !!b &&
     typeof b === "object" &&
     typeof (b as Keybinding).key === "string" &&
-    typeof (b as Keybinding).command === "string"
+    typeof (b as Keybinding).command === "string" &&
+    // `when` is optional but MUST be a string when present — a non-string value
+    // from the hand-edited keybindings.json would otherwise reach evaluateWhen
+    // and throw `.trim is not a function` out of the global keydown handler.
+    ((b as Keybinding).when === undefined ||
+      typeof (b as Keybinding).when === "string")
   );
 }
 

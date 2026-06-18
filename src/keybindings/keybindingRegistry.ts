@@ -42,7 +42,9 @@ export const DEFAULT_KEYMAP: Keybinding[] = [
 const MODIFIER_TOKENS = new Set(["mod", "cmd", "ctrl", "alt", "shift", "meta"]);
 
 export function evaluateWhen(expr: string | undefined, ctx: KeyContext): boolean {
-  if (expr === undefined) return true;
+  // Treat any non-string (undefined, or a malformed value that slipped past
+  // validation) as "no condition" rather than throwing out of the keydown path.
+  if (typeof expr !== "string") return true;
   const trimmed = expr.trim();
   if (trimmed === "") return true;
   const parser = new WhenParser(tokenizeWhen(trimmed), ctx);

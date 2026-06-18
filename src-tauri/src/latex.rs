@@ -342,13 +342,12 @@ fn parse_custom_latex_command(
         .iter()
         .map(|span| unquote_token(&command[span.start..span.end]))
         .collect();
-    // Substitute the real tex file name for the last .tex token (the user's
-    // placeholder, e.g. `main.tex`), or append it if the command has none. Using
-    // the RAW name keeps the spawned args free of any shell-escaping artifacts.
-    match tokens
-        .iter()
-        .rposition(|tok| tok.to_lowercase().ends_with(".tex"))
-    {
+    // Substitute the real tex file name for the user's input placeholder (e.g.
+    // `main.tex`), or append it if the command has none. Uses the SAME
+    // tex_placeholder_index as the display retarget so the executed input file can
+    // never diverge from the displayed one. The RAW name keeps the spawned args
+    // free of shell-escaping artifacts.
+    match tex_placeholder_index(command) {
         Some(idx) => tokens[idx] = tex_name.to_string(),
         None => tokens.push(tex_name.to_string()),
     }
@@ -484,17 +483,34 @@ fn unquote_token(token: &str) -> String {
     out
 }
 
+/// Index (in `shell_token_spans` order) of the token holding the user's input
+/// `.tex` placeholder: the LAST PLAIN OPERAND whose unquoted value ends in
+/// ".tex". A flag value such as `-o="x.tex"` (its token starts with '-') is never
+/// chosen. Returns None when no such operand exists (the caller appends the real
+/// name). SHARED by the display retarget and the executed-arg substitution so the
+/// two can never pick different tokens — otherwise the build would run a
+/// different file than the one shown (and used for PDF prediction).
+fn tex_placeholder_index(command: &str) -> Option<usize> {
+    shell_token_spans(command)
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, span)| {
+            let unquoted = unquote_token(&command[span.start..span.end]);
+            !unquoted.starts_with('-') && unquoted.to_lowercase().ends_with(".tex")
+        })
+        .map(|(idx, _)| idx)
+}
+
 fn retarget_tex_command(command: &str, tex_name: &str) -> String {
     let replacement = quote_shell_arg(tex_name);
-    for span in shell_token_spans(command).into_iter().rev() {
-        let token = &command[span.start..span.end];
-        if strip_shell_quotes(token).to_lowercase().ends_with(".tex") {
-            let mut out = String::with_capacity(command.len() + replacement.len());
-            out.push_str(&command[..span.start]);
-            out.push_str(&replacement);
-            out.push_str(&command[span.end..]);
-            return out;
-        }
+    if let Some(idx) = tex_placeholder_index(command) {
+        let span = shell_token_spans(command)[idx];
+        let mut out = String::with_capacity(command.len() + replacement.len());
+        out.push_str(&command[..span.start]);
+        out.push_str(&replacement);
+        out.push_str(&command[span.end..]);
+        return out;
     }
     if command.trim().is_empty() {
         replacement
@@ -687,6 +703,25 @@ mod tests {
         assert!(plan.command.ends_with("\"paper.tex\""));
         assert_eq!(plan.tool, "latexmk");
         assert_eq!(plan.source, "custom");
+    }
+
+    #[test]
+    fn custom_build_does_not_treat_a_quoted_flag_value_ending_in_tex_as_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tex = tmp.path().join("real.tex");
+        std::fs::write(&tex, "\\documentclass{article}").unwrap();
+
+        // A -o flag whose quoted value ends in .tex must NOT be mistaken for the
+        // input placeholder; the real input (main.tex) is replaced. Display and
+        // executed args must agree on which token was substituted (they used to
+        // diverge: display via strip_shell_quotes, exec via unquote_token).
+        let plan =
+            plan_latex_build_impl(&tex, r#"latexmk main.tex -o="x.tex""#, OsStr::new("")).unwrap();
+
+        assert_eq!(plan.program, "latexmk");
+        assert_eq!(plan.args, vec!["real.tex", "-o=x.tex"]);
+        assert!(plan.command.contains("\"real.tex\""));
+        assert!(plan.command.contains("-o=\"x.tex\""));
     }
 
     #[test]

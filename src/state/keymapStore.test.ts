@@ -29,6 +29,19 @@ describe("parseUserKeybindings", () => {
     expect(parseUserKeybindings(null)).toEqual([]);
     expect(parseUserKeybindings(42)).toEqual([]);
   });
+  it("drops a binding whose `when` is not a string", () => {
+    // A non-string `when` would otherwise reach evaluateWhen and throw
+    // `.trim is not a function` out of the global keydown handler.
+    const parsed = parseUserKeybindings([
+      { key: "ctrl+k", command: "foo", when: 5 },
+      { key: "ctrl+j", command: "bar", when: "editorFocus" },
+      { key: "ctrl+l", command: "baz" },
+    ]);
+    expect(parsed).toEqual([
+      { key: "ctrl+j", command: "bar", when: "editorFocus" },
+      { key: "ctrl+l", command: "baz" },
+    ]);
+  });
 });
 
 describe("keymapStore", () => {

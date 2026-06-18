@@ -201,6 +201,14 @@ describe("evaluateWhen", () => {
     expect(evaluateWhen("a || b", { b: true })).toBe(true);
   });
 
+  it("treats a non-string when as no condition instead of throwing", () => {
+    expect(evaluateWhen(undefined, {})).toBe(true);
+    // Malformed values that could slip in from a hand-edited keybindings.json.
+    expect(evaluateWhen(5 as unknown as string, {})).toBe(true);
+    expect(evaluateWhen(null as unknown as string, {})).toBe(true);
+    expect(evaluateWhen({} as unknown as string, {})).toBe(true);
+  });
+
   it("'a' => false when absent", () => {
     expect(evaluateWhen("a", {})).toBe(false);
   });
