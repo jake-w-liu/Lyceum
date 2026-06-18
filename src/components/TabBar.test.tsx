@@ -7,12 +7,12 @@ import { initialLayoutData, useLayoutStore } from "../state/layoutStore";
 import { initialOutputData, useOutputStore } from "../state/outputStore";
 
 const runLatexBuildMock = vi.hoisted(() => vi.fn());
-const runActiveJuliaMock = vi.hoisted(() => vi.fn());
+const runActiveCodeMock = vi.hoisted(() => vi.fn());
 vi.mock("../lib/latexBuild", () => ({
   runLatexBuild: (...args: unknown[]) => runLatexBuildMock(...args),
 }));
-vi.mock("../lib/julia", () => ({
-  runActiveJulia: (...args: unknown[]) => runActiveJuliaMock(...args),
+vi.mock("../lib/codeRun", () => ({
+  runActiveCode: (...args: unknown[]) => runActiveCodeMock(...args),
 }));
 
 const get = () => useEditorStore.getState();
@@ -27,7 +27,7 @@ beforeEach(() => {
   useLayoutStore.setState(initialLayoutData, false);
   useOutputStore.setState(initialOutputData, false);
   runLatexBuildMock.mockClear();
-  runActiveJuliaMock.mockClear();
+  runActiveCodeMock.mockClear();
 });
 
 describe("TabBar", () => {
@@ -193,7 +193,7 @@ describe("TabBar", () => {
     });
   });
 
-  it("runs the active Julia file from the Run action", async () => {
+  it("runs the active file from the Run action", async () => {
     get().openDoc({
       path: "/w/analysis.jl",
       content: "println(1)",
@@ -202,10 +202,23 @@ describe("TabBar", () => {
     render(<TabBar />);
 
     await userEvent.click(
-      screen.getByRole("button", { name: "Run Julia File or Selection" }),
+      screen.getByRole("button", { name: "Run File or Selection" }),
     );
 
-    expect(runActiveJuliaMock).toHaveBeenCalledOnce();
+    expect(runActiveCodeMock).toHaveBeenCalledOnce();
+  });
+
+  it("shows the Run action for other runnable languages", () => {
+    get().openDoc({
+      path: "/w/app.py",
+      content: "print(1)",
+      language: "python",
+    });
+    render(<TabBar />);
+
+    expect(
+      screen.getByRole("button", { name: "Run File or Selection" }),
+    ).toBeInTheDocument();
   });
 
   it("keeps the Preview action outside the scrollable tab list", () => {

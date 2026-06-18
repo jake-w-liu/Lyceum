@@ -24,7 +24,7 @@ import {
 } from "../state/editorStore";
 import { usePreviewStore } from "../state/previewStore";
 import { newWindow } from "../lib/ipc";
-import { runActiveJulia } from "../lib/julia";
+import { runActiveCode } from "../lib/codeRun";
 import { runLatexBuild } from "../lib/latexBuild";
 import { stopActiveRun } from "../lib/run";
 import { saveSettings, settingsFilePath } from "../lib/settingsPersistence";
@@ -40,6 +40,11 @@ import { writePty } from "../lib/terminal";
 import { isInlinePreviewPath, isTexSourcePath, relativePath } from "../lib/fileTypes";
 
 let registered = false;
+
+function quoteStartupCommand(program: string): string {
+  if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(program)) return program;
+  return `"${program.replace(/(["\\$`])/g, "\\$1")}"`;
+}
 
 /** Idempotently register all built-in commands. */
 export function registerBuiltinCommands(): void {
@@ -223,13 +228,13 @@ export function registerBuiltinCommands(): void {
   });
   commandRegistry.register({
     id: "editor.run",
-    title: "Run File or Selection (Julia)",
+    title: "Run File or Selection",
     category: "Run",
     run: () => {
-      // runActiveJulia saves the buffer before running; make sure the store
+      // runActiveCode saves the buffer before running; make sure the store
       // holds the latest editor content first.
       flushPendingEdits();
-      return runActiveJulia();
+      return runActiveCode();
     },
   });
   commandRegistry.register({
@@ -423,17 +428,48 @@ export function registerBuiltinCommands(): void {
     },
   });
 
-  // --- Julia REPL + send-to-terminal ---
+  // --- REPL profiles + send-to-terminal ---
   commandRegistry.register({
     id: "julia.repl",
-    title: "Open Julia REPL",
+    title: "New Julia REPL",
     category: "Run",
     run: () => {
-      const juliaPath = useSettingsStore.getState().settings.juliaPath || "julia";
+      const juliaRuntimePath =
+        useSettingsStore.getState().settings.runtimePaths.julia || "julia";
       const root = useWorkspaceStore.getState().rootPath;
       useTerminalStore.getState().createTerminal(root, {
         title: "Julia REPL",
-        startupCommand: `${juliaPath}\r`,
+        startupCommand: `${quoteStartupCommand(juliaRuntimePath)}\r`,
+      });
+      layout().showBottomTab("terminal");
+    },
+  });
+  commandRegistry.register({
+    id: "python.repl",
+    title: "New Python REPL",
+    category: "Run",
+    run: () => {
+      const pythonPath =
+        useSettingsStore.getState().settings.runtimePaths.python || "python3";
+      const root = useWorkspaceStore.getState().rootPath;
+      useTerminalStore.getState().createTerminal(root, {
+        title: "Python REPL",
+        startupCommand: `${quoteStartupCommand(pythonPath)}\r`,
+      });
+      layout().showBottomTab("terminal");
+    },
+  });
+  commandRegistry.register({
+    id: "node.repl",
+    title: "New Node REPL",
+    category: "Run",
+    run: () => {
+      const nodePath =
+        useSettingsStore.getState().settings.runtimePaths.node || "node";
+      const root = useWorkspaceStore.getState().rootPath;
+      useTerminalStore.getState().createTerminal(root, {
+        title: "Node REPL",
+        startupCommand: `${quoteStartupCommand(nodePath)}\r`,
       });
       layout().showBottomTab("terminal");
     },

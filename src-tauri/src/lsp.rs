@@ -7,6 +7,7 @@
 // commands. Sessions live in Tauri-managed state.
 
 use std::collections::HashMap;
+use std::env;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -128,7 +129,7 @@ impl LspManager {
     pub fn shutdown_all(&self) {
         if let Ok(mut servers) = self.servers.lock() {
             for (_id, mut session) in servers.drain() {
-                let _ = session.child.kill();
+                crate::julia::kill_pid(session.child.id());
                 let _ = session.child.wait();
             }
         }
@@ -152,7 +153,7 @@ impl LspManager {
             keys.iter().filter_map(|key| servers.remove(key)).collect()
         };
         for mut session in removed {
-            let _ = session.child.kill();
+            crate::julia::kill_pid(session.child.id());
             // Reap so the exited server does not linger as a zombie process.
             let _ = session.child.wait();
         }
@@ -185,8 +186,14 @@ pub fn lsp_start(
     } = request;
     let key = session_key(&window, &id);
     let (command, args) = lsp_command(&server_id, julia_path)?;
-    let mut cmd = Command::new(&command);
+    let resolved_command = crate::julia::resolve_program(&command, &[]);
+    let path = crate::julia::augmented_path(
+        env::var_os("PATH").as_deref(),
+        env::var_os("HOME").as_deref(),
+    );
+    let mut cmd = Command::new(&resolved_command);
     cmd.args(&args)
+        .env("PATH", path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
@@ -197,6 +204,7 @@ pub fn lsp_start(
             cmd.current_dir(cwd);
         }
     }
+    crate::julia::configure_process_group(&mut cmd);
 
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
     let stdin = child.stdin.take().ok_or("failed to capture stdin")?;
@@ -221,7 +229,7 @@ pub fn lsp_start(
             gen,
         },
     ) {
-        let _ = old.child.kill();
+        crate::julia::kill_pid(old.child.id());
         let _ = old.child.wait();
     }
 
@@ -252,7 +260,7 @@ pub fn lsp_start(
             {
                 if let Some(mut session) = servers.remove(&key_for_thread) {
                     drop(servers);
-                    let _ = session.child.kill();
+                    crate::julia::kill_pid(session.child.id());
                     let _ = session.child.wait();
                 }
             }
@@ -267,20 +275,39 @@ fn lsp_command(
     julia_path: Option<String>,
 ) -> Result<(String, Vec<String>), String> {
     match server_id {
-        "julia" => Ok((
-            crate::julia::resolve_julia(julia_path),
-            vec![
-                "--startup-file=no".to_string(),
-                "--history-file=no".to_string(),
-                "-e".to_string(),
-                "using LanguageServer; runserver()".to_string(),
-            ],
-        )),
+        "julia" => {
+            let program = crate::julia::resolve_julia(julia_path);
+            crate::julia::validate_run_profile_programs("julia", &program, &[])?;
+            Ok((
+                program,
+                vec![
+                    "--startup-file=no".to_string(),
+                    "--history-file=no".to_string(),
+                    "-e".to_string(),
+                    "using LanguageServer; runserver()".to_string(),
+                ],
+            ))
+        }
         "pyright" => Ok((
             "pyright-langserver".to_string(),
             vec!["--stdio".to_string()],
         )),
+        "typescript" => Ok((
+            "typescript-language-server".to_string(),
+            vec!["--stdio".to_string()],
+        )),
+        "rust-analyzer" => Ok(("rust-analyzer".to_string(), Vec::new())),
+        "clangd" => Ok(("clangd".to_string(), Vec::new())),
+        "gopls" => Ok(("gopls".to_string(), Vec::new())),
         "csharp" => Ok(("csharp-ls".to_string(), Vec::new())),
+        "r" => Ok((
+            "R".to_string(),
+            vec![
+                "--slave".to_string(),
+                "-e".to_string(),
+                "languageserver::run()".to_string(),
+            ],
+        )),
         other => Err(format!("unsupported language server: {other}")),
     }
 }
@@ -320,7 +347,7 @@ pub fn lsp_stop(window: tauri::Window, state: State<LspManager>, id: String) -> 
         .unwrap()
         .remove(&session_key(&window, &id))
     {
-        let _ = session.child.kill();
+        crate::julia::kill_pid(session.child.id());
         // Reap so the exited server does not linger as a zombie process.
         let _ = session.child.wait();
     }
@@ -342,12 +369,33 @@ mod tests {
         assert_eq!(cmd, "pyright-langserver");
         assert_eq!(args, vec!["--stdio"]);
 
+        let (cmd, args) = lsp_command("typescript", None).expect("typescript");
+        assert_eq!(cmd, "typescript-language-server");
+        assert_eq!(args, vec!["--stdio"]);
+
+        let (cmd, args) = lsp_command("rust-analyzer", None).expect("rust");
+        assert_eq!(cmd, "rust-analyzer");
+        assert!(args.is_empty());
+
+        let (cmd, args) = lsp_command("clangd", None).expect("clangd");
+        assert_eq!(cmd, "clangd");
+        assert!(args.is_empty());
+
+        let (cmd, args) = lsp_command("gopls", None).expect("gopls");
+        assert_eq!(cmd, "gopls");
+        assert!(args.is_empty());
+
+        let (cmd, args) = lsp_command("r", None).expect("r");
+        assert_eq!(cmd, "R");
+        assert_eq!(args, vec!["--slave", "-e", "languageserver::run()"]);
+
         let (cmd, args) =
             lsp_command("julia", Some("/opt/julia/bin/julia".to_string())).expect("julia");
         assert_eq!(cmd, "/opt/julia/bin/julia");
         assert!(args
             .iter()
             .any(|arg| arg == "using LanguageServer; runserver()"));
+        assert!(lsp_command("julia", Some("/bin/sh".to_string())).is_err());
 
         assert!(lsp_command("sh", None).is_err());
     }

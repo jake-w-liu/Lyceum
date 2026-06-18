@@ -6,6 +6,14 @@ export type ThemeId = "dark" | "light" | "hc";
 export type WordWrap = "off" | "on";
 export type TerminalCwdBehavior = "workspaceRoot" | "currentFileDir";
 
+export interface RuntimePaths {
+  julia: string;
+  python: string;
+  node: string;
+  shell: string;
+  r: string;
+}
+
 export interface Settings {
   version: number;
   theme: ThemeId;
@@ -17,7 +25,7 @@ export interface Settings {
   wordWrap: WordWrap;
   shellPath: string;
   terminalCwdBehavior: TerminalCwdBehavior;
-  juliaPath: string;
+  runtimePaths: RuntimePaths;
   latexBuildCommand: string;
   restoreWorkspaceOnStartup: boolean;
   minimap: boolean;
@@ -30,8 +38,16 @@ export interface Settings {
 export const ZOOM_LEVEL_MIN = -5;
 export const ZOOM_LEVEL_MAX = 10;
 
+export const DEFAULT_RUNTIME_PATHS: RuntimePaths = {
+  julia: "",
+  python: "",
+  node: "",
+  shell: "",
+  r: "",
+};
+
 export const DEFAULT_SETTINGS: Settings = {
-  version: 1,
+  version: 2,
   theme: "dark",
   fontFamily: "",
   fontSize: 13,
@@ -41,7 +57,7 @@ export const DEFAULT_SETTINGS: Settings = {
   wordWrap: "off",
   shellPath: "",
   terminalCwdBehavior: "workspaceRoot",
-  juliaPath: "",
+  runtimePaths: { ...DEFAULT_RUNTIME_PATHS },
   latexBuildCommand: STOCK_LATEX_BUILD_COMMAND,
   restoreWorkspaceOnStartup: true,
   minimap: false,
@@ -64,6 +80,18 @@ function normalizeLineHeight(value: number, fontSize: number): number {
   if (value <= 0) return 0;
   if (value < 8) return Math.round(fontSize * value);
   return clamp(value, 8, 80);
+}
+
+function mergeRuntimePaths(value: unknown): RuntimePaths {
+  const out: RuntimePaths = { ...DEFAULT_RUNTIME_PATHS };
+  if (value === null || typeof value !== "object") return out;
+  const p = value as Record<string, unknown>;
+  for (const key of Object.keys(DEFAULT_RUNTIME_PATHS) as Array<
+    keyof RuntimePaths
+  >) {
+    if (typeof p[key] === "string") out[key] = p[key].trim();
+  }
+  return out;
 }
 
 // Validate `partial` against DEFAULT_SETTINGS, ignoring unknown keys/wrong types.
@@ -107,8 +135,11 @@ export function mergeSettings(partial: unknown): Settings {
   ) {
     out.terminalCwdBehavior = p.terminalCwdBehavior as TerminalCwdBehavior;
   }
+  out.runtimePaths = mergeRuntimePaths(p.runtimePaths);
+  // Backward-compatible migration from schema v1. The deprecated top-level key
+  // is read only when the new nested key did not already specify Julia.
   if (typeof p.juliaPath === "string") {
-    out.juliaPath = p.juliaPath;
+    out.runtimePaths.julia ||= p.juliaPath.trim();
   }
   if (typeof p.latexBuildCommand === "string") {
     out.latexBuildCommand = p.latexBuildCommand;

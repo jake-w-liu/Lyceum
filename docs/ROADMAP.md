@@ -1,9 +1,10 @@
 # Lyceum Roadmap
 
-Lyceum is a lightweight, VS Code-inspired **research IDE** built with Tauri, with a Julia-first workflow.
+Lyceum is a lightweight, VS Code-inspired **research IDE** built with Tauri.
 This is **not** a 1:1 VS Code clone: it is a focused editor with a VS Code-like layout, common
-keybindings, code editing, terminal integration, syntax highlighting, PDF preview, and a Julia-first
-workflow. Only original code and permissive open-source dependencies are used; no VS Code source is copied.
+keybindings, code editing, terminal integration, syntax highlighting, PDF preview, built-in run
+profiles, and a generic LSP client. Julia remains a first-class built-in language, but Lyceum is not
+a single-language tool. Only original code and permissive open-source dependencies are used; no VS Code source is copied.
 
 This roadmap defines milestones **M0..M12**. Each milestone lists its goal, concrete scope, acceptance
 criteria ("done when..."), and the tests that must pass.
@@ -18,13 +19,13 @@ Every milestone below is constrained by these decisions. No milestone may introd
 - **Terminal:** xterm.js in the frontend; real PTY in the Rust backend via the `portable-pty` crate.
   Terminal output is streamed frontend<->backend over Tauri events; input is sent via Tauri commands.
 - **PDF preview:** PDF.js (`pdfjs-dist`), lazy-loaded.
-- **Syntax highlighting:** Monaco built-in grammars first; Tree-sitter **only** if a language is
-  missing/weak (e.g. Julia, LaTeX).
+- **Syntax highlighting:** Monaco built-in grammars first; custom Monarch grammars where Monaco is
+  missing/weak (Julia, LaTeX, TOML).
 - **State management:** Zustand (small, simple stores). No Redux.
 - **Styling:** plain CSS with CSS custom properties (CSS variables) for theming. No heavy UI framework.
 - **LSP:** a generic JSON-RPC LSP client. The Rust backend spawns language servers over stdio and bridges
-  messages to the frontend via Tauri commands/events. Order: Julia LanguageServer.jl first, then Python
-  (pyright), then C# (csharp-ls or OmniSharp).
+  messages to the frontend via Tauri commands/events. Built-in profiles cover Julia, Python,
+  TypeScript/JavaScript, Rust, C/C++, Go, C#, and R.
 - **Command system:** a TS command registry — every action is a command. A keybinding registry maps
   shortcuts to command ids. Keybindings persisted as JSON. Settings persisted as JSON in the OS
   app-config dir via Tauri.
@@ -42,9 +43,9 @@ Every milestone below is constrained by these decisions. No milestone may introd
 
 ## Current status
 
-**M0–M1 are being implemented first.** M0 stands up the Tauri + React + TypeScript project, and M1 builds
-the shell layout (activity bar, sidebar, editor area, bottom panel, status bar). Later milestones are
-planned but not yet started. This roadmap is the agreed plan of record.
+**M0–M12 are implemented in the 0.5.0 line.** The roadmap remains the plan of
+record and acceptance reference; current completion details live in
+`TRACKER.md`.
 
 ---
 
@@ -229,7 +230,8 @@ planned but not yet started. This roadmap is the agreed plan of record.
 
 **Scope:**
 - Use Monaco built-in grammars first for: Python, C#, C/C++, Rust, JavaScript/TypeScript, Markdown,
-  JSON/YAML/TOML, Bash. Add Tree-sitter only where Monaco is missing/weak — notably **Julia** and **LaTeX**.
+  JSON/YAML/TOML, Bash. Add custom Monarch grammars where Monaco is missing/weak — notably
+  **Julia**, **LaTeX**, and **TOML**.
 - Implement themes: dark (VS Code-like default), light, and high contrast, driven by CSS variables
   and Monaco theme definitions kept in sync.
 - Wire the `theme` setting and editor appearance settings (`fontFamily`, `fontSize`, `lineHeight`,
@@ -246,21 +248,20 @@ planned but not yet started. This roadmap is the agreed plan of record.
 
 ---
 
-## M8 — Julia run-file and run-selection workflow
+## M8 — Built-in run-file and run-selection profiles
 
-**Goal:** Run the current Julia file or selected code from the editor.
+**Goal:** Run the current file or selected code from the editor through built-in language profiles.
 
 **Scope:**
-- Run the active file or the current selection in an integrated terminal/PTY session using the configured
-  `juliaPath`.
+- Run the active file or the current selection using the configured runtime for supported source files.
 - Wire `Cmd/Ctrl+Enter` and a tab-bar Run button to "run current file or selected code".
-- Surface run output in the terminal panel; sensible behavior when nothing is selected (run whole file).
+- Surface run output in the Output panel; sensible behavior when nothing is selected (run whole file).
 - Register run commands in the command registry.
 
 **Done when:**
 - `Cmd/Ctrl+Enter` or the Run button with no selection runs the whole file; with
   a selection runs the selection.
-- Output appears in the terminal; `juliaPath` is respected.
+- Output appears in the Output panel; `runtimePaths` overrides are respected.
 
 **Tests that must pass:**
 - Vitest: run command selects file-vs-selection correctly and builds the right invocation (backend mocked).
@@ -268,22 +269,21 @@ planned but not yet started. This roadmap is the agreed plan of record.
 
 ---
 
-## M9 — Generic LSP client + Julia LanguageServer.jl
+## M9 — Generic LSP client + built-in server profiles
 
-**Goal:** A generic JSON-RPC LSP client, first wired to Julia LanguageServer.jl.
+**Goal:** A generic JSON-RPC LSP client with built-in profiles for common language servers.
 
 **Scope:**
 - Rust: spawn language servers over stdio and bridge JSON-RPC messages to the frontend via Tauri
   commands/events (generic — not Julia-specific).
 - TS LSP client in `lib/`: initialize handshake, document sync, and core features (diagnostics,
   hover, completion, go-to-definition, find-references).
-- Integrate Julia LanguageServer.jl first (Python pyright and C# csharp-ls/OmniSharp are deferred but
-  must drop in without protocol changes).
+- Integrate built-in profiles for Julia, Python, TypeScript/JavaScript, Rust, C/C++, Go, C#, and R.
 - Wire `F12` go to definition, `Shift+F12` find references, and `Cmd/Ctrl+Click` go to definition.
 
 **Done when:**
 - The generic client completes the LSP handshake and syncs documents.
-- Julia LanguageServer.jl provides diagnostics, hover, completion, definition, and references.
+- Installed language servers provide diagnostics, hover, completion, definition, and references.
 - `F12`, `Shift+F12`, and `Cmd/Ctrl+Click` navigate correctly.
 
 **Tests that must pass:**
@@ -301,7 +301,7 @@ planned but not yet started. This roadmap is the agreed plan of record.
 - Persist settings JSON in the OS app-config dir via Tauri; load on startup with sensible defaults.
 - Persist the keybinding map as JSON (built on M4's registry).
 - Implement all settings keys: `theme`, `fontFamily`, `fontSize`, `lineHeight`, `ligatures`, `tabSize`,
-  `wordWrap`, `shellPath`, `terminalCwdBehavior` (`workspaceRoot|currentFileDir`), `juliaPath`,
+  `wordWrap`, `shellPath`, `terminalCwdBehavior` (`workspaceRoot|currentFileDir`), `runtimePaths`,
   `latexBuildCommand` (e.g. `latexmk -pdf main.tex`), `restoreWorkspaceOnStartup`, `minimap`,
   `lineNumbers`.
 - Restore the last opened folder on startup when `restoreWorkspaceOnStartup` is on.

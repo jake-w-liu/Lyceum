@@ -91,7 +91,9 @@ pub fn build_app_menu<R: Runtime>(handle: &AppHandle<R>) -> tauri::Result<Menu<R
         .item(&MenuItemBuilder::with_id("terminal.new", "New Terminal").build(handle)?)
         .item(&MenuItemBuilder::with_id("latex.build", "Compile LaTeX").build(handle)?)
         .separator()
-        .item(&MenuItemBuilder::with_id("julia.repl", "Open Julia REPL").build(handle)?)
+        .item(&MenuItemBuilder::with_id("julia.repl", "New Julia REPL").build(handle)?)
+        .item(&MenuItemBuilder::with_id("python.repl", "New Python REPL").build(handle)?)
+        .item(&MenuItemBuilder::with_id("node.repl", "New Node REPL").build(handle)?)
         .item(
             &MenuItemBuilder::with_id("terminal.runSelection", "Send Selection to Terminal")
                 .build(handle)?,

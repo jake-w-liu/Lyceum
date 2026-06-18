@@ -6,11 +6,11 @@ import { useEffect, useRef } from "react";
 import { Icon } from "./Icon";
 import {
   isInlinePreviewPath,
-  isJuliaSourcePath,
   isTexSourcePath,
 } from "../lib/fileTypes";
-import { runActiveJulia } from "../lib/julia";
+import { runActiveCode } from "../lib/codeRun";
 import { runLatexBuild } from "../lib/latexBuild";
+import { hasRunProfileForDoc } from "../lib/runProfiles";
 import {
   confirmDiscard,
   isDirty,
@@ -65,8 +65,7 @@ export function TabBar() {
   const canPreview = !!activeDoc && isInlinePreviewPath(activeDoc.path);
   const canLatexPreview =
     activeDoc?.kind === "text" && isTexSourcePath(activeDoc.path);
-  const canJuliaRun =
-    activeDoc?.kind === "text" && isJuliaSourcePath(activeDoc.path);
+  const canRun = hasRunProfileForDoc(activeDoc);
   const previewing = canPreview && editorPreview;
 
   function openTabMenu(e: React.MouseEvent, doc: EditorDoc) {
@@ -205,14 +204,14 @@ export function TabBar() {
             </button>
           </>
         )}
-        {!canPreview && !canLatexPreview && canJuliaRun && (
+        {!canPreview && !canLatexPreview && canRun && (
           <button
             type="button"
             className="tab-action"
-            aria-label="Run Julia File or Selection"
-            title="Run Julia File or Selection"
+            aria-label="Run File or Selection"
+            title="Run File or Selection"
             disabled={outputRunning}
-            onClick={() => void runActiveJulia()}
+            onClick={() => void runActiveCode()}
           >
             <Icon name="run" size={14} />
             <span>Run</span>

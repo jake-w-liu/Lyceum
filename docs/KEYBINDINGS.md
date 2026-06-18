@@ -28,14 +28,18 @@ to `Cmd` on macOS and `Ctrl` on Windows/Linux.
 | --- | --- | --- | --- | --- |
 | Quick open (files) | `Cmd+P` | `Ctrl+P` | `quickOpen.show` | M4 |
 | Command palette | `Cmd+Shift+P` | `Ctrl+Shift+P` | `commandPalette.show` | M4 |
+| New file | `Cmd+N` | `Ctrl+N` | `explorer.newFile` | M2 |
+| New folder | `Cmd+Shift+N` | `Ctrl+Shift+N` | `explorer.newFolder` | M2 |
 | Toggle sidebar | `Cmd+B` | `Ctrl+B` | `workbench.toggleSidebar` | M1 |
 | Toggle terminal panel | `` Ctrl+` `` | `` Ctrl+` `` | `terminal.toggle` | M5 |
 | New terminal | `` Ctrl+Shift+` `` | `` Ctrl+Shift+` `` | `terminal.new` | M5 |
 | Toggle bottom panel | `Cmd+J` | `Ctrl+J` | `workbench.toggleBottomPanel` | M1 |
 | Save file | `Cmd+S` | `Ctrl+S` | `file.save` | M3 |
+| Save all | `Cmd+Option+S` | `Ctrl+Alt+S` | `file.saveAll` | M3 |
+| Reveal active file in Explorer | `Cmd+Shift+E` | `Ctrl+Shift+E` | `explorer.revealActiveFile` | M2 |
 | Close tab | `Cmd+W` | `Ctrl+W` | `editor.closeTab` | M3 |
-| Next tab | `Cmd+Tab` | `Ctrl+Tab` | `editor.nextTab` | M3 |
-| Previous tab | `Cmd+Shift+Tab` | `Ctrl+Shift+Tab` | `editor.previousTab` | M3 |
+| Next tab | `Ctrl+Tab` | `Ctrl+Tab` | `editor.nextTab` | M3 |
+| Previous tab | `Ctrl+Shift+Tab` | `Ctrl+Shift+Tab` | `editor.previousTab` | M3 |
 | Find in file | `Cmd+F` | `Ctrl+F` | `editor.find` | M3 |
 | Search workspace | `Cmd+Shift+F` | `Ctrl+Shift+F` | `workbench.searchWorkspace` | M4 |
 | Go to line | `Cmd+G` | `Ctrl+G` | `editor.goToLine` | M3 |
@@ -49,6 +53,9 @@ to `Cmd` on macOS and `Ctrl` on Windows/Linux.
 | Duplicate line down | `Shift+Option+Down` | `Shift+Alt+Down` | `editor.duplicateLineDown` | M3 |
 | Run current file or selection | `Cmd+Enter` | `Ctrl+Enter` | `editor.run` | M8 |
 | Preview Markdown/HTML/LaTeX | `Cmd+Shift+V` | `Ctrl+Shift+V` | `preview.open` | M11 |
+| Zoom in | `Cmd+=` / `Cmd+Shift+=` | `Ctrl+=` / `Ctrl+Shift+=` | `view.zoomIn` | M10 |
+| Zoom out | `Cmd+-` / `Cmd+Shift+-` | `Ctrl+-` / `Ctrl+Shift+-` | `view.zoomOut` | M10 |
+| Reset zoom | `Cmd+0` | `Ctrl+0` | `view.resetZoom` | M10 |
 | Close palette / quick open / find / modal | `Esc` | `Esc` | `workbench.dismiss` | M4 |
 
 ### Notes on specific bindings
@@ -57,10 +64,10 @@ to `Cmd` on macOS and `Ctrl` on Windows/Linux.
   handled by the editor layer but dispatches the same `editor.goToDefinition` command, so it shares
   behavior with `F12`. In the keymap JSON it is expressed with the `click` key token (see below).
 - **`editor.run`** is context-aware: with an active selection it runs the selected code; with no
-  selection it runs the current file. In the Julia-first workflow this routes to the Julia
-  run-file / run-selection integration (M8). Active `.jl` tabs also expose a
-  tab-bar Run button that dispatches the same command. The `juliaPath` setting
-  determines the interpreter.
+  selection it runs the current file through the matching built-in run profile.
+  Active `.jl`, `.py`, `.js`/`.mjs`/`.cjs`, `.sh`/`.bash`/`.zsh`, and `.r`
+  tabs also expose a tab-bar Run button that dispatches the same command.
+  Runtime overrides live under `runtimePaths`.
 - **`preview.open`** toggles rendered preview for active Markdown and HTML
   source tabs. For active `.tex` files, it saves the current buffer, compiles
   that file, and opens the resulting PDF as a viewer tab. PDF and image files
@@ -76,8 +83,8 @@ to `Cmd` on macOS and `Ctrl` on Windows/Linux.
   removes the previous same-name PDF first, writes the fresh PDF beside the
   source, refreshes the Explorer, and leaves the `.tex` tab active.
 - **`editor.goToDefinition` / `editor.findReferences`** are served by the generic JSON-RPC LSP
-  client (M9). They require an active language server — Julia LanguageServer.jl first, then Python
-  (pyright), then C# (csharp-ls / OmniSharp).
+  client (M9). They require an active language server. Built-in profiles cover Julia, Python,
+  TypeScript/JavaScript, Rust, C/C++, Go, C#, and R.
 - **`workbench.dismiss`** (`Esc`) is a single command that closes whichever transient surface is
   open — command palette, quick open, the in-editor find box, or a modal panel — based on the
   current `when` context. See [The `when` clause](#the-when-clause).

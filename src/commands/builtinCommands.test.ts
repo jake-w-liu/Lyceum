@@ -7,8 +7,10 @@ import { initialLayoutData, useLayoutStore } from "../state/layoutStore";
 import { initialThemeData, useThemeStore } from "../state/themeStore";
 import { initialEditorData, useEditorStore } from "../state/editorStore";
 import { initialPreviewData, usePreviewStore } from "../state/previewStore";
+import { initialSettingsData, useSettingsStore } from "../state/settingsStore";
 
 const runLatexBuildMock = vi.hoisted(() => vi.fn());
+const runActiveCodeMock = vi.hoisted(() => vi.fn());
 const writePtyMock = vi.hoisted(() => vi.fn());
 const invokeMock = vi.hoisted(() =>
   vi.fn(async (..._args: unknown[]) => undefined),
@@ -16,6 +18,9 @@ const invokeMock = vi.hoisted(() =>
 const askMock = vi.hoisted(() => vi.fn(async (..._args: unknown[]) => true));
 vi.mock("../lib/latexBuild", () => ({
   runLatexBuild: (...args: unknown[]) => runLatexBuildMock(...args),
+}));
+vi.mock("../lib/codeRun", () => ({
+  runActiveCode: (...args: unknown[]) => runActiveCodeMock(...args),
 }));
 vi.mock("../lib/terminal", () => ({
   writePty: (...args: unknown[]) => writePtyMock(...args),
@@ -35,7 +40,9 @@ beforeEach(() => {
   useThemeStore.setState(initialThemeData, false);
   useEditorStore.setState(initialEditorData, false);
   usePreviewStore.setState(initialPreviewData, false);
+  useSettingsStore.setState(initialSettingsData, false);
   runLatexBuildMock.mockClear();
+  runActiveCodeMock.mockClear();
   writePtyMock.mockClear();
   invokeMock.mockClear();
   askMock.mockReset().mockResolvedValue(true);
@@ -120,6 +127,35 @@ describe("builtinCommands", () => {
     await commandRegistry.execute("latex.build");
 
     expect(runLatexBuildMock).toHaveBeenCalledWith({ openOnSuccess: false });
+  });
+
+  it("editor.run dispatches the generic code runner", async () => {
+    await commandRegistry.execute("editor.run");
+    expect(runActiveCodeMock).toHaveBeenCalledOnce();
+  });
+
+  it("julia.repl opens a Julia terminal profile", async () => {
+    await commandRegistry.execute("julia.repl");
+    expect(useTerminalStore.getState().terminals).toMatchObject([
+      { title: "Julia REPL", startupCommand: "julia\r" },
+    ]);
+    expect(useLayoutStore.getState().activeBottomTab).toBe("terminal");
+  });
+
+  it("python.repl opens a Python terminal profile", async () => {
+    await commandRegistry.execute("python.repl");
+    expect(useTerminalStore.getState().terminals).toMatchObject([
+      { title: "Python REPL", startupCommand: "python3\r" },
+    ]);
+    expect(useLayoutStore.getState().activeBottomTab).toBe("terminal");
+  });
+
+  it("node.repl opens a Node terminal profile", async () => {
+    await commandRegistry.execute("node.repl");
+    expect(useTerminalStore.getState().terminals).toMatchObject([
+      { title: "Node REPL", startupCommand: "node\r" },
+    ]);
+    expect(useLayoutStore.getState().activeBottomTab).toBe("terminal");
   });
 
   it("terminal.runSelection writes to the live backend PTY id", async () => {

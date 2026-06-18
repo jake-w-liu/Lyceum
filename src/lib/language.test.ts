@@ -10,7 +10,9 @@ describe("languageForPath", () => {
     expect(languageForPath("X.TSX")).toBe("typescript");
     expect(languageForPath("main.jl")).toBe("julia");
     expect(languageForPath("x.py")).toBe("python");
+    expect(languageForPath("stats.R")).toBe("r");
     expect(languageForPath("lib.rs")).toBe("rust");
+    expect(languageForPath("main.go")).toBe("go");
     expect(languageForPath("a.cpp")).toBe("cpp");
     expect(languageForPath("p.cs")).toBe("csharp");
     expect(languageForPath("r.md")).toBe("markdown");

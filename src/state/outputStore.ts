@@ -1,4 +1,4 @@
-// Output panel state (M8): captured lines from runs (e.g. Julia) shown in the
+// Output panel state: captured lines from runs and builds shown in the
 // bottom panel's Output tab.
 
 import { create } from "zustand";
@@ -6,7 +6,7 @@ import { create } from "zustand";
 export interface OutputData {
   lines: string[];
   running: boolean;
-  /** Backend run id of the in-flight run (Julia/build), for cancellation. */
+  /** Backend run id of the in-flight run/build, for cancellation. */
   runId: string | null;
 }
 

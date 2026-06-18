@@ -1,27 +1,31 @@
-// Julia run-file / run-selection (M8). Spawns the Julia executable and streams
-// its stdout/stderr to the frontend as `julia:output:<id>` events, with a
-// `julia:exit:<id>` carrying the exit code. The pure argument/resolution logic
-// is unit-tested; the spawn/stream path mirrors the terminal and is smoke-tested.
+// Process run support. Built-in run profiles use `run_process` and stream
+// stdout/stderr to the frontend as `run:output:<id>` events, with a
+// `run:exit:<id>` carrying the exit code. The legacy `run_julia` command is kept
+// for compatibility with older frontends.
 //
 // Running children are tracked in `RunManager` (id -> pid) so a long-running or
 // hung run can be cancelled from the UI via `run_cancel`; entries are removed on
 // natural exit. This mirrors the terminal/LSP managers, which retain kill handles.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
+
+use crate::path_access::{self, PathAccessManager};
 
 /// id -> OS pid of the running child, so runs can be cancelled and cleaned up.
 pub(crate) type RunMap = Arc<Mutex<HashMap<String, u32>>>;
 
-/// Tauri-managed registry of in-flight Julia/build runs.
+/// Tauri-managed registry of in-flight code/build runs.
 #[derive(Default)]
 pub struct RunManager {
     pub(crate) runs: RunMap,
@@ -29,12 +33,13 @@ pub struct RunManager {
     /// raced the spawn). `stream_child` consults this right after it inserts and
     /// kills immediately, so a Stop click during the spawn window is honored
     /// instead of being silently lost.
-    pub(crate) pending_cancel: Arc<Mutex<HashSet<String>>>,
+    pub(crate) pending_cancel: Arc<Mutex<HashMap<String, u64>>>,
+    pub(crate) pending_cancel_seq: Arc<AtomicU64>,
 }
 
 impl RunManager {
     /// Kill every in-flight run (whole process group each). Called on app exit
-    /// so a long-running Julia process is not orphaned when Lyceum quits.
+    /// so a long-running child process is not orphaned when Lyceum quits.
     /// Entries are drained under the lock, but the (blocking) kills happen
     /// after the guard is dropped so reaper threads are never blocked on it.
     pub fn shutdown_all(&self) {
@@ -70,7 +75,7 @@ impl RunManager {
         // after the window is gone (e.g. a cancel that raced a spawn which then
         // errored before registering).
         if let Ok(mut pending) = self.pending_cancel.lock() {
-            pending.retain(|key| !key.starts_with(&prefix));
+            pending.retain(|key, _token| !key.starts_with(&prefix));
         }
         for pid in pids {
             kill_pid(pid);
@@ -92,6 +97,37 @@ pub fn resolve_julia(explicit: Option<String>) -> String {
         env::var_os("PATH").as_deref(),
         env::var_os("HOME").as_deref(),
     )
+}
+
+pub fn resolve_program(program: &str, fallback_programs: &[String]) -> String {
+    resolve_program_with_env(
+        program,
+        fallback_programs,
+        env::var_os("PATH").as_deref(),
+        env::var_os("HOME").as_deref(),
+    )
+}
+
+fn resolve_program_with_env(
+    program: &str,
+    fallback_programs: &[String],
+    path: Option<&OsStr>,
+    home: Option<&OsStr>,
+) -> String {
+    let search_path = augmented_path(path, home);
+    for candidate in std::iter::once(program).chain(fallback_programs.iter().map(String::as_str)) {
+        let candidate = candidate.trim();
+        if candidate.is_empty() {
+            continue;
+        }
+        if let Some(resolved) = find_program_in_path(candidate, &search_path) {
+            return resolved.to_string_lossy().into_owned();
+        }
+        if Path::new(candidate).components().count() > 1 {
+            return candidate.to_string();
+        }
+    }
+    program.trim().to_string()
 }
 
 fn resolve_julia_with_env(
@@ -187,6 +223,76 @@ pub fn julia_args(file: Option<&str>, code: Option<&str>) -> Vec<String> {
         return vec![f.to_string()];
     }
     Vec::new()
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunProcessRequest {
+    id: String,
+    profile_id: String,
+    program: String,
+    #[serde(default)]
+    fallback_programs: Vec<String>,
+    #[serde(default)]
+    args: Vec<String>,
+    cwd: Option<String>,
+}
+
+fn is_allowed_python_runtime(name: &str) -> bool {
+    if name == "python" || name == "py" || name == "python3" {
+        return true;
+    }
+    let Some(version) = name.strip_prefix("python3.") else {
+        return false;
+    };
+    version
+        .split('.')
+        .all(|segment| !segment.is_empty() && segment.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn is_allowed_run_profile_program(profile_id: &str, name: &str) -> Option<bool> {
+    match profile_id {
+        "julia" => Some(name == "julia"),
+        "python" => Some(is_allowed_python_runtime(name)),
+        "node" => Some(name == "node"),
+        "shell" => Some(matches!(name, "sh" | "bash" | "zsh")),
+        "r" => Some(name == "rscript"),
+        _ => None,
+    }
+}
+
+fn normalized_program_name(program: &str) -> Option<String> {
+    let trimmed = program.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let file_name = Path::new(trimmed)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(trimmed);
+    #[cfg(windows)]
+    let file_name = file_name.strip_suffix(".exe").unwrap_or(file_name);
+    Some(file_name.to_ascii_lowercase())
+}
+
+pub(crate) fn validate_run_profile_programs(
+    profile_id: &str,
+    program: &str,
+    fallback_programs: &[String],
+) -> Result<(), String> {
+    for candidate in std::iter::once(program).chain(fallback_programs.iter().map(String::as_str)) {
+        let Some(name) = normalized_program_name(candidate) else {
+            continue;
+        };
+        let allowed = is_allowed_run_profile_program(profile_id, &name)
+            .ok_or_else(|| format!("unsupported run profile: {profile_id}"))?;
+        if !allowed {
+            return Err(format!(
+                "run profile {profile_id} cannot start executable {candidate}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Serialize)]
@@ -325,7 +431,7 @@ pub(crate) fn configure_process_group(command: &mut Command) {
 }
 
 /// Send a terminating signal to a process by pid (best-effort, cross-platform).
-fn kill_pid(pid: u32) {
+pub(crate) fn kill_pid(pid: u32) {
     #[cfg(windows)]
     {
         let _ = Command::new("taskkill")
@@ -339,15 +445,17 @@ fn kill_pid(pid: u32) {
         let Some(raw_pid) = to_pid_t(pid) else {
             return;
         };
-        // Children spawned by `run_julia`/latex builds are placed in a process
+        // Children spawned by code runs / latex builds are placed in a process
         // group whose id is their pid. Only send a group signal after verifying
         // that relationship; otherwise a stale or unrelated process group with
         // the same numeric id could receive SIGTERM.
-        if process_group_id(raw_pid) == Some(raw_pid) {
-            send_sigterm(-raw_pid);
+        let signalled_group = process_group_id(raw_pid) == Some(raw_pid);
+        if signalled_group {
+            send_signal(-raw_pid, libc::SIGTERM);
         }
         // Fallback for any child that was not placed into its own process group.
-        send_sigterm(raw_pid);
+        send_signal(raw_pid, libc::SIGTERM);
+        schedule_sigkill_escalation(raw_pid, signalled_group);
     }
 }
 
@@ -369,7 +477,7 @@ fn kill_process_group(pid: u32) {
     #[cfg(not(windows))]
     {
         if let Some(raw_pid) = to_pid_t(pid) {
-            send_sigterm(-raw_pid);
+            send_signal(-raw_pid, libc::SIGTERM);
         }
     }
 }
@@ -389,12 +497,89 @@ fn process_group_id(pid: libc::pid_t) -> Option<libc::pid_t> {
 }
 
 #[cfg(not(windows))]
-fn send_sigterm(pid: libc::pid_t) {
+fn send_signal(pid: libc::pid_t, signal: libc::c_int) {
     // SAFETY: libc::kill only asks the OS to signal a pid/process group. Errors
     // are intentionally ignored because cancellation is best-effort.
     unsafe {
-        libc::kill(pid, libc::SIGTERM);
+        libc::kill(pid, signal);
     }
+}
+
+#[cfg(not(windows))]
+fn schedule_sigkill_escalation(pid: libc::pid_t, signalled_group: bool) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(2));
+        if signalled_group && process_group_id(pid) == Some(pid) {
+            send_signal(-pid, libc::SIGKILL);
+        }
+        if process_exists(pid) {
+            send_signal(pid, libc::SIGKILL);
+        }
+    });
+}
+
+#[cfg(not(windows))]
+fn process_exists(pid: libc::pid_t) -> bool {
+    // SAFETY: signal 0 performs existence/permission probing only.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// Run a configured process profile, streaming output to the frontend.
+#[tauri::command]
+pub fn run_process(
+    app: AppHandle,
+    window: tauri::Window,
+    state: State<RunManager>,
+    access: State<'_, PathAccessManager>,
+    request: RunProcessRequest,
+) -> Result<(), String> {
+    let RunProcessRequest {
+        id,
+        profile_id,
+        program,
+        fallback_programs,
+        args,
+        cwd,
+    } = request;
+    if program.trim().is_empty() {
+        return Err("run profile command is empty".to_string());
+    }
+    validate_run_profile_programs(&profile_id, &program, &fallback_programs)?;
+    let resolved_program = resolve_program(&program, &fallback_programs);
+    let path = augmented_path(
+        env::var_os("PATH").as_deref(),
+        env::var_os("HOME").as_deref(),
+    );
+
+    let mut command = Command::new(&resolved_program);
+    command
+        .args(&args)
+        .env("PATH", path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(dir) = cwd {
+        if !dir.is_empty() {
+            let cwd =
+                path_access::ensure_existing_dir_allowed(&app, &window, &access, Path::new(&dir))?;
+            command.current_dir(cwd);
+        }
+    }
+    configure_process_group(&mut command);
+
+    let child = command
+        .spawn()
+        .map_err(|e| format!("failed to start {resolved_program}: {e}"))?;
+    stream_child(
+        app,
+        window.label().to_string(),
+        child,
+        run_key(&window, &id),
+        state.runs.clone(),
+        state.pending_cancel.clone(),
+        format!("run:output:{id}"),
+        format!("run:exit:{id}"),
+    );
+    Ok(())
 }
 
 /// Run a Julia file or inline code, streaming output to the frontend.
@@ -457,7 +642,7 @@ pub(crate) fn stream_child(
     mut child: Child,
     key: String,
     runs: RunMap,
-    pending_cancel: Arc<Mutex<HashSet<String>>>,
+    pending_cancel: Arc<Mutex<HashMap<String, u64>>>,
     out_event: String,
     exit_event: String,
 ) {
@@ -467,15 +652,17 @@ pub(crate) fn stream_child(
     // happen while holding the `runs` lock, so they cannot interleave into a gap
     // where neither side acts: either we observe the tombstone here, or
     // `run_cancel` observes our registration there.
-    let cancelled_during_spawn = {
+    let (cancelled_during_spawn, replaced_pid) = {
         let mut runs = runs.lock().unwrap();
-        if pending_cancel.lock().unwrap().remove(&key) {
-            true
+        if pending_cancel.lock().unwrap().remove(&key).is_some() {
+            (true, None)
         } else {
-            runs.insert(key.clone(), pid);
-            false
+            (false, runs.insert(key.clone(), pid))
         }
     };
+    if let Some(old_pid) = replaced_pid {
+        kill_pid(old_pid);
+    }
     if cancelled_during_spawn {
         // Don't register; kill now. The pumps/reaper below still run so the child
         // is reaped (no zombie) and the exit event still fires for the UI.
@@ -534,6 +721,9 @@ pub(crate) fn stream_child(
             kill_process_group(pid);
         }
         let _ = app.emit_to(label.as_str(), &exit_event, code);
+        if let Ok(mut pending) = pending_cancel.lock() {
+            pending.remove(&key);
+        }
     });
 }
 
@@ -557,20 +747,44 @@ pub fn run_cancel(
     // tombstone insert, matching `stream_child`'s ordering, so a cancel that
     // races the spawn cannot slip through a gap: if the child isn't registered
     // yet, we leave a tombstone that `stream_child` will honor on registration.
+    let mut pending_expiry: Option<u64> = None;
     let pid = {
         let mut runs = state.runs.lock().unwrap();
         match runs.remove(&key) {
             Some(pid) => Some(pid),
             None => {
-                state.pending_cancel.lock().unwrap().insert(key);
+                let token = state.pending_cancel_seq.fetch_add(1, Ordering::Relaxed);
+                state
+                    .pending_cancel
+                    .lock()
+                    .unwrap()
+                    .insert(key.clone(), token);
+                pending_expiry = Some(token);
                 None
             }
         }
     };
     if let Some(pid) = pid {
         kill_pid(pid);
+    } else if let Some(token) = pending_expiry {
+        expire_pending_cancel(state.pending_cancel.clone(), key, token);
     }
     Ok(())
+}
+
+fn expire_pending_cancel(
+    pending_cancel: Arc<Mutex<HashMap<String, u64>>>,
+    key: String,
+    token: u64,
+) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(5));
+        if let Ok(mut pending) = pending_cancel.lock() {
+            if pending.get(&key).copied() == Some(token) {
+                pending.remove(&key);
+            }
+        }
+    });
 }
 
 #[cfg(test)]
@@ -642,6 +856,60 @@ mod tests {
 
         assert_eq!(resolved, executable.to_string_lossy());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_program_uses_first_available_fallback() {
+        let root =
+            std::env::temp_dir().join(format!("lyceum-run-profile-test-{}", std::process::id()));
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let executable = bin.join("python");
+        std::fs::write(&executable, b"").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&executable, permissions).unwrap();
+        }
+        let path = env::join_paths([bin.as_path()]).unwrap();
+
+        let resolved = resolve_program_with_env(
+            "definitely-not-a-lyceum-test-command",
+            &["python".to_string(), "py".to_string()],
+            Some(path.as_os_str()),
+            None,
+        );
+
+        assert_eq!(resolved, executable.to_string_lossy());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolve_program_keeps_explicit_paths() {
+        assert_eq!(
+            resolve_program_with_env("/opt/tools/runtime", &[], None, None),
+            "/opt/tools/runtime"
+        );
+    }
+
+    #[test]
+    fn run_profile_validation_accepts_matching_runtime_names() {
+        assert!(validate_run_profile_programs("python", "/opt/python/bin/python3", &[]).is_ok());
+        assert!(validate_run_profile_programs("python", "/opt/python/bin/python3.12", &[]).is_ok());
+        assert!(validate_run_profile_programs(
+            "python",
+            "python3",
+            &["python".to_string(), "py".to_string()]
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn run_profile_validation_rejects_unknown_or_mismatched_programs() {
+        assert!(validate_run_profile_programs("python", "/bin/sh", &[]).is_err());
+        assert!(validate_run_profile_programs("unknown", "python3", &[]).is_err());
     }
 
     #[test]

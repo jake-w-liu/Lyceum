@@ -196,6 +196,7 @@ pub fn run() {
             terminal::terminal_write,
             terminal::terminal_resize,
             terminal::terminal_close,
+            julia::run_process,
             julia::run_julia,
             julia::run_cancel,
             latex::run_latex_build,

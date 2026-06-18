@@ -4,9 +4,9 @@
 
 <h1 align="center">Lyceum</h1>
 
-<p align="center"><em>A lightweight, VS Code-inspired research IDE built with Tauri — Julia-first.</em></p>
+<p align="center"><em>A lightweight, VS Code-inspired research IDE built with Tauri.</em></p>
 
-A lightweight, VS Code-inspired **research IDE** built with Tauri, with a Julia-first workflow. It pairs a focused, familiar editor layout (activity bar, sidebar, editor area, bottom panel, status bar) with a Monaco-based code editor, integrated terminal, syntax highlighting, Markdown/HTML/PDF/image preview, and a generic LSP client. It is deliberately **not** a 1:1 VS Code clone — just a fast, focused editor for research work. All code is original and all dependencies are permissive open source; no VS Code source is copied.
+A lightweight, VS Code-inspired **research IDE** built with Tauri. It pairs a focused, familiar editor layout (activity bar, sidebar, editor area, bottom panel, status bar) with a Monaco-based code editor, integrated terminal, built-in run profiles, syntax highlighting, Markdown/HTML/PDF/image preview, and a generic LSP client. Julia remains a first-class built-in language, but Lyceum is designed as a general research and development editor rather than a single-language tool. It is deliberately **not** a 1:1 VS Code clone — just a fast, focused editor for research work. All code is original and all dependencies are permissive open source; no VS Code source is copied.
 
 ## Screenshot
 
@@ -22,10 +22,10 @@ A lightweight, VS Code-inspired **research IDE** built with Tauri, with a Julia-
 - **Editor:** Monaco Editor (lazy-loaded).
 - **Terminal:** xterm.js in the frontend; a real PTY in the Rust backend via the `portable-pty` crate. Output is streamed over Tauri events; input is sent via Tauri commands.
 - **Preview:** Markdown and sandboxed HTML inline previews, PDF.js (`pdfjs-dist`, lazy-loaded), plus raw-byte image previews for common browser image formats.
-- **Syntax highlighting:** Monaco built-in grammars first; Tree-sitter only where a language is missing or weak (e.g. Julia, LaTeX).
+- **Syntax highlighting:** Monaco built-in grammars first, with small custom Monarch grammars where Monaco is missing or weak (Julia, LaTeX, TOML).
 - **State management:** Zustand (small, simple stores). No Redux.
 - **Styling:** plain CSS with CSS custom properties for theming. No heavy UI framework.
-- **LSP:** a generic JSON-RPC LSP client. The Rust backend spawns language servers over stdio and bridges messages to the frontend via Tauri commands/events — Julia LanguageServer.jl first, then Python (`pyright`), then C# (`csharp-ls` or OmniSharp).
+- **LSP:** a generic JSON-RPC LSP client. The Rust backend spawns language servers over stdio and bridges messages to the frontend via Tauri commands/events. Built-in server profiles cover Julia LanguageServer.jl, Python (`pyright`), TypeScript/JavaScript (`typescript-language-server`), Rust (`rust-analyzer`), C/C++ (`clangd`), Go (`gopls`), C# (`csharp-ls`), and R (`languageserver`).
 - **Commands & keybindings:** a TypeScript command registry (every action is a command) plus a keybinding registry that maps shortcuts to command ids. Keybindings and settings are persisted as JSON in the OS app-config dir via Tauri.
 - **Testing:** Vitest + React Testing Library (frontend); `cargo test` (Rust). CI also runs npm audit, Rust clippy/fmt, cargo-audit, a production build, and a bundle-size gate.
 
@@ -210,9 +210,13 @@ credentials above.
 
 These are not required to build Lyceum itself:
 
-- **Julia** — required for the Julia run-file / run-selection workflow and Julia
-  LanguageServer.jl support. Lyceum searches common GUI-app paths such as
-  `~/.juliaup/bin`, and `juliaPath` can be set explicitly.
+- **Language runtimes** — required only for run profiles you use. Built-in run
+  profiles cover Julia (`julia`), Python (`python3`, falling back to `python` or
+  `py`), JavaScript (`node`), shell scripts (`sh` or `shellPath`), and R
+  (`Rscript`). Set `runtimePaths.<language>` when a runtime is not on `PATH`.
+- **Language servers** — required only for LSP features you use. Built-in LSP
+  profiles cover Julia, Python, TypeScript/JavaScript, Rust, C/C++, Go, C#, and
+  R. Lyceum degrades to plain editing when a server is not installed.
 - **TeX engine** — required for LaTeX preview/build. Lyceum's Rust builder
   auto-selects an installed `latexmk`, `tectonic`, `pdflatex`, `xelatex`, or
   `lualatex` when the default build command is unchanged. Custom commands still
@@ -221,7 +225,7 @@ These are not required to build Lyceum itself:
 ## Performance
 
 Startup stays fast because the heavy editors are code-split into lazy chunks and
-loaded only when first used — the verified **initial JS bundle is ~88 kB
+loaded only when first used — the verified **initial JS bundle is ~89 kB
 gzipped**, while
 Monaco, PDF.js, image preview, xterm.js, and markdown-it live in separate chunks
 fetched on demand. There is no Electron (the app uses the OS-native WebView via Tauri), no
@@ -279,8 +283,8 @@ Lyceum/
 - **M5** Embedded terminal (xterm.js + real shell process via PTY)
 - **M6** PDF.js viewer
 - **M7** Syntax highlighting + themes
-- **M8** Julia run-file and run-selection workflow
-- **M9** Generic LSP client + Julia LanguageServer.jl
+- **M8** Built-in run-file and run-selection profiles
+- **M9** Generic LSP client + built-in language-server profiles
 - **M10** Settings persistence + workspace restore
 - **M11** Markdown/LaTeX build-and-preview workflow
 - **M12** Performance pass + packaging
@@ -328,7 +332,7 @@ say **Ctrl**.
 
 See [docs/KEYBINDINGS.md](docs/KEYBINDINGS.md) for the full reference.
 
-## Julia and LaTeX
+## Run Profiles and LaTeX
 
 - **Explorer selection and delete undo:** click a file or folder normally to
   select and open/toggle it. Cmd/Ctrl-click toggles individual rows, and
@@ -345,10 +349,12 @@ See [docs/KEYBINDINGS.md](docs/KEYBINDINGS.md) for the full reference.
   workspace-local `.lyceum-trash/` folder hidden from the Explorer; with the
   Explorer focused, Cmd/Ctrl+Z restores the last delete and Cmd/Ctrl+Shift+Z or
   Ctrl+Y redoes it.
-- **Run Julia:** open a `.jl` file and click the tab-bar **Run** button, or
-  press Cmd/Ctrl+Enter. If text is selected, only the selection runs; otherwise
-  the whole file runs. Output appears in the bottom Output panel. The
-  `juliaPath` setting defaults to `julia` on `PATH`.
+- **Run code:** open a supported source file and click the tab-bar **Run**
+  button, or press Cmd/Ctrl+Enter. If text is selected, only the selection runs;
+  otherwise the whole file runs. Output appears in the bottom Output panel.
+  Built-in profiles cover `.jl`, `.py`, `.js`/`.mjs`/`.cjs`,
+  `.sh`/`.bash`/`.zsh`, and `.r` files. Runtime overrides live under
+  `runtimePaths`.
 - **Preview LaTeX:** open a `.tex` file and click the tab-bar **Preview** button
   (or run **Open Preview** from the command palette). Lyceum saves the current
   buffer, retargets `latexBuildCommand` to that file, runs it in the file's
@@ -364,6 +370,6 @@ See [docs/KEYBINDINGS.md](docs/KEYBINDINGS.md) for the full reference.
 
 ## Settings keys
 
-Persisted as JSON in the OS app-config dir: `theme`, `fontFamily`, `fontSize`, `lineHeight`, `ligatures`, `tabSize`, `wordWrap`, `shellPath`, `terminalCwdBehavior` (`workspaceRoot` | `currentFileDir`), `juliaPath`, `latexBuildCommand` (e.g. `latexmk -pdf main.tex`), `restoreWorkspaceOnStartup`, `minimap`, `lineNumbers`.
+Persisted as JSON in the OS app-config dir: `theme`, `fontFamily`, `fontSize`, `lineHeight`, `ligatures`, `tabSize`, `wordWrap`, `shellPath`, `terminalCwdBehavior` (`workspaceRoot` | `currentFileDir`), `runtimePaths`, `latexBuildCommand` (e.g. `latexmk -pdf main.tex`), `restoreWorkspaceOnStartup`, `minimap`, `lineNumbers`, `zoomLevel`.
 
 Themes: `dark`, `light`, and `hc`. See [docs/SETTINGS_SCHEMA.md](docs/SETTINGS_SCHEMA.md) for the full schema.

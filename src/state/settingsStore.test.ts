@@ -43,13 +43,43 @@ describe("mergeSettings", () => {
   });
 
   it("overrides only the provided valid keys", () => {
-    const result = mergeSettings({ theme: "light", minimap: false });
+    const result = mergeSettings({
+      theme: "light",
+      minimap: false,
+      runtimePaths: { python: "/opt/python" },
+    });
     expect(result.theme).toBe("light");
     expect(result.minimap).toBe(false);
+    expect(result.runtimePaths.python).toBe("/opt/python");
     expect(result).toEqual({
       ...DEFAULT_SETTINGS,
       theme: "light",
       minimap: false,
+      runtimePaths: { ...DEFAULT_SETTINGS.runtimePaths, python: "/opt/python" },
+    });
+  });
+
+  it("migrates the deprecated juliaPath key into runtimePaths.julia", () => {
+    expect(mergeSettings({ juliaPath: "/opt/julia" }).runtimePaths.julia).toBe(
+      "/opt/julia",
+    );
+    expect(
+      mergeSettings({
+        juliaPath: "/old/julia",
+        runtimePaths: { julia: "/new/julia" },
+      }).runtimePaths.julia,
+    ).toBe("/new/julia");
+  });
+
+  it("trims runtime path strings", () => {
+    expect(
+      mergeSettings({
+        runtimePaths: { python: "  /opt/python3  " },
+        juliaPath: "  /opt/julia  ",
+      }).runtimePaths,
+    ).toMatchObject({
+      python: "/opt/python3",
+      julia: "/opt/julia",
     });
   });
 

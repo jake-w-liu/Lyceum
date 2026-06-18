@@ -1,14 +1,14 @@
 # Architecture
 
 System architecture for **Lyceum**, a lightweight, VS Code-inspired **research IDE**
-built with Tauri (Julia-first workflow). This document is the canonical reference
+built with Tauri. This document is the canonical reference
 for component boundaries, the IPC model, the process model, module responsibilities,
 and the principal data flows.
 
 > **Hard constraint.** This is **not** a 1:1 VS Code clone. It is a focused editor
 > with a VS Code-like layout, common keybindings, code editing, terminal
-> integration, syntax highlighting, Markdown/HTML/PDF/image preview, and a
-> Julia-first workflow. Only
+> integration, syntax highlighting, Markdown/HTML/PDF/image preview, built-in
+> run profiles, and a generic LSP client. Only
 > original code and permissive open-source dependencies are used; no VS Code source
 > is copied.
 
@@ -22,7 +22,7 @@ and the principal data flows.
 | Editor | Monaco Editor (`monaco-editor` / `@monaco-editor/react`), lazy-loaded |
 | Terminal | `xterm.js` frontend; real PTY in Rust via the `portable-pty` crate |
 | Preview | Markdown, sandboxed HTML, PDF.js (`pdfjs-dist`), and raw-byte image previews |
-| Syntax highlighting | Monaco built-in grammars first; Tree-sitter only where weak (Julia, LaTeX) |
+| Syntax highlighting | Monaco built-in grammars first; custom Monarch grammars where weak or missing (Julia, LaTeX, TOML) |
 | State | Zustand (small stores), no Redux |
 | Styling | Plain CSS with CSS custom properties for theming, no UI framework |
 | LSP | Generic JSON-RPC client; Rust spawns servers over stdio, bridges to frontend |
@@ -274,9 +274,8 @@ The full default keymap, including all required shortcuts, is documented in
 ## 7. Generic LSP client layer
 
 The LSP layer is **language-agnostic**. The backend speaks JSON-RPC over a child
-process's stdio; the frontend speaks LSP semantics. Server order per the roadmap:
-**Julia LanguageServer.jl first**, then Python (**pyright**), then C#
-(**csharp-ls** / **OmniSharp**).
+process's stdio; the frontend speaks LSP semantics. Built-in server profiles
+cover Julia, Python, TypeScript/JavaScript, Rust, C/C++, Go, C#, and R.
 
 ### 7.1 Backend (`src-tauri/src/lsp.rs`)
 
@@ -339,9 +338,8 @@ This satisfies `F12` (go to definition), `Shift+F12` (find references), and
   `EditorArea.tsx` map to models tracked in `editorStore.ts` (path, dirty flag,
   view state). Switching tabs swaps the model and restores the saved view state.
 - **Highlighting.** Monaco's **built-in** grammars cover Python, C#, C/C++, Rust,
-  JS/TS, Markdown, JSON/YAML/TOML, and Bash. **Tree-sitter** is used only where
-  Monaco is weak/missing — notably **Julia** and **LaTeX** — registered as custom
-  tokenizers/providers. This matches the "built-in first" rule.
+  JS/TS, Markdown, JSON/YAML/TOML, and Bash. Small custom Monarch grammars cover
+  **Julia**, **LaTeX**, and **TOML** where Monaco is weak or missing.
 - **Editor keybindings.** Native Monaco actions provide find (`Cmd/Ctrl+F`),
   go-to-line (`Cmd/Ctrl+G`), toggle comment (`Cmd/Ctrl+/`), move line
   (`Alt/Option+Up/Down`), and duplicate line (`Shift+Alt/Option+Up/Down`).
@@ -419,11 +417,12 @@ the **Tauri path API** (`app.path().app_config_dir()`), centralized in
   `%APPDATA%/<bundle-id>/`, Linux `~/.config/<bundle-id>/`.
 - Commands: `app_config_path`, `read_file`, and `write_file`. Settings are loaded
   once on startup and pushed into `settingsStore.ts`, which applies them to the
-  UI, Monaco, terminal launch options, Julia, and LaTeX build commands.
+  UI, Monaco, terminal launch options, run profiles, and LaTeX build commands.
 - **Persisted settings keys** (full schema in `docs/SETTINGS_SCHEMA.md`):
   `theme`, `fontFamily`, `fontSize`, `lineHeight`, `ligatures`, `tabSize`,
-  `wordWrap`, `shellPath`, `terminalCwdBehavior`, `juliaPath`,
-  `latexBuildCommand`, `restoreWorkspaceOnStartup`, `minimap`, `lineNumbers`.
+  `wordWrap`, `shellPath`, `terminalCwdBehavior`, `runtimePaths`,
+  `latexBuildCommand`, `restoreWorkspaceOnStartup`, `minimap`, `lineNumbers`,
+  `zoomLevel`.
 - `restoreWorkspaceOnStartup` controls whether `workspace.json` is replayed at
   launch (M10).
 
@@ -443,14 +442,15 @@ the **Tauri path API** (`app.path().app_config_dir()`), centralized in
 5. If a language server for that text language is configured, `lspClient.ts` sends
    `textDocument/didOpen`.
 
-### 13.2 Run Julia selection
+### 13.2 Run code selection
 
-1. User clicks the tab-bar Run button on a `.jl` file or presses
+1. User clicks the tab-bar Run button on a supported source file or presses
    `Cmd/Ctrl+Enter` (run current file or selected code).
-2. The `julia.run` command reads the editor selection (or whole file) from the
-   active Monaco model.
-3. It calls `run_julia` in `src-tauri/src/julia.rs`, which spawns `julia` (path
-   from the `juliaPath` setting) as a child process, passing the code/file.
+2. The `editor.run` command reads the editor selection (or whole file) from the
+   active Monaco model and selects the matching profile from `runProfiles.ts`.
+3. It calls `run_process` in `src-tauri/src/julia.rs`, which spawns the runtime
+   from `runtimePaths` or the profile default as a child process, passing the
+   code/file arguments without shell interpolation.
 4. Backend streams the process stdout/stderr to the frontend via events; the
    output renders in the Output view inside `BottomPanel.tsx`.
 5. On exit, the backend emits a completion event; the status bar shows the run
@@ -507,11 +507,12 @@ Lyceum follows Tauri v2's capability/permission model — the WebView gets the
   filesystem, terminal, LSP, and process work is done through **our own
   `#[tauri::command]` functions**, which are themselves gated by the command
   allowlist in `lib.rs`.
-- **No arbitrary execution from the WebView.** The WebView cannot pass an
-  arbitrary program to the LSP or LaTeX build backends. LSP startup selects from
-  backend-known server ids (`julia`, `pyright`, `csharp`), Julia uses the
-  configured `juliaPath`, and LaTeX custom commands are parsed and accepted only
-  when the executable is one of `latexmk`, `tectonic`, `pdflatex`, `xelatex`, or
+- **Constrained process execution.** LSP startup selects from backend-known
+  server ids (`julia`, `pyright`, `typescript`, `rust-analyzer`, `clangd`,
+  `gopls`, `csharp`, `r`). Code runs are selected from built-in profiles; the
+  backend validates the profile id and executable basename before argv-based
+  process spawning. LaTeX custom commands are parsed and accepted only when the
+  executable is one of `latexmk`, `tectonic`, `pdflatex`, `xelatex`, or
   `lualatex`.
 - **Path validation.** `path_access.rs` stores per-window authorized workspace
   roots. `file_ops.rs`, `fs_ops.rs`, `walk.rs`, `search.rs`, `git.rs`, LSP, and

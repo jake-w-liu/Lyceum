@@ -1,8 +1,8 @@
 # Implementation Tracker
 
-Primary progress tracker for the lightweight, VS Code-inspired research IDE built with Tauri (Julia-first workflow). This file is GitHub-flavored markdown. Update checkboxes as work completes.
+Primary progress tracker for the lightweight, VS Code-inspired research IDE built with Tauri. This file is GitHub-flavored markdown. Update checkboxes as work completes.
 
-**HARD CONSTRAINT:** This is NOT a 1:1 VS Code clone. It is a focused editor with a VS Code-like layout, common keybindings, code editing, terminal integration, syntax highlighting, Markdown/HTML/PDF/image preview, and a Julia-first workflow. Use ONLY original code and permissive open-source dependencies. Do not copy VS Code source.
+**HARD CONSTRAINT:** This is NOT a 1:1 VS Code clone. It is a focused editor with a VS Code-like layout, common keybindings, code editing, terminal integration, syntax highlighting, Markdown/HTML/PDF/image preview, built-in run profiles, and a generic LSP client. Use ONLY original code and permissive open-source dependencies. Do not copy VS Code source.
 
 ## Canonical Tech Decisions (single source of truth)
 
@@ -14,7 +14,7 @@ Primary progress tracker for the lightweight, VS Code-inspired research IDE buil
 - [x] Syntax highlighting: Monaco built-in grammars first; custom Monarch grammars where missing (Julia, LaTeX, TOML) — Tree-sitter not needed for v1
 - [x] State management: Zustand (small, simple stores) — no Redux
 - [x] Styling: plain CSS with CSS custom properties (CSS variables) for theming — no heavy UI framework
-- [x] LSP: a generic JSON-RPC LSP client; Rust backend spawns language servers over stdio and bridges messages to the frontend via Tauri commands/events (order: Julia LanguageServer.jl, then Python pyright, then C# csharp-ls/OmniSharp)
+- [x] LSP: a generic JSON-RPC LSP client; Rust backend spawns language servers over stdio and bridges messages to the frontend via Tauri commands/events (built-in profiles: Julia, Python, TypeScript/JavaScript, Rust, C/C++, Go, C#, R)
 - [x] Command system: a TS command registry (every action is a command) + a keybinding registry mapping shortcuts to command ids; keybindings persisted as JSON; settings persisted as JSON in the OS app-config dir via Tauri
 - [x] Testing: Vitest + React Testing Library for the frontend; `cargo test` for Rust
 - [x] Performance: lazy-load Monaco, PDF.js/image previews, terminal, and LSP servers; no extension marketplace, no Electron, no background indexing in v1
@@ -188,35 +188,35 @@ Primary progress tracker for the lightweight, VS Code-inspired research IDE buil
   - [~] Julia/LaTeX tokenization verified via `tauri dev` smoke (Monarch needs the Monaco runtime)
   - [x] Frontend: switching theme updates the applied `data-theme` + Monaco theme (themeStore tests)
 
-### M8 — Julia run-file and run-selection workflow
+### M8 — Built-in run-file and run-selection profiles
 
-- [x] Run current file via Julia (Cmd/Ctrl+Enter → `editor.run`) — `juliaPath` defaults to `julia`; setting wiring in M10
-- [x] Run selected code in the active editor (selection → `julia -e <code>`)
-- [x] Tab-bar Run button for active `.jl` files dispatches the same run-file/run-selection path
-- [x] Stream Julia process stdout/stderr to the bottom panel Output tab (`julia:output:<id>` events)
+- [x] Run current file via built-in profiles (Cmd/Ctrl+Enter → `editor.run`) — `runtimePaths` overrides supported
+- [x] Run selected code in the active editor through profile-specific eval flags
+- [x] Tab-bar Run button for runnable source files dispatches the same run-file/run-selection path
+- [x] Stream process stdout/stderr to the bottom panel Output tab (`run:output:<id>` events)
 - [x] Handle run errors and non-zero exit codes in the UI (exit code + spawn errors shown)
 - [x] **Tests**
-  - [x] Rust: `resolve_julia` + `julia_args` (run-vs-file argument logic); real execution smoke-tested
-  - [x] Frontend: `runInvocation` chooses selection vs file correctly; outputStore append/clear/running
-  - [~] Cmd/Ctrl+Enter → editor.run → runActiveJulia path verified via `tauri dev` smoke
+  - [x] Rust: `resolve_program` fallbacks plus legacy `resolve_julia` / `julia_args`; real execution smoke-tested
+  - [x] Frontend: `runInvocation` chooses selection vs file correctly; run profiles, outputStore append/clear/running
+  - [~] Cmd/Ctrl+Enter → editor.run → runActiveCode path verified via `tauri dev` smoke
 
-### M9 — Generic LSP client + Julia LanguageServer.jl
+### M9 — Generic LSP client + built-in server profiles
 
 - [x] Generic JSON-RPC LSP client in `src/lsp/` (`jsonRpc.ts` — id correlation, notifications, dispose)
 - [x] Rust backend spawns language servers over stdio and bridges messages via commands/events (`lsp.rs`: framing + lsp_start/lsp_send/lsp_stop)
-- [x] Wire Julia LanguageServer.jl as the first server (`servers.ts` config; started on first `.jl` open)
+- [x] Wire built-in server profiles in `servers.ts`; started on first matching file open
 - [x] Editor integration: go to definition (F12 / Cmd/Ctrl+Click), find references (Shift+F12), hover, completion, diagnostics (`monacoLsp.ts` providers + markers)
 - [x] Server lifecycle (start → initialize/initialized → didOpen/didChange → stop) and per-language config (`lspClient.ts`); status in the status bar
-- [x] Extension points for Python (pyright) and C# (csharp-ls) — config entries already present
+- [x] Built-in profiles for Julia, Python, TypeScript/JavaScript, Rust, C/C++, Go, C#, and R
 - [x] **Tests**
-  - [x] Frontend: JSON-RPC client frames/correlates requests/responses/notifications (8 tests); protocol URI/initialize helpers (4); server selectors (5); LSP status store
+  - [x] Frontend: JSON-RPC client frames/correlates requests/responses/notifications (8 tests); protocol URI/initialize helpers (4); server selectors; LSP status store
   - [x] Rust: `encode_message` + `LspDecoder` framing across split/multiple chunks (6 cargo tests)
   - [~] Live definition/references/hover/diagnostics with a real server need `LanguageServer.jl` installed (multi-minute precompile) — verified by smoke; Monaco mapping is wired in `monacoLsp.ts`
 
 ### M10 — Settings persistence + workspace restore
 
 - [x] Settings store (Zustand) backed by JSON in the OS app-config dir via Tauri (`app_config_path` + `write_file` create-dirs)
-- [x] All settings keys implemented with defaults + validation (`settingsStore`); applied: theme, font family/size/lineHeight/ligatures, minimap, lineNumbers, wordWrap, tabSize → Monaco; juliaPath → run + LSP; shellPath + terminalCwdBehavior → terminal
+- [x] All settings keys implemented with defaults + validation (`settingsStore`); applied: theme, font family/size/lineHeight/ligatures, minimap, lineNumbers, wordWrap, tabSize → Monaco; runtimePaths → run + Julia LSP; shellPath + terminalCwdBehavior → terminal
 - [x] Keybinding persistence (the M4-deferred item): user `keybindings.json` loaded + merged over defaults (`keymapStore`)
 - [x] Settings editing via the `settings.json` file ("Open Settings (JSON)" command); a dedicated GUI settings panel is deferred (file-based, like VS Code)
 - [x] Workspace restore honoring `restoreWorkspaceOnStartup` (reopens the last folder); tab/layout restore is a future enhancement
@@ -239,7 +239,7 @@ Primary progress tracker for the lightweight, VS Code-inspired research IDE buil
 
 ### M12 — Performance pass + packaging
 
-- [x] Verify lazy-loading of Monaco, PDF.js, terminal, markdown (separate chunks; main bundle ~72 kB gzip)
+- [x] Verify lazy-loading of Monaco, PDF.js, terminal, markdown (separate chunks; initial JS bundle ~89 kB gzip)
 - [x] No background indexing, no extension marketplace, no Electron (native WebView via Tauri) — by design
 - [x] Measure bundle size; `chunkSizeWarningLimit` raised to acknowledge the intentional lazy editor chunks
 - [x] Produce a packaged Tauri release build (`npm run tauri build` → unsigned `.app`/`.dmg`; signing/notarization documented as post-v1)
