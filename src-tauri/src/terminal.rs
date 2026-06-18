@@ -227,10 +227,15 @@ pub fn terminal_create(
             }
         }
         drop(tx);
-        let _ = child.wait();
-        // The shell ended on its own (or was killed): drop the session so its
-        // PTY fds do not linger in the map until the tab is closed. Only remove
-        // our own generation — a new session may have reused the id since.
+        // The shell hit EOF, so it is exiting. Remove our session from the map
+        // BEFORE reaping the child below: once `child.wait()` reaps the pid the OS
+        // may reuse it, and the stored killer signals the BARE pid (portable_pty
+        // ProcessSignaller). A concurrent terminal_close / shutdown_all /
+        // close_sessions_for_window that grabbed the entry after the reap would
+        // then deliver SIGHUP to whatever unrelated process reused the pid.
+        // Removing first means those closers observe a miss and never signal a
+        // freed/reused pid (the child is still ours, unreaped, in this window).
+        // Only remove our own generation — a new session may have reused the id.
         if let Some(manager) = app_for_reader.try_state::<TerminalManager>() {
             let mut sessions = manager.sessions.lock().unwrap();
             if sessions
@@ -240,6 +245,7 @@ pub fn terminal_create(
                 sessions.remove(&key_for_reader);
             }
         }
+        let _ = child.wait();
     });
 
     // Emitter thread: coalesce bursts (up to ~32 KiB or ~5 ms) into one event so

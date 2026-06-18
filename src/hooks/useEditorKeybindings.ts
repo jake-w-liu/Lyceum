@@ -65,6 +65,13 @@ export function focusAdjacentTab(dir: 1 | -1): void {
   const { docs, activePath, setActive } = useEditorStore.getState();
   if (docs.length === 0) return;
   const idx = docs.findIndex((d) => d.path === activePath);
+  if (idx === -1) {
+    // No active tab (e.g. docs opened in the background while activePath is
+    // null): Next selects the first tab, Previous the last — otherwise the
+    // modular math (-1 + dir + N) % N lands Previous on the second-to-last tab.
+    setActive(docs[dir === 1 ? 0 : docs.length - 1].path);
+    return;
+  }
   const nextIdx = (idx + dir + docs.length) % docs.length;
   setActive(docs[nextIdx].path);
 }

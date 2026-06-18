@@ -173,12 +173,21 @@ fn plan_latex_build_impl(
         return plan_auto_latex_build(&tex_name, cwd, pdf_path, process_path);
     }
 
+    // `command` is the DISPLAY string only (shell-quoted tex name): shown to the
+    // user and parsed for -output-directory/-jobname to locate the PDF.
     let command = retarget_tex_command(configured_command, &tex_name);
     // A custom command may relocate/rename the PDF via -output-directory/-jobname;
     // honor those so stale-removal, the "wrote …" message, and auto-open all point
     // at the real artifact instead of the default next-to-source path.
     let pdf_path = custom_pdf_path(&command, &tex_name, &cwd).unwrap_or(pdf_path);
-    let (program, args, tool) = parse_custom_latex_command(&command)?;
+    // Build the EXECUTED args from the configured command's unquoted tokens,
+    // substituting the RAW tex name for the .tex token. Routing the name through
+    // retarget's shell-quoting and then strip_shell_quotes (which removes only
+    // OUTER quotes) would leave quote_shell_arg's backslash escapes ($, \, ", `)
+    // literally in the args, so a file named `a$b.tex` would be spawned as the
+    // non-existent `a\$b.tex`. Args go straight to execve (no shell), so the raw
+    // name is exactly what the compiler must receive.
+    let (program, args, tool) = parse_custom_latex_command(configured_command, &tex_name)?;
     Ok(LatexBuildPlan {
         program,
         args,
@@ -325,11 +334,24 @@ fn custom_pdf_path(command: &str, tex_name: &str, cwd: &Path) -> Option<PathBuf>
     Some(dir.join(format!("{base}.pdf")))
 }
 
-fn parse_custom_latex_command(command: &str) -> Result<(String, Vec<String>, String), String> {
-    let tokens: Vec<String> = shell_token_spans(command)
+fn parse_custom_latex_command(
+    command: &str,
+    tex_name: &str,
+) -> Result<(String, Vec<String>, String), String> {
+    let mut tokens: Vec<String> = shell_token_spans(command)
         .iter()
         .map(|span| strip_shell_quotes(&command[span.start..span.end]).to_string())
         .collect();
+    // Substitute the real tex file name for the last .tex token (the user's
+    // placeholder, e.g. `main.tex`), or append it if the command has none. Using
+    // the RAW name keeps the spawned args free of any shell-escaping artifacts.
+    match tokens
+        .iter()
+        .rposition(|tok| tok.to_lowercase().ends_with(".tex"))
+    {
+        Some(idx) => tokens[idx] = tex_name.to_string(),
+        None => tokens.push(tex_name.to_string()),
+    }
     let (program, args) = tokens
         .split_first()
         .ok_or_else(|| "latexBuildCommand must start with a LaTeX compiler".to_string())?;
@@ -660,6 +682,23 @@ mod tests {
         assert_eq!(plan.command, r#"tectonic --keep-logs "paper.tex""#);
         assert_eq!(plan.program, "tectonic");
         assert_eq!(plan.args, vec!["--keep-logs", "paper.tex"]);
+    }
+
+    #[test]
+    fn custom_build_passes_raw_filename_with_shell_metacharacters() {
+        // A legal .tex name containing a shell metacharacter ($) must reach the
+        // compiler verbatim in the spawned args — they go straight to execve with
+        // no shell. Before the fix, the name was shell-quoted by retarget and then
+        // only OUTER-quote-stripped, leaving the escape literally in the arg
+        // (`a\$b.tex`), so the compiler built a non-existent file.
+        let tmp = tempfile::tempdir().unwrap();
+        let tex = tmp.path().join("a$b.tex");
+        std::fs::write(&tex, "\\documentclass{article}").unwrap();
+
+        let plan =
+            plan_latex_build_impl(&tex, "latexmk -pdf -silent main.tex", OsStr::new("")).unwrap();
+
+        assert_eq!(plan.args, vec!["-pdf", "-silent", "a$b.tex"]);
     }
 
     #[test]

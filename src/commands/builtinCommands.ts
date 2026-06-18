@@ -420,10 +420,15 @@ export function registerBuiltinCommands(): void {
       if (doc && root && doc.path.startsWith(root)) {
         const rel = doc.path.slice(root.length).replace(/^[/\\]/, "");
         const segments = rel.split(/[/\\]/).slice(0, -1);
+        // Tree node keys use the backend's native separator ("\" on Windows), so
+        // rebuild ancestor keys with the separator the path already uses — a
+        // hard-coded "/" would never match a "\"-keyed node, so the containing
+        // folders would not expand on Windows.
+        const sep = root.includes("\\") ? "\\" : "/";
         const ancestors = [root];
         let cur = root;
         for (const segment of segments) {
-          cur = `${cur}/${segment}`;
+          cur = `${cur}${sep}${segment}`;
           ancestors.push(cur);
         }
         useTreeStore.getState().expandPaths(ancestors);

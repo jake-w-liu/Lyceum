@@ -27,10 +27,17 @@ export async function reloadOpenEditorPaths(paths: string[]): Promise<void> {
     }
 
     if (!isTextDoc(doc) || doc.content !== doc.savedContent) continue;
+    // Capture savedContent BEFORE the async read. If the user saves new content
+    // during the read's IPC round-trip, the doc's savedContent changes; the
+    // store action below sees the mismatch and skips the overwrite, so stale
+    // disk bytes can never clobber a just-saved buffer (and its undo stack).
+    const expectedSavedContent = doc.savedContent;
 
     try {
       const content = await readFile(doc.path);
-      useEditorStore.getState().replaceCleanContentFromDisk(doc.path, content);
+      useEditorStore
+        .getState()
+        .replaceCleanContentFromDisk(doc.path, content, expectedSavedContent);
     } catch {
       // The path may have been deleted/renamed between the watcher event and
       // the read, or the read was refused by the backend's file-size cap (a

@@ -122,10 +122,16 @@ export interface EditorActions {
   updateContent: (path: string, content: string) => void;
   /**
    * Replace a clean text document with disk content observed through the
-   * workspace watcher. Dirty buffers are rechecked inside the action so an async
-   * file read can never overwrite edits typed while the read was in flight.
+   * workspace watcher. `expectedSavedContent` is the doc's savedContent captured
+   * before the async read began; the doc is left untouched if it has since
+   * become dirty OR its savedContent changed (a save landed during the read), so
+   * stale disk bytes can never overwrite a newer save.
    */
-  replaceCleanContentFromDisk: (path: string, content: string) => void;
+  replaceCleanContentFromDisk: (
+    path: string,
+    content: string,
+    expectedSavedContent: string,
+  ) => void;
   /** Force a remount/re-read of a binary viewer tab for the same path. */
   bumpReloadVersion: (path: string) => void;
   /**
@@ -273,10 +279,17 @@ export const useEditorStore = create<EditorState>()((set, get) => ({
       ),
     })),
 
-  replaceCleanContentFromDisk: (path, content) =>
+  replaceCleanContentFromDisk: (path, content, expectedSavedContent) =>
     set((s) => ({
       docs: s.docs.map((doc) => {
         if (doc.path !== path || doc.kind !== "text" || isDirty(doc)) {
+          return doc;
+        }
+        // The disk read was async; a save (or edit+save) may have completed
+        // while it was in flight, leaving the doc clean again but at NEWER
+        // content. If savedContent moved since the read started, these disk
+        // bytes are stale — skip rather than overwrite the newer save.
+        if (doc.savedContent !== expectedSavedContent) {
           return doc;
         }
         if (doc.content === content && doc.savedContent === content) {

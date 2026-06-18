@@ -452,10 +452,21 @@ pub(crate) fn kill_pid(pid: u32) {
         // the same numeric id could receive SIGTERM.
         let signalled_group = process_group_id(raw_pid) == Some(raw_pid);
         if signalled_group {
+            // Run/build children are placed in their own process group
+            // (configure_process_group). Signal the whole group so grandchildren
+            // (e.g. latexmk's pdflatex) holding the output pipes die too; this
+            // also covers the leader, so no separate bare signal is needed.
             send_signal(-raw_pid, libc::SIGTERM);
+        } else if process_group_id(raw_pid).is_some() {
+            // Not our own group leader, but the pid still EXISTS: a child not
+            // placed in its own group (e.g. a language server). Signal it directly.
+            // The guard is the fix for the reaped/reused-pid race: after a run is
+            // reaped its pid is freed and getpgid returns ESRCH (None) — a late
+            // run_cancel racing the reaper must NOT then SIGTERM a pid the OS may
+            // have reused for an unrelated process. (The delayed SIGKILL is
+            // likewise guarded; see sigkill_escalation_targets.)
+            send_signal(raw_pid, libc::SIGTERM);
         }
-        // Fallback for any child that was not placed into its own process group.
-        send_signal(raw_pid, libc::SIGTERM);
         schedule_sigkill_escalation(raw_pid, signalled_group);
     }
 }

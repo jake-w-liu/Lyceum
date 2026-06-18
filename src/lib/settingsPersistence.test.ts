@@ -135,6 +135,48 @@ describe("settingsPersistence", () => {
     expect(JSON.parse(disk).fontSize).toBe(15);
   });
 
+  it("re-persists a clamped value (not the invalid on-disk value) for an unchanged key", async () => {
+    vi.stubGlobal("__TAURI_INTERNALS__", {});
+    // settings.json was hand-edited to an out-of-range fontSize.
+    let disk = JSON.stringify({ ...DEFAULT_SETTINGS, fontSize: 9999 });
+    invokeMock.mockImplementation(async (_cmd: string, args: { name: string }) =>
+      `/config/${args.name}`,
+    );
+    readFileMock.mockImplementation(async () => disk);
+    writeFileMock.mockImplementation(async (_path: string, content: string) => {
+      disk = content;
+    });
+
+    initSettingsPersistence();
+    // Change an UNRELATED key so fontSize stays non-dirty (cross-window-preserved).
+    useSettingsStore.getState().setSetting("fontFamily", "Iosevka Test");
+    await saveSettings();
+
+    // The invalid 9999 must be clamped (max 40) on write, not copied back verbatim.
+    expect(JSON.parse(disk).fontSize).toBe(40);
+  });
+
+  it("writes the current settings version even when disk holds an older one", async () => {
+    vi.stubGlobal("__TAURI_INTERNALS__", {});
+    // An upgraded user's file still carries the old schema version on disk.
+    let disk = JSON.stringify({ ...DEFAULT_SETTINGS, version: 1 });
+    invokeMock.mockImplementation(async (_cmd: string, args: { name: string }) =>
+      `/config/${args.name}`,
+    );
+    readFileMock.mockImplementation(async () => disk);
+    writeFileMock.mockImplementation(async (_path: string, content: string) => {
+      disk = content;
+    });
+
+    initSettingsPersistence();
+    useSettingsStore.getState().setSetting("fontFamily", "Iosevka Test");
+    await saveSettings();
+
+    // version is owned by the running process and must advance, not stay pinned
+    // at the stale on-disk value (which would re-run version-gated migrations).
+    expect(JSON.parse(disk).version).toBe(DEFAULT_SETTINGS.version);
+  });
+
   it("flushes pending debounced settings and layout saves", async () => {
     vi.useFakeTimers();
     vi.stubGlobal("__TAURI_INTERNALS__", {});

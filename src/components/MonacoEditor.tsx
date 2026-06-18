@@ -121,6 +121,13 @@ export default function MonacoEditor() {
   const hostRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   const modelsRef = useRef<Map<string, monaco.editor.ITextModel>>(new Map());
+  // Per-tab Monaco view state (cursor, scroll, folds, selection). This lives on
+  // the per-model viewModel that setModel() destroys/recreates, NOT on the text
+  // model, so without explicit save/restore every tab switch resets the next tab
+  // to scroll-top / (1,1) / folds-open. Keyed by path; re-keyed on rename.
+  const viewStatesRef = useRef<
+    Map<string, monaco.editor.ICodeEditorViewState | null>
+  >(new Map());
   const currentPathRef = useRef<string | null>(null);
 
   const activePath = useEditorStore((s) => s.activePath);
@@ -178,6 +185,42 @@ export default function MonacoEditor() {
         );
       }
     }
+  }, []);
+
+  // Re-home a model left holding a stale, immutable URI by a prior same-language
+  // rename: its modelsRef key is the doc's CURRENT path, but the model's URI
+  // still points at the renamed-from path. Replace it with a fresh model at the
+  // correct URI so the old URI is freed for reuse (the re-homed doc loses undo
+  // history — the same tradeoff already accepted for language-changing renames).
+  // Detaches it first if it is the bound model; the caller binds the real active
+  // model immediately afterward.
+  const rehomeStaleModel = useCallback((stale: monaco.editor.ITextModel) => {
+    const editor = editorRef.current;
+    let key: string | null = null;
+    for (const [k, m] of modelsRef.current) {
+      if (m === stale) {
+        key = k;
+        break;
+      }
+    }
+    const session = getSession(stale.getLanguageId());
+    if (session) void didClose(session, lspUriForModel(stale));
+    if (editor?.getModel() === stale) editor.setModel(null);
+    clearLspUriOverride(stale);
+    const content = stale.getValue();
+    const language = stale.getLanguageId();
+    stale.dispose();
+    if (key === null) return; // untracked orphan — released above, nothing to re-home
+    const fresh = monaco.editor.createModel(
+      content,
+      language,
+      monaco.Uri.file(key),
+    );
+    fresh.updateOptions({
+      tabSize: useSettingsStore.getState().settings.tabSize,
+    });
+    modelsRef.current.set(key, fresh);
+    if (session) void didOpen(session, lspUriForModel(fresh), language, content);
   }, []);
 
   // Create the single editor instance once.
@@ -271,6 +314,7 @@ export default function MonacoEditor() {
     });
 
     const models = modelsRef.current;
+    const viewStates = viewStatesRef.current;
     const startedLangs = startedLangsRef.current;
     const timers = lspChangeTimers.current;
     const pendings = pendingLspChanges.current;
@@ -297,6 +341,7 @@ export default function MonacoEditor() {
         m.dispose();
       });
       models.clear();
+      viewStates.clear();
       // Stop the language servers this editor instance started.
       startedLangs.forEach((lang) => void stopServer(lang));
       startedLangs.clear();
@@ -326,6 +371,12 @@ export default function MonacoEditor() {
       flushLspChange(oldUri);
       modelsRef.current.delete(move.from);
       modelsRef.current.set(move.to, model);
+      // The model (and thus its view state) survives the rename — re-key it too.
+      const movedView = viewStatesRef.current.get(move.from);
+      if (movedView !== undefined) {
+        viewStatesRef.current.delete(move.from);
+        viewStatesRef.current.set(move.to, movedView);
+      }
       if (pendingStoreWrite?.path === move.from) {
         pendingStoreWrite = { ...pendingStoreWrite, path: move.to };
       }
@@ -350,6 +401,11 @@ export default function MonacoEditor() {
     flushPendingStoreWrite();
     const outgoing = editor.getModel();
     if (outgoing) flushLspChange(lspUriForModel(outgoing));
+    // Save the outgoing tab's view state before any model swap below, so it can
+    // be restored when this tab is next bound (see viewStatesRef).
+    if (currentPathRef.current && outgoing) {
+      viewStatesRef.current.set(currentPathRef.current, editor.saveViewState());
+    }
     if (activePath === null) {
       editor.setModel(null);
       currentPathRef.current = null;
@@ -366,11 +422,15 @@ export default function MonacoEditor() {
     }
     let model = modelsRef.current.get(activePath);
     if (!model) {
-      const created = monaco.editor.createModel(
-        doc.content,
-        doc.language,
-        monaco.Uri.file(doc.path),
-      );
+      const uri = monaco.Uri.file(doc.path);
+      // A prior same-language rename leaves the renamed doc's model keyed under
+      // its NEW path but still holding its OLD (immutable) URI. Opening a brand
+      // new file at that freed old path would collide with that orphan and make
+      // createModel throw ("model already exists"). Re-home the orphan onto a
+      // fresh model at its correct URI first, releasing this URI.
+      const colliding = monaco.editor.getModel(uri);
+      if (colliding && !colliding.isDisposed()) rehomeStaleModel(colliding);
+      const created = monaco.editor.createModel(doc.content, doc.language, uri);
       modelsRef.current.set(activePath, created);
       created.updateOptions({
         tabSize: useSettingsStore.getState().settings.tabSize,
@@ -407,8 +467,15 @@ export default function MonacoEditor() {
         );
       }
     }
-    if (editor.getModel() !== model) editor.setModel(model);
+    const switching = editor.getModel() !== model;
+    if (switching) editor.setModel(model);
     currentPathRef.current = activePath;
+    // Restore this tab's saved view state (cursor/scroll/folds/selection) on a
+    // real model swap; a freshly created model has none and stays at top/(1,1).
+    if (switching) {
+      const savedView = viewStatesRef.current.get(activePath);
+      if (savedView) editor.restoreViewState(savedView);
+    }
     // Sync the selection store to the newly-bound model so a stale selection
     // from the previous tab doesn't linger (run-selection would otherwise act
     // on text that is no longer visible).
@@ -421,7 +488,7 @@ export default function MonacoEditor() {
     useStatusStore
       .getState()
       .setCursor(position?.lineNumber ?? 1, position?.column ?? 1);
-  }, [activePath, openPaths, flushLspChange]);
+  }, [activePath, openPaths, flushLspChange, rehomeStaleModel]);
 
   // Reveal a requested position (e.g. a search result's line/column) once its
   // document is bound. The store field is consumed-and-cleared so a later tab
@@ -486,6 +553,7 @@ export default function MonacoEditor() {
         clearLspUriOverride(model);
         model.dispose();
         modelsRef.current.delete(path);
+        viewStatesRef.current.delete(path);
       }
     }
   }, [openPaths]);

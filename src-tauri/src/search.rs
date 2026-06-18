@@ -27,62 +27,72 @@ const SKIP_DIRS: [&str; 6] = [
 /// heap String. Mirrors the bound `lsp.rs` places on a single message.
 const MAX_FILE_SIZE: u64 = 16 * 1024 * 1024;
 
-/// Case-insensitive substring search returning the `[start, end)` byte span of
-/// the match in the ORIGINAL `haystack` (never in a lowercased copy), so both
-/// offsets land on char boundaries. `end` is where a non-overlapping next search
-/// should resume: it is the byte offset just past the LAST original char that
-/// contributed to the match, which matters when case folding is not length-
-/// preserving (e.g. 'İ' lowercases to two chars). `needle_lower` must already be
-/// lowercased. The common all-ASCII path allocates nothing; the Unicode path
-/// allocates only the per-window comparison string. Returns `None` if not found.
-fn find_ci(haystack: &str, needle_lower: &str) -> Option<(usize, usize)> {
-    if needle_lower.is_empty() {
-        return Some((0, 0));
+/// Byte offsets (each a char boundary in `line`) of up to `limit` non-overlapping
+/// case-insensitive matches of `needle_lower`, which must already be lowercased,
+/// in order. The line is case-folded AT MOST ONCE (the Unicode path), so a line
+/// with k matches costs O(line_len), not O(line_len * k) — re-folding the shrinking
+/// suffix per match froze the synchronous search command for tens of seconds on a
+/// multi-megabyte single non-ASCII line. The all-ASCII path allocates nothing.
+fn match_offsets(line: &str, needle_lower: &str, limit: usize) -> Vec<usize> {
+    let mut starts = Vec::new();
+    if needle_lower.is_empty() || limit == 0 {
+        return starts;
     }
-    if haystack.is_ascii() && needle_lower.is_ascii() {
-        let hay = haystack.as_bytes();
+    if line.is_ascii() && needle_lower.is_ascii() {
+        let hay = line.as_bytes();
         let needle = needle_lower.as_bytes();
-        let start = hay
-            .windows(needle.len())
-            .position(|w| w.eq_ignore_ascii_case(needle))?;
-        // ASCII case folding is 1:1 in length, so the original span is exactly
-        // the needle's length.
-        return Some((start, start + needle.len()));
+        if needle.len() > hay.len() {
+            return starts;
+        }
+        let mut i = 0usize;
+        while i + needle.len() <= hay.len() {
+            if hay[i..i + needle.len()].eq_ignore_ascii_case(needle) {
+                starts.push(i);
+                if starts.len() >= limit {
+                    return starts;
+                }
+                i += needle.len(); // non-overlapping
+            } else {
+                i += 1;
+            }
+        }
+        return starts;
     }
-    // Unicode fallback: lowercase the whole haystack once, recording for each
-    // produced char the byte offset of the ORIGINAL char it came from. A fixed
-    // char-count window (the previous approach) is wrong because case folding is
-    // not 1:1 in char count — e.g. 'İ' (U+0130) lowercases to the two chars
-    // "i\u{0307}", so a 1-char window could never equal a 1-char needle and the
-    // match was silently dropped. We search the lowercased copy and map the match
-    // back to a valid char-boundary byte offset in the original via the table.
-    let mut lowered = String::with_capacity(haystack.len());
-    // origin[i] = byte offset in `haystack` of the source char for lowered char i.
-    let mut origin: Vec<usize> = Vec::new();
-    for (byte_idx, ch) in haystack.char_indices() {
+    // Unicode: fold the whole line ONCE. `origin[b]` = byte offset in `line` of the
+    // source char that produced lowered byte `b` (always a valid `line` char
+    // boundary). Case folding is not 1:1 in length — e.g. 'İ' (U+0130) lowercases
+    // to "i\u{0307}" — so a fixed char-window scan would silently drop matches; we
+    // scan the lowercased copy and map positions back through `origin`.
+    let mut lowered = String::with_capacity(line.len());
+    let mut origin: Vec<usize> = Vec::with_capacity(line.len());
+    for (byte_idx, ch) in line.char_indices() {
         for lc in ch.to_lowercase() {
-            origin.push(byte_idx);
+            for _ in 0..lc.len_utf8() {
+                origin.push(byte_idx);
+            }
             lowered.push(lc);
         }
     }
-    let match_byte = lowered.find(needle_lower)?;
-    // Convert the byte offset within `lowered` to a char index, then map back to
-    // the original char's byte offset (always a valid char boundary in `haystack`).
-    let start_char = lowered[..match_byte].chars().count();
-    let start = origin[start_char];
-    // End: the lowered match ends at `match_byte + needle_lower.len()`. Map that
-    // back to the byte offset just past the LAST original char that contributed,
-    // so a match that consumes only part of a char's lowercase expansion (e.g.
-    // needle "i" matching the "i" of 'İ' -> "i\u{0307}") still advances past the
-    // whole 'İ' rather than re-matching or stalling.
-    let end_char = lowered[..match_byte + needle_lower.len()].chars().count();
-    let last_src_byte = origin[end_char - 1];
-    let end = haystack[last_src_byte..]
-        .chars()
-        .next()
-        .map(|c| last_src_byte + c.len_utf8())
-        .unwrap_or(haystack.len());
-    Some((start, end))
+    let needle_len = needle_lower.len();
+    let mut cursor = 0usize; // byte offset within `lowered`
+    while let Some(rel) = lowered[cursor..].find(needle_lower) {
+        let mb = cursor + rel;
+        starts.push(origin[mb]);
+        if starts.len() >= limit {
+            break;
+        }
+        // Advance past the matched needle AND the remainder of the last contributing
+        // original char's lowercase expansion, so a partial-expansion match (needle
+        // "i" vs 'İ' -> "i\u{0307}") still skips the whole 'İ'. `origin` is
+        // non-decreasing, so this walks only that one char's bytes — O(line_len)
+        // total across the loop.
+        let last_src = origin[mb + needle_len - 1];
+        cursor = mb + needle_len;
+        while cursor < origin.len() && origin[cursor] == last_src {
+            cursor += 1;
+        }
+    }
+    starts
 }
 
 /// Largest per-match line snippet returned to the frontend, in bytes. A match on
@@ -229,31 +239,26 @@ pub fn search_in_dir(root: &Path, query: &str, max: usize) -> Result<Vec<SearchM
                 }
                 // Snippet is cloned once per matching line, not once per match.
                 let snippet = line_snippet(raw_line);
-                // Report EVERY occurrence on the line (not just the first),
-                // advancing past each match, while still respecting the cap.
-                let mut search_from = 0usize;
-                while matches.len() < max && search_from < raw_line.len() {
-                    let Some((found, found_end)) = find_ci(&raw_line[search_from..], &needle)
-                    else {
-                        break;
-                    };
-                    // `byte_offset` indexes the original line on a char boundary.
-                    let byte_offset = search_from + found;
+                // Report EVERY occurrence on the line (not just the first), folding
+                // the line at most once (see match_offsets) and capping at the
+                // remaining global budget. `match_offsets` returns ascending,
+                // char-boundary byte offsets, so the UTF-16 column count below is
+                // accumulated incrementally — keeping the whole line O(line_len).
+                let mut prev_byte = 0usize;
+                let mut prev_utf16 = 0u32;
+                for byte_offset in match_offsets(raw_line, &needle, max - matches.len()) {
                     // Column is measured in UTF-16 code units, because Monaco (the
                     // frontend editor that consumes this column) measures columns
                     // in UTF-16 units. Counting chars (Unicode scalars) would place
                     // the cursor too far left by one per preceding astral character.
-                    let column = raw_line[..byte_offset].encode_utf16().count() as u32 + 1;
+                    prev_utf16 += raw_line[prev_byte..byte_offset].encode_utf16().count() as u32;
+                    prev_byte = byte_offset;
                     matches.push(SearchMatch {
                         path: path_str.clone(),
                         line: index as u32 + 1,
-                        column,
+                        column: prev_utf16 + 1,
                         text: snippet.clone(),
                     });
-                    // Advance to the END of the matched span in the ORIGINAL line
-                    // (returned by find_ci). The `.max(byte_offset + 1)` floor
-                    // guarantees forward progress even for a zero-width edge case.
-                    search_from = (search_from + found_end).max(byte_offset + 1);
                 }
             }
         }
@@ -517,6 +522,25 @@ mod tests {
     }
 
     #[test]
+    fn multiple_matches_on_a_non_ascii_line_all_reported() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        // A non-ASCII line (forces the fold path) with the needle repeated. The
+        // line is folded ONCE and every occurrence is reported with the correct
+        // UTF-16 column — replacing the per-match re-fold of the shrinking suffix
+        // that was O(line_len * matches) and froze the search on large inputs.
+        fs::write(root.join("c.txt"), "数x数x数x\n".as_bytes()).unwrap();
+
+        let matches = search_in_dir(root, "x", 1000).expect("search");
+
+        assert_eq!(matches.len(), 3);
+        // chars: 数(1) x(2) 数(3) x(4) 数(5) x(6); each 数 is one UTF-16 unit.
+        assert_eq!(matches[0].column, 2);
+        assert_eq!(matches[1].column, 4);
+        assert_eq!(matches[2].column, 6);
+    }
+
+    #[test]
     fn very_long_line_match_text_is_truncated_on_char_boundary() {
         let tmp = tempfile::tempdir().expect("create temp dir");
         let root = tmp.path();
@@ -557,7 +581,7 @@ mod tests {
 
     #[test]
     fn skips_files_larger_than_cap() {
-        // find_ci/search must never load an oversized file; verify via the cap.
+        // search must never load an oversized file; verify via the cap.
         let tmp = tempfile::tempdir().expect("create temp dir");
         let root = tmp.path();
         // One small matching file and one oversized file (> MAX_FILE_SIZE) that

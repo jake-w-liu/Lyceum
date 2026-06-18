@@ -95,6 +95,28 @@ describe("focusAdjacentTab", () => {
     focusAdjacentTab(-1);
     expect(get().activePath).toBe("/b"); // wraps back
   });
+
+  it("Previous selects the last tab when no tab is active", () => {
+    // Docs opened in the background (activate:false) with activePath still null —
+    // reachable when a superseded open-file request resolves late.
+    get().openDoc({ path: "/a", content: "", language: "plaintext", activate: false });
+    get().openDoc({ path: "/b", content: "", language: "plaintext", activate: false });
+    get().openDoc({ path: "/c", content: "", language: "plaintext", activate: false });
+    expect(get().activePath).toBeNull();
+
+    focusAdjacentTab(-1);
+    // Must land on the LAST tab, not the second-to-last that (-1 + -1 + N) % N gives.
+    expect(get().activePath).toBe("/c");
+  });
+
+  it("Next selects the first tab when no tab is active", () => {
+    get().openDoc({ path: "/a", content: "", language: "plaintext", activate: false });
+    get().openDoc({ path: "/b", content: "", language: "plaintext", activate: false });
+    expect(get().activePath).toBeNull();
+
+    focusAdjacentTab(1);
+    expect(get().activePath).toBe("/a");
+  });
 });
 
 describe("closeActiveTab", () => {

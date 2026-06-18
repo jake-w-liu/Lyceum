@@ -1,7 +1,7 @@
 // Tests for fuzzy subsequence matching utilities.
 
 import { describe, expect, it } from "vitest";
-import { fuzzyFilter, fuzzyMatch } from "./fuzzy";
+import { fuzzyFilter, fuzzyMatch, fuzzyScore } from "./fuzzy";
 
 describe("fuzzyMatch", () => {
   it("matches an in-order subsequence", () => {
@@ -38,5 +38,21 @@ describe("fuzzyFilter", () => {
   it("sorts a prefix match before a scattered match", () => {
     const items = ["xaxbx", "abc"];
     expect(fuzzyFilter(items, "ab", key)).toEqual(["abc", "xaxbx"]);
+  });
+});
+
+describe("fuzzyScore", () => {
+  it("does not award the contiguity bonus to the first matched character", () => {
+    // 'a' matches at index 0: 1 (base) + 5 (start) = 6. The first character has
+    // no predecessor, so the +3 contiguity bonus must NOT apply (it returned 9
+    // before, because the -1 sentinel collided with `ti - 1` at ti === 0).
+    expect(fuzzyScore("a", "abc")).toBe(6);
+  });
+
+  it("awards the contiguity bonus only to genuinely adjacent matches", () => {
+    // "ab" at indices 0,1: 1+5 (a) + 1+3 (b, contiguous) = 10.
+    expect(fuzzyScore("ab", "abc")).toBe(10);
+    // "ac" at indices 0,2: 1+5 (a) + 1 (c, not contiguous) = 7.
+    expect(fuzzyScore("ac", "abc")).toBe(7);
   });
 });

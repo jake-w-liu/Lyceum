@@ -23,7 +23,9 @@ export function fuzzyScore(query: string, target: string): number {
   const t = target.toLowerCase();
   let qi = 0;
   let score = 0;
-  let prevIndex = -1;
+  // -2, not -1: with -1 the first matched character at ti === 0 would satisfy
+  // `prevIndex === ti - 1` (-1 === -1) and wrongly collect the contiguity bonus.
+  let prevIndex = -2;
   for (let ti = 0; ti < t.length && qi < q.length; ti += 1) {
     if (t[ti] === q[qi]) {
       score += 1;

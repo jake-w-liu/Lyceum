@@ -86,7 +86,7 @@ describe("editorStore", () => {
     const store = useEditorStore.getState();
     store.openDoc({ path: "/w/notes.txt", content: "old", language: "plaintext" });
 
-    store.replaceCleanContentFromDisk("/w/notes.txt", "# new");
+    store.replaceCleanContentFromDisk("/w/notes.txt", "# new", "old");
 
     const doc = useEditorStore.getState().docs[0];
     expect(doc.content).toBe("# new");
@@ -101,13 +101,34 @@ describe("editorStore", () => {
     store.openDoc({ path: "/w/a.ts", content: "local", language: "typescript" });
     store.updateContent("/w/a.ts", "unsaved");
 
-    store.replaceCleanContentFromDisk("/w/a.ts", "external");
+    store.replaceCleanContentFromDisk("/w/a.ts", "external", "local");
 
     const doc = useEditorStore.getState().docs[0];
     expect(doc.content).toBe("unsaved");
     expect(doc.savedContent).toBe("local");
     expect(doc.reloadVersion).toBe(0);
     expect(isDirty(doc)).toBe(true);
+  });
+
+  it("replaceCleanContentFromDisk skips stale disk bytes when a save landed during the read", () => {
+    const store = useEditorStore.getState();
+    store.openDoc({ path: "/w/a.ts", content: "V0", language: "typescript" });
+    // A reload captured the doc's clean savedContent before its async read began.
+    const expected = useEditorStore.getState().docs[0].savedContent; // "V0"
+    // During the read's IPC round-trip the user edited and saved newer content;
+    // the doc is clean again, now at "V2".
+    store.updateContent("/w/a.ts", "V2");
+    store.markSaved("/w/a.ts", "V2");
+    // The stale read resolves with the OLD disk bytes and tries to apply them.
+    store.replaceCleanContentFromDisk("/w/a.ts", "V1", expected);
+
+    const doc = useEditorStore.getState().docs[0];
+    // The just-saved content must survive: no overwrite, no reload bump (which
+    // would reset the Monaco model to "V1" and wipe the undo stack), still clean.
+    expect(doc.content).toBe("V2");
+    expect(doc.savedContent).toBe("V2");
+    expect(doc.reloadVersion).toBe(0);
+    expect(isDirty(doc)).toBe(false);
   });
 
   it("opens viewer tabs without dirty tracking or text mutation", () => {

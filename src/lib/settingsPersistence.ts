@@ -142,12 +142,25 @@ export async function saveSettings(): Promise<void> {
   try {
     const path = await configPath(SETTINGS_FILE);
     const onDisk = await readConfigObject(SETTINGS_FILE);
+    // Sanitize the on-disk object before merging back: out-of-range values
+    // (e.g. a hand-edited `fontSize: 9999`) are clamped and `version` is
+    // normalized to the current schema, so a key this window didn't change can't
+    // re-persist an invalid value or pin the file at a stale version. Unknown
+    // keys (e.g. written by a newer app version in another window) are kept.
+    const onDiskSanitized = {
+      ...onDisk,
+      ...(mergeSettings(onDisk) as unknown as Record<string, unknown>),
+    };
     const mine = useSettingsStore.getState().settings as unknown as Record<
       string,
       unknown
     >;
     const dirtyAtStart = new Map(dirtySettingsKeys);
-    const merged = mergeForWrite(mine, onDisk, dirtyAtStart);
+    const merged = mergeForWrite(mine, onDiskSanitized, dirtyAtStart);
+    // `version` is owned by the running process (mergeSettings normalizes it in
+    // memory but never marks it dirty); never copy an older on-disk version back,
+    // or version-gated migrations would re-run every launch for upgraded users.
+    merged.version = mine.version;
     await writeFile(path, JSON.stringify(merged, null, 2));
     clearSavedDirtyKeys(dirtySettingsKeys, dirtyAtStart);
   } catch (e) {
@@ -185,12 +198,19 @@ export async function saveLayout(): Promise<void> {
   try {
     const path = await configPath(LAYOUT_FILE);
     const onDisk = await readConfigObject(LAYOUT_FILE);
+    // Clamp/validate the on-disk layout before merging so a corrupt persisted
+    // value (e.g. a zero/negative pane size) can't be copied back verbatim for a
+    // key this window didn't change — mirrors loadLayout's sanitize on read.
+    const onDiskSanitized = {
+      ...onDisk,
+      ...(sanitizeLayoutData(onDisk) as Record<string, unknown>),
+    };
     const mine = persistedLayoutData(useLayoutStore.getState()) as unknown as Record<
       string,
       unknown
     >;
     const dirtyAtStart = new Map(dirtyLayoutKeys);
-    const merged = mergeForWrite(mine, onDisk, dirtyAtStart);
+    const merged = mergeForWrite(mine, onDiskSanitized, dirtyAtStart);
     await writeFile(path, JSON.stringify(merged, null, 2));
     clearSavedDirtyKeys(dirtyLayoutKeys, dirtyAtStart);
   } catch (e) {

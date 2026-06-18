@@ -136,9 +136,8 @@ impl LspManager {
     }
 
     /// Kill and reap every server belonging to one window (called when it is
-    /// destroyed), mirroring `lsp_stop` for each entry. Entries are removed
-    /// under the lock, but the (blocking) kill+wait happens after the guard is
-    /// dropped so other windows' LSP commands are never blocked on it.
+    /// destroyed), mirroring `lsp_stop` for each entry. Entries are removed under
+    /// the lock; the blocking kill+wait is then handed to a detached thread.
     pub fn stop_servers_for_window(&self, label: &str) {
         let prefix = format!("{label}:");
         let removed: Vec<LspSession> = {
@@ -152,11 +151,23 @@ impl LspManager {
                 .collect();
             keys.iter().filter_map(|key| servers.remove(key)).collect()
         };
-        for mut session in removed {
-            crate::julia::kill_pid(session.child.id());
-            // Reap so the exited server does not linger as a zombie process.
-            let _ = session.child.wait();
+        if removed.is_empty() {
+            return;
         }
+        // Reap OFF the caller's thread. This runs in the window `Destroyed`
+        // handler, which Tauri dispatches synchronously on the main event-loop
+        // (UI) thread; kill_pid + child.wait() blocks until the server exits —
+        // up to the ~2s SIGKILL-escalation delay for a server that ignores
+        // SIGTERM — and doing that inline would freeze every window for that span.
+        // The entries are already removed from the map, so no other window's LSP
+        // command can observe or race them.
+        std::thread::spawn(move || {
+            for mut session in removed {
+                crate::julia::kill_pid(session.child.id());
+                // Reap so the exited server does not linger as a zombie process.
+                let _ = session.child.wait();
+            }
+        });
     }
 }
 

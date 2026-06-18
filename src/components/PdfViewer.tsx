@@ -351,6 +351,7 @@ function PdfPage({
   linkService,
   searchQuery,
   highlights,
+  onResized,
 }: {
   doc: PDFDocumentProxy;
   pageNumber: number;
@@ -360,6 +361,10 @@ function PdfPage({
   linkService: LocalPdfLinkService;
   searchQuery: string;
   highlights: PageHighlight[] | undefined;
+  /** Called when this page's measured box size changes (i.e. it rendered to its
+   *  real intrinsic size). Lets the parent re-pin a pending jump once the pages
+   *  above the target settle, so the target lands at the viewport top. */
+  onResized?: (pageNumber: number) => void;
 }) {
   const elRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -386,6 +391,13 @@ function PdfPage({
     };
   }, [pageNumber, pageRefs]);
 
+  // Notify the parent when the measured box size changes — i.e. when a real
+  // render replaces the placeholder size. The parent uses this to re-pin a
+  // pending far-jump once the pages above the target report their real heights.
+  useEffect(() => {
+    onResized?.(pageNumber);
+  }, [size, pageNumber, onResized]);
+
   useEffect(() => {
     if (!visible) {
       // Release the rendered bitmap and page resources; keep the box size.
@@ -400,6 +412,9 @@ function PdfPage({
       pageRef.current?.cleanup();
       pageRef.current = null;
       setTextReady(false);
+      // Drop any stale render error so a released (off-screen) page doesn't keep
+      // a "Failed to render page N" overlay that flashes when it scrolls back.
+      setRenderError(null);
       return;
     }
 
@@ -632,6 +647,10 @@ export default function PdfViewer({ path }: { path: string }) {
     pageNumber: number;
     destArray: PdfDestArray | null;
   } | null>(null);
+  // Target page of an in-progress programmatic jump. While set, page-size
+  // changes above/at the target re-pin the scroll so the target stays at the
+  // viewport top as not-yet-rendered pages settle from placeholder to real size.
+  const pendingScrollRef = useRef<number | null>(null);
   const pageStateRef = useRef(saved?.page ?? 1);
 
   const [doc, setDoc] = useState<PDFDocumentProxy | null>(null);
@@ -682,9 +701,30 @@ export default function PdfViewer({ path }: { path: string }) {
       const offset = pageOffset(wrap, pageEl);
       wrap.scrollTop = Math.max(0, offset.top - padding.top);
       wrap.scrollLeft = Math.max(0, offset.left - padding.left);
+      // Pages above the target may still be placeholder-sized; record the target
+      // so handlePageResized re-pins once those pages render to their real size.
+      pendingScrollRef.current = pageNumber;
     },
     [numPages],
   );
+
+  // Re-pin a pending far-jump: when a page at or above the target reports a new
+  // (real) size, the target's top may have shifted, so re-scroll it to the
+  // viewport top. Clear the pending jump once the target itself has rendered, so
+  // later resizes (e.g. the user scrolling up) never yank the view back.
+  const handlePageResized = useCallback((resizedPage: number) => {
+    const target = pendingScrollRef.current;
+    if (target === null || resizedPage > target) return;
+    const wrap = scrollRef.current;
+    const pageEl = pageRefs.current.get(target);
+    if (wrap && pageEl) {
+      const padding = scrollPadding(wrap);
+      const offset = pageOffset(wrap, pageEl);
+      wrap.scrollTop = Math.max(0, offset.top - padding.top);
+      wrap.scrollLeft = Math.max(0, offset.left - padding.left);
+    }
+    if (resizedPage === target) pendingScrollRef.current = null;
+  }, []);
 
   const updateCurrentPageFromScroll = useCallback(() => {
     const wrap = scrollRef.current;
@@ -1019,10 +1059,20 @@ export default function PdfViewer({ path }: { path: string }) {
         updateCurrentPageFromScroll();
       });
     };
+    // A user gesture cancels any in-progress jump re-pin, so handlePageResized
+    // can never yank the view away from where the user just scrolled. These fire
+    // only on real input, never on programmatic scrollTop writes.
+    const cancelPendingScroll = () => {
+      pendingScrollRef.current = null;
+    };
     wrap.addEventListener("scroll", scheduleUpdate, { passive: true });
+    wrap.addEventListener("wheel", cancelPendingScroll, { passive: true });
+    wrap.addEventListener("pointerdown", cancelPendingScroll, { passive: true });
     scheduleUpdate();
     return () => {
       wrap.removeEventListener("scroll", scheduleUpdate);
+      wrap.removeEventListener("wheel", cancelPendingScroll);
+      wrap.removeEventListener("pointerdown", cancelPendingScroll);
       if (frame) cancelFrame(frame);
     };
   }, [numPages, updateCurrentPageFromScroll]);
@@ -1350,6 +1400,7 @@ export default function PdfViewer({ path }: { path: string }) {
               linkService={linkService}
               searchQuery={searchQuery}
               highlights={highlightsByPage.get(n)}
+              onResized={handlePageResized}
             />
           ))}
       </div>

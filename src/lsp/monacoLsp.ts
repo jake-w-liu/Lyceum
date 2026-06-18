@@ -523,11 +523,14 @@ function toMonacoWorkspaceEdit(
       });
     }
   };
-  if (res?.changes) {
-    for (const [uri, list] of Object.entries(res.changes)) push(uri, list);
-  }
+  // Per the LSP spec, `changes` and `documentChanges` describe the SAME edit
+  // set; a client that supports documentChanges must use it and IGNORE changes.
+  // Applying both would double-apply every edit (corrupting the buffer) if a
+  // non-conformant server populates both, so prefer documentChanges.
   if (res?.documentChanges) {
     for (const dc of res.documentChanges) push(dc.textDocument.uri, dc.edits);
+  } else if (res?.changes) {
+    for (const [uri, list] of Object.entries(res.changes)) push(uri, list);
   }
   return { edits };
 }

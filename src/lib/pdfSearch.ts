@@ -84,11 +84,19 @@ export function matchRectsInElement(
 
   const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
   const nodes: Text[] = [];
+  // Per-node lowercased text. `flat` is searched in this lowercased index space,
+  // so `locate` must map positions back through the SAME lowercased lengths.
+  // A character whose lowercase has a different UTF-16 length than its original
+  // (only U+0130 'İ' in the BMP) would otherwise desync the two index spaces and
+  // place the highlight on the wrong node/offset — or drop it entirely.
+  const lowered: string[] = [];
   let flat = "";
   for (let n = walker.nextNode(); n; n = walker.nextNode()) {
     const node = n as Text;
     nodes.push(node);
-    flat += node.data.toLowerCase();
+    const low = node.data.toLowerCase();
+    lowered.push(low);
+    flat += low;
   }
 
   // Skip to the requested occurrence (non-overlapping, matching findMatches).
@@ -103,10 +111,25 @@ export function matchRectsInElement(
 
   const locate = (pos: number): { node: Text; offset: number } | null => {
     let acc = 0;
-    for (const node of nodes) {
-      const len = node.data.length;
-      if (pos <= acc + len) return { node, offset: pos - acc };
-      acc += len;
+    for (let i = 0; i < nodes.length; i += 1) {
+      const low = lowered[i];
+      if (pos <= acc + low.length) {
+        // Convert the lowercased-space offset within this node back to an offset
+        // into the ORIGINAL node text (Range offsets index the live DOM node):
+        // walk original code units, accumulating each one's lowercased length
+        // until it reaches `within`. For text with no length-changing char this
+        // is the identity map (orig === within).
+        const data = nodes[i].data;
+        const within = pos - acc;
+        let lowAcc = 0;
+        let orig = 0;
+        while (orig < data.length && lowAcc < within) {
+          lowAcc += data[orig].toLowerCase().length;
+          orig += 1;
+        }
+        return { node: nodes[i], offset: orig };
+      }
+      acc += low.length;
     }
     return null;
   };
