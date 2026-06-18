@@ -338,7 +338,15 @@ fn move_paths_to_trash_impl(root: &Path, paths: Vec<String>) -> Result<TrashBatc
         }
         if let Err(e) = move_entry(&target.path, &destination) {
             rollback_moves(&done);
-            let _ = std::fs::remove_dir_all(&batch_dir);
+            // move_entry may have deliberately KEPT a complete copy at
+            // `destination` (a cross-device DIRECTORY whose non-atomic
+            // remove_dir_all of the source partially failed — the source is then
+            // incomplete and this copy is the only complete one). Wiping batch_dir
+            // would destroy it -> permanent data loss. Only clean up the batch dir
+            // when nothing was left behind at `destination`.
+            if std::fs::symlink_metadata(&destination).is_err() {
+                let _ = std::fs::remove_dir_all(&batch_dir);
+            }
             return Err(format!(
                 "{} -> {}: {e}",
                 target.path.display(),

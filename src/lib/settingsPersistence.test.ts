@@ -235,6 +235,35 @@ describe("settingsPersistence", () => {
     expect(["bottom", "right"]).toContain(written.panelPosition);
   });
 
+  it("preserves non-dirty settings when the on-disk file is corrupt (no revert to defaults)", async () => {
+    vi.stubGlobal("__TAURI_INTERNALS__", {});
+    // A previously-good file had loaded fontSize=20 into memory (non-dirty)...
+    useSettingsStore.setState(
+      { settings: { ...DEFAULT_SETTINGS, fontSize: 20 } },
+      false,
+    );
+    // ...but settings.json is now corrupt (hand-edited syntax error).
+    let disk = "{ not valid json";
+    invokeMock.mockImplementation(async (_cmd: string, args: { name: string }) =>
+      `/config/${args.name}`,
+    );
+    readFileMock.mockImplementation(async () => disk);
+    writeFileMock.mockImplementation(async (_path: string, content: string) => {
+      disk = content;
+    });
+
+    initSettingsPersistence();
+    // Change one unrelated key this session.
+    useSettingsStore.getState().setSetting("fontFamily", "Iosevka Test");
+    await saveSettings();
+
+    const written = JSON.parse(disk);
+    // The non-dirty fontSize MUST survive (not revert to the default 13), and the
+    // corrupt file is healed with valid JSON.
+    expect(written.fontSize).toBe(20);
+    expect(written.fontFamily).toBe("Iosevka Test");
+  });
+
   it("flushes pending debounced settings and layout saves", async () => {
     vi.useFakeTimers();
     vi.stubGlobal("__TAURI_INTERNALS__", {});

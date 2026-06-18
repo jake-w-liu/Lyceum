@@ -140,7 +140,11 @@ pub fn search_in_dir(root: &Path, query: &str, max: usize) -> Result<Vec<SearchM
         return Err(format!("not a directory: {}", root.display()));
     }
 
-    let needle = query.to_lowercase();
+    // Fold the needle char-by-char (NOT String::to_lowercase, which applies
+    // context-sensitive rules like the Greek final-sigma) so it uses the IDENTICAL
+    // fold as the haystack in match_offsets — otherwise a word ending in capital
+    // sigma (Σ -> ς vs σ) would never match. ASCII folding is identical either way.
+    let needle: String = query.chars().flat_map(|c| c.to_lowercase()).collect();
     let mut matches: Vec<SearchMatch> = Vec::new();
     let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
     // Canonical paths of directories already walked. Guards against descending
@@ -538,6 +542,20 @@ mod tests {
         assert_eq!(matches[0].column, 2);
         assert_eq!(matches[1].column, 4);
         assert_eq!(matches[2].column, 6);
+    }
+
+    #[test]
+    fn final_sigma_query_matches_word_ending_in_capital_sigma() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        // "ΟΔΟΣ".to_lowercase() is "οδος" (context-sensitive final ς), but the
+        // haystack folds char-by-char to "οδοσ" (σ). Folding the needle the same
+        // char-by-char way makes the query match; otherwise the match is dropped.
+        fs::write(root.join("g.txt"), "ΟΔΟΣ\n".as_bytes()).unwrap();
+
+        let matches = search_in_dir(root, "ΟΔΟΣ", 1000).expect("search");
+
+        assert_eq!(matches.len(), 1);
     }
 
     #[test]

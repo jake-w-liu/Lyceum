@@ -166,7 +166,12 @@ pub(crate) fn augmented_path(path: Option<&OsStr>, home: Option<&OsStr>) -> OsSt
         dirs.push(PathBuf::from("/usr/sbin"));
         dirs.push(PathBuf::from("/sbin"));
     }
-    env::join_paths(dedup_paths(dirs)).unwrap_or_default()
+    // env::join_paths fails if ANY element contains the path separator (a ':' in
+    // $HOME taints the .juliaup/.cargo entries). Fall back to the ORIGINAL PATH
+    // rather than an empty string — an empty PATH both breaks the child process
+    // and makes bare program names resolve relative to CWD (confused deputy).
+    env::join_paths(dedup_paths(dirs))
+        .unwrap_or_else(|_| path.map(|p| p.to_os_string()).unwrap_or_default())
 }
 
 fn dedup_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -185,6 +190,12 @@ pub(crate) fn find_program_in_path(program: &str, path: &OsStr) -> Option<PathBu
         return is_executable_file(program_path).then(|| program_path.to_path_buf());
     }
     for dir in env::split_paths(path) {
+        // Skip empty PATH entries: `dir.join(program)` for an empty dir is the
+        // bare relative program name, which would resolve against the CWD (a
+        // confused-deputy risk if a planted executable shares the name).
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
         let candidate = dir.join(program);
         if is_executable_file(&candidate) {
             return Some(candidate);
@@ -836,6 +847,20 @@ mod tests {
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_else(|| "julia".to_string());
         assert_eq!(default, expected_default);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn augmented_path_falls_back_to_original_when_home_contains_colon() {
+        // A ':' in $HOME taints the .juliaup/.cargo entries, so env::join_paths
+        // fails; PATH must fall back to the ORIGINAL value, not collapse to empty
+        // (which breaks the child and resolves bare program names against CWD).
+        let original = env::join_paths(["/usr/bin", "/bin"]).unwrap();
+        let augmented = augmented_path(Some(original.as_os_str()), Some(OsStr::new("/home/a:b")));
+
+        assert!(!augmented.is_empty());
+        let dirs: Vec<PathBuf> = env::split_paths(&augmented).collect();
+        assert!(dirs.iter().any(|d| d == Path::new("/usr/bin")));
     }
 
     #[test]

@@ -100,15 +100,21 @@ let layoutDirtyRevision = 0;
 // schedules a redundant save).
 let applyingPersistedLayout = false;
 
-/** Parse a config file into a plain object, or `{}` if absent/invalid. */
-async function readConfigObject(name: string): Promise<Record<string, unknown>> {
+/** Parse a config file into a plain object, or `null` when it is absent, corrupt,
+ *  or unreadable. Returning `null` (rather than `{}`) lets the savers avoid
+ *  merging defaults over good in-memory state when the on-disk file can't be
+ *  trusted — `{}` would otherwise become a full defaults object and silently
+ *  revert every non-dirty setting to its default. */
+async function readConfigObject(
+  name: string,
+): Promise<Record<string, unknown> | null> {
   try {
     const parsed = JSON.parse(await readConfigFile(name));
     return typeof parsed === "object" && parsed !== null
       ? (parsed as Record<string, unknown>)
-      : {};
+      : null;
   } catch {
-    return {};
+    return null;
   }
 }
 
@@ -162,21 +168,31 @@ async function doSaveSettings(): Promise<void> {
   try {
     const path = await configPath(SETTINGS_FILE);
     const onDisk = await readConfigObject(SETTINGS_FILE);
-    // Sanitize the on-disk object before merging back: out-of-range values
-    // (e.g. a hand-edited `fontSize: 9999`) are clamped and `version` is
-    // normalized to the current schema, so a key this window didn't change can't
-    // re-persist an invalid value or pin the file at a stale version. Unknown
-    // keys (e.g. written by a newer app version in another window) are kept.
-    const onDiskSanitized = {
-      ...onDisk,
-      ...(mergeSettings(onDisk) as unknown as Record<string, unknown>),
-    };
     const mine = useSettingsStore.getState().settings as unknown as Record<
       string,
       unknown
     >;
     const dirtyAtStart = new Map(dirtySettingsKeys);
-    const merged = mergeForWrite(mine, onDiskSanitized, dirtyAtStart);
+    let merged: Record<string, unknown>;
+    if (onDisk === null) {
+      // The file is absent, corrupt, or unreadable. Do NOT merge defaults /
+      // cross-window values over the running session — that would silently revert
+      // every non-dirty in-memory value (theme, fontSize, runtimePaths, …) to its
+      // default and overwrite a recoverable file. Persist the in-memory state
+      // as-is (which also heals a corrupt file with valid JSON).
+      merged = { ...mine };
+    } else {
+      // Sanitize the on-disk object before merging back: out-of-range values
+      // (e.g. a hand-edited `fontSize: 9999`) are clamped and `version` is
+      // normalized to the current schema, so a key this window didn't change
+      // can't re-persist an invalid value. Unknown keys (e.g. written by a newer
+      // app version in another window) are kept.
+      const onDiskSanitized = {
+        ...onDisk,
+        ...(mergeSettings(onDisk) as unknown as Record<string, unknown>),
+      };
+      merged = mergeForWrite(mine, onDiskSanitized, dirtyAtStart);
+    }
     // `version` is owned by the running process (mergeSettings normalizes it in
     // memory but never marks it dirty); never copy an older on-disk version back,
     // or version-gated migrations would re-run every launch for upgraded users.
@@ -229,24 +245,31 @@ async function doSaveLayout(): Promise<void> {
   try {
     const path = await configPath(LAYOUT_FILE);
     const onDisk = await readConfigObject(LAYOUT_FILE);
-    // Clamp/validate the on-disk layout before merging so a corrupt persisted
-    // value can't be copied back verbatim for a key this window didn't change.
-    // sanitizeLayoutData returns a PARTIAL — it OMITS any invalid enum/boolean
-    // key — so spread the defaults BETWEEN onDisk and the sanitized result: an
-    // invalid on-disk value is then overwritten by its default instead of
-    // surviving via `...onDisk`. (Mirrors mergeSettings spreading over
-    // DEFAULT_SETTINGS, and loadLayout's sanitize on read.)
-    const onDiskSanitized = {
-      ...onDisk,
-      ...(persistedLayoutData(initialLayoutData) as unknown as Record<string, unknown>),
-      ...(sanitizeLayoutData(onDisk) as Record<string, unknown>),
-    };
     const mine = persistedLayoutData(useLayoutStore.getState()) as unknown as Record<
       string,
       unknown
     >;
     const dirtyAtStart = new Map(dirtyLayoutKeys);
-    const merged = mergeForWrite(mine, onDiskSanitized, dirtyAtStart);
+    let merged: Record<string, unknown>;
+    if (onDisk === null) {
+      // Absent/corrupt/unreadable: persist the in-memory layout as-is rather than
+      // reverting every non-dirty value to its default (see doSaveSettings).
+      merged = { ...mine };
+    } else {
+      // Clamp/validate the on-disk layout before merging so a corrupt persisted
+      // value can't be copied back verbatim for a key this window didn't change.
+      // sanitizeLayoutData returns a PARTIAL — it OMITS any invalid enum/boolean
+      // key — so spread the defaults BETWEEN onDisk and the sanitized result: an
+      // invalid on-disk value is then overwritten by its default instead of
+      // surviving via `...onDisk`. (Mirrors mergeSettings spreading over
+      // DEFAULT_SETTINGS, and loadLayout's sanitize on read.)
+      const onDiskSanitized = {
+        ...onDisk,
+        ...(persistedLayoutData(initialLayoutData) as unknown as Record<string, unknown>),
+        ...(sanitizeLayoutData(onDisk) as Record<string, unknown>),
+      };
+      merged = mergeForWrite(mine, onDiskSanitized, dirtyAtStart);
+    }
     await writeFile(path, JSON.stringify(merged, null, 2));
     clearSavedDirtyKeys(dirtyLayoutKeys, dirtyAtStart);
   } catch (e) {
