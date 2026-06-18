@@ -513,6 +513,14 @@ export default function MonacoEditor() {
   // Existing Monaco models do not subscribe to content, so explicitly sync only
   // on reloadVersion changes to avoid re-running this effect on every keystroke.
   useEffect(() => {
+    // Commit any debounced active-doc edit FIRST. This effect fires on ANY open
+    // doc's reloadVersion bump (e.g. a DIFFERENT file changed on disk), and that
+    // bump can land in a later task than the watcher's flush (the clean-text
+    // reload awaits readFile). Without flushing here, the setValue below would
+    // overwrite the active model with the store's lagged content, discarding the
+    // user's un-flushed keystrokes. After the flush the active dirty doc has
+    // model.getValue() === doc.content and is skipped by the guard below.
+    flushPendingStoreWrite();
     for (const doc of useEditorStore.getState().docs.filter(isTextDoc)) {
       const model = modelsRef.current.get(doc.path);
       if (!model || model.getValue() === doc.content) continue;

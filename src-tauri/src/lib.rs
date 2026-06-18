@@ -140,6 +140,15 @@ pub fn run() {
                 window
                     .state::<julia::RunManager>()
                     .cancel_runs_for_window(label);
+                // Drop any unconsumed launch-dir entry for this window. Normally
+                // get_launch_dir removes it on frontend mount, but a window
+                // destroyed before its webview mounts (load failure / rapid close)
+                // would otherwise leak the entry forever (labels are never reused).
+                if let Some(state) = window.try_state::<LaunchDir>() {
+                    if let Ok(mut map) = state.0.lock() {
+                        map.remove(label);
+                    }
+                }
             }
         })
         // Native menu items carry frontend command ids; window lifecycle

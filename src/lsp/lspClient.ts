@@ -192,6 +192,18 @@ export async function ensureServer(
       const initResult = await rpc.request<{
         capabilities?: Record<string, unknown>;
       }>("initialize", buildInitializeParams(rootPath));
+      // A concurrent stopServer during the (possibly slow) initialize round-trip
+      // may have removed and killed this session while the live server still
+      // answered initialize over the same pipe. Re-check ownership before
+      // mutating session/global state — otherwise we'd set status "ready" for a
+      // language with no running server (stuck-ready desync). Mirrors the
+      // post-lspStart guard above.
+      if (sessions.get(languageId) !== session) {
+        unlistens.forEach((off) => off());
+        rpc.dispose("stopped during startup");
+        if (!sessions.has(languageId)) void lspStop(id);
+        return;
+      }
       session.capabilities = initResult?.capabilities ?? {};
       rpc.notify("initialized", {});
       useLspStatusStore.getState().setStatus(languageId, "ready");
@@ -208,10 +220,13 @@ export async function ensureServer(
       // Start/initialize failed (e.g. server binary missing OR a started server
       // that never answers initialize within the cap): tear everything down and
       // un-cache so a later open retries cleanly instead of reusing a dead session.
-      useLspStatusStore.getState().setStatus(languageId, "error");
       unlistens.forEach((off) => off());
       rpc.dispose("lsp init failed");
+      // Only downgrade to "error" / un-cache when this session STILL owns the
+      // language — a concurrent stopServer (which already set "off" and disposed
+      // the rpc, rejecting this initialize) must not be clobbered back to "error".
       if (sessions.get(languageId) === session) {
+        useLspStatusStore.getState().setStatus(languageId, "error");
         sessions.delete(languageId);
       }
       void lspStop(id);

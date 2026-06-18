@@ -94,7 +94,11 @@ fn kill_and_reap_detached(sessions: Vec<Session>) {
     }
     std::thread::spawn(move || {
         for mut session in sessions {
-            let _ = session.killer.kill();
+            // child.kill() escalates SIGHUP -> grace -> SIGKILL (portable_pty),
+            // so a shell that traps/ignores SIGHUP can't block child.wait()
+            // forever and leak this thread, the process, and the PTY fds.
+            // (killer.kill() sends only a bare SIGHUP with no escalation.)
+            let _ = session.child.kill();
             let _ = session.child.wait();
         }
     });

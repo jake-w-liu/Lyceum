@@ -621,9 +621,20 @@ fn move_entry(from: &Path, to: &Path) -> std::io::Result<()> {
             // would otherwise exist at BOTH paths while the move reports failure
             // (callers' rollback only reverses moves already recorded as done,
             // never this half-finished one). Best-effort remove the fresh copy so
-            // the cross-device path stays all-or-nothing like the rename path.
+            // the cross-device path stays all-or-nothing like the rename path —
+            // but ONLY when the source removal was ATOMIC (a single file or
+            // symlink). For a directory, remove_entry uses remove_dir_all, which
+            // is NON-atomic: a partial failure may have already deleted part of
+            // `from`, leaving `to` as the ONLY copy of those files, so removing
+            // `to` would lose them. Keep both in that case (the complete copy at
+            // `to` stays recoverable) and surface the error.
             if let Err(remove_err) = remove_entry(from) {
-                let _ = remove_entry(to);
+                let copied_is_dir = std::fs::symlink_metadata(to)
+                    .map(|m| m.file_type().is_dir())
+                    .unwrap_or(false);
+                if !copied_is_dir {
+                    let _ = remove_entry(to);
+                }
                 return Err(remove_err);
             }
             Ok(())

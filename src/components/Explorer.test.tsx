@@ -528,6 +528,33 @@ describe("Explorer", () => {
     expect(useTreeStore.getState().deleteUndoStack).toHaveLength(1);
   });
 
+  it("deletes hidden-but-selected items after Collapse All (resolves the full selection)", async () => {
+    render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    // Expand src and reveal its nested child.
+    await userEvent.click(await screen.findByText("src"));
+    await screen.findByText("main.tsx");
+
+    // Multi-select the nested file and the root file (both visible).
+    await userEvent.click(screen.getByRole("treeitem", { name: "main.tsx" }));
+    fireEvent.click(screen.getByRole("treeitem", { name: "README.md" }), {
+      metaKey: true,
+    });
+
+    // Collapse All hides main.tsx but it stays selected.
+    await userEvent.click(screen.getByRole("button", { name: "Collapse All" }));
+    expect(screen.queryByText("main.tsx")).not.toBeInTheDocument();
+
+    // Delete must act on the FULL selection, including the now-hidden main.tsx —
+    // not just the visible subset (which would silently skip main.tsx).
+    await userEvent.click(screen.getByRole("button", { name: "Delete Selected" }));
+    await waitFor(() => expect(movePathsToTrash).toHaveBeenCalled());
+    const [, paths] = vi.mocked(movePathsToTrash).mock.calls[0];
+    expect([...(paths as string[])].sort()).toEqual([
+      "/ws/README.md",
+      "/ws/src/main.tsx",
+    ]);
+  });
+
   it("falls back to window.confirm when the dialog plugin rejects", async () => {
     vi.mocked(ask).mockRejectedValue(new Error("not in tauri"));
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);

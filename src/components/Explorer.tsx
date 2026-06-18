@@ -683,6 +683,24 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     for (const { entry } of visibleEntries) map.set(entry.path, entry);
     return map;
   }, [visibleEntries]);
+  // Resolve the selection through the FULL loaded tree (not just visible rows) so
+  // delete/move act on every selected path even when an ancestor folder was
+  // collapsed (e.g. Collapse All) AFTER the items were selected. Using the
+  // visible-only `selectedEntries` there silently skips hidden-but-selected items.
+  const allEntryByPath = useMemo(() => {
+    const map = new Map<string, DirEntry>();
+    for (const children of Object.values(allChildren)) {
+      for (const entry of children) map.set(entry.path, entry);
+    }
+    return map;
+  }, [allChildren]);
+  const resolvedSelectedEntries = useMemo(
+    () =>
+      selectedPaths
+        .map((path) => allEntryByPath.get(path))
+        .filter((entry): entry is DirEntry => entry !== undefined),
+    [selectedPaths, allEntryByPath],
+  );
 
   // Focus (and reveal) a row by path. Returns false when the row isn't in the
   // DOM yet (e.g. right after a refresh).
@@ -950,7 +968,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     }
     if (!mod && !e.altKey && (e.key === "Delete" || e.key === "Backspace")) {
       e.preventDefault();
-      void deleteEntries(selectedEntries);
+      void deleteEntries(resolvedSelectedEntries);
     }
   }
 
@@ -1087,8 +1105,8 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
           className="icon-button"
           aria-label="Delete Selected"
           title="Delete Selected"
-          disabled={selectedEntries.length === 0}
-          onClick={() => void deleteEntries(selectedEntries)}
+          disabled={resolvedSelectedEntries.length === 0}
+          onClick={() => void deleteEntries(resolvedSelectedEntries)}
         >
           <Icon name="close" size={12} />
         </button>
@@ -1164,7 +1182,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
             onCommitCreate={commitCreate}
             selectedPaths={selectedPaths}
             visiblePaths={visiblePaths}
-            selectedEntries={selectedEntries}
+            selectedEntries={resolvedSelectedEntries}
             draggingEntries={draggingEntries}
             setDraggingEntries={setDraggingEntries}
             dropTargetPath={dropTargetPath}
