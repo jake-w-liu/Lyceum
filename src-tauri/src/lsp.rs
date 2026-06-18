@@ -232,14 +232,20 @@ pub fn lsp_start(
     // immediately after spawn; if the reader observed EOF before the map entry
     // existed, it could not reap/remove the child and the dead session would
     // remain cached until an explicit stop.
-    if let Some(mut old) = state.servers.lock().unwrap().insert(
+    // Bind the displaced session to a local FIRST so the map's MutexGuard (an
+    // unnamed temporary in an `if let` scrutinee lives to the end of the block
+    // under edition 2021) is dropped before the blocking kill+wait below —
+    // otherwise the global servers lock would be held across child.wait(), which
+    // can block ~2s for a server slow to exit on SIGTERM, stalling all LSP IPC.
+    let displaced = state.servers.lock().unwrap().insert(
         key,
         LspSession {
             stdin: Arc::new(Mutex::new(Box::new(stdin))),
             child,
             gen,
         },
-    ) {
+    );
+    if let Some(mut old) = displaced {
         crate::julia::kill_pid(old.child.id());
         let _ = old.child.wait();
     }
@@ -352,12 +358,16 @@ pub fn lsp_send(
 /// Kill and remove a server (idempotent).
 #[tauri::command]
 pub fn lsp_stop(window: tauri::Window, state: State<LspManager>, id: String) -> Result<(), String> {
-    if let Some(mut session) = state
+    // Bind the removed session to a local FIRST so the map's MutexGuard is
+    // dropped before the blocking kill+wait — otherwise the global servers lock
+    // is held across child.wait() (up to ~2s for a server slow to exit on
+    // SIGTERM), stalling every other LSP command across all windows.
+    let removed = state
         .servers
         .lock()
         .unwrap()
-        .remove(&session_key(&window, &id))
-    {
+        .remove(&session_key(&window, &id));
+    if let Some(mut session) = removed {
         crate::julia::kill_pid(session.child.id());
         // Reap so the exited server does not linger as a zombie process.
         let _ = session.child.wait();

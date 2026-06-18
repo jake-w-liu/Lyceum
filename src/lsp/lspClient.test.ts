@@ -188,4 +188,82 @@ describe("ensureServer", () => {
     // The listener registered after the stop must have been torn down.
     expect(offMessage).toHaveBeenCalledTimes(1);
   });
+
+  it("detaches both listeners when a server exits unexpectedly (no per-crash leak)", async () => {
+    vi.useFakeTimers();
+    const offMessage = vi.fn();
+    const offExit = vi.fn();
+    // Replicate the handshake wiring (capture the message callback so the mock
+    // `lspSend` can answer `initialize`), but return spyable unlisten functions.
+    let onMessage: ((raw: string) => void) | null = null;
+    onLspMessageMock.mockReset().mockImplementation(async (_id, cb) => {
+      onMessage = cb as (raw: string) => void;
+      return offMessage;
+    });
+    lspSendMock.mockReset().mockImplementation(async (_id, raw) => {
+      const message = JSON.parse(raw as string);
+      if (message.method === "initialize") {
+        queueMicrotask(() =>
+          onMessage?.(
+            JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {} }),
+          ),
+        );
+      }
+    });
+    const exitCallbacks = new Map<string, () => void>();
+    onLspExitMock.mockReset().mockImplementation(async (id, cb) => {
+      exitCallbacks.set(id as string, cb as () => void);
+      return offExit;
+    });
+    setOpenDocsProvider(() => []);
+    try {
+      const session = await ensureServer("julia", "/w", null);
+      await session?.ready;
+      expect(offMessage).not.toHaveBeenCalled();
+
+      // Crash (the session still owns the registry entry).
+      exitCallbacks.get(session!.id)!();
+
+      // The message AND exit listeners must both be detached — the crash path was
+      // the only teardown path that previously leaked them for the window's life.
+      expect(offMessage).toHaveBeenCalledTimes(1);
+      expect(offExit).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+      setOpenDocsProvider(() => []);
+    }
+  });
+
+  it("a stale exit does not clobber a newer same-language session's status", async () => {
+    vi.useFakeTimers();
+    const exitCallbacks = new Map<string, () => void>();
+    onLspExitMock.mockReset().mockImplementation(async (id, cb) => {
+      exitCallbacks.set(id as string, cb as () => void);
+      return () => {};
+    });
+    setOpenDocsProvider(() => [
+      { uri: "file:///w/a.jl", languageId: "julia", text: "x" },
+    ]);
+    try {
+      const a = await ensureServer("julia", "/w", null);
+      await a?.ready;
+
+      // A crashes -> removed, one restart scheduled. After the restart B is ready
+      // the shared per-language status is "ready" again.
+      exitCallbacks.get(a!.id)!();
+      await vi.advanceTimersByTimeAsync(1500);
+      const b = getSession("julia");
+      await b?.ready;
+      expect(b?.id).not.toBe(a?.id);
+      expect(useLspStatusStore.getState().byLanguage.julia).toBe("ready");
+
+      // A STALE exit for the old session A now arrives (A no longer owns the
+      // language): it must NOT reset the live server's status back to "off".
+      exitCallbacks.get(a!.id)!();
+      expect(useLspStatusStore.getState().byLanguage.julia).toBe("ready");
+    } finally {
+      vi.useRealTimers();
+      setOpenDocsProvider(() => []);
+    }
+  });
 });

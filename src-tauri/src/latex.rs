@@ -279,7 +279,7 @@ fn custom_pdf_path(command: &str, tex_name: &str, cwd: &Path) -> Option<PathBuf>
 
     let tokens: Vec<String> = shell_token_spans(command)
         .iter()
-        .map(|span| strip_shell_quotes(&command[span.start..span.end]).to_string())
+        .map(|span| unquote_token(&command[span.start..span.end]))
         .collect();
 
     let mut outdir: Option<String> = None;
@@ -340,7 +340,7 @@ fn parse_custom_latex_command(
 ) -> Result<(String, Vec<String>, String), String> {
     let mut tokens: Vec<String> = shell_token_spans(command)
         .iter()
-        .map(|span| strip_shell_quotes(&command[span.start..span.end]).to_string())
+        .map(|span| unquote_token(&command[span.start..span.end]))
         .collect();
     // Substitute the real tex file name for the last .tex token (the user's
     // placeholder, e.g. `main.tex`), or append it if the command has none. Using
@@ -380,7 +380,9 @@ fn latex_tool_name(program: &str) -> Option<String> {
 fn flag_value(tok: &str, next: Option<&String>, flag: &str) -> Option<(String, bool)> {
     let rest = tok.strip_prefix(flag)?;
     if let Some(value) = rest.strip_prefix('=') {
-        return Some((strip_shell_quotes(value).to_string(), false));
+        // `tok` was already fully unquoted by `unquote_token`, so the inline value
+        // (`-flag=value`) needs no further stripping.
+        return Some((value.to_string(), false));
     }
     if rest.is_empty() {
         // `-flag value`: the next token (already shell-unquoted) is the value.
@@ -442,6 +444,44 @@ fn strip_shell_quotes(value: &str) -> &str {
     } else {
         value
     }
+}
+
+/// Full inverse of the splitting performed by `shell_token_spans`: removes quote
+/// delimiters AND (on non-Windows) the backslash before an escaped character, so
+/// a token reaches the executed process args as the exact string the user meant.
+/// `strip_shell_quotes` only removes a matching OUTER quote pair (and is kept for
+/// stock-command canonicalization); it leaves backslash escapes in place, which
+/// would otherwise corrupt e.g. a backslash-escaped program path or -output-dir.
+/// Mirrors the tokenizer's state machine exactly (escape checked before quotes).
+fn unquote_token(token: &str) -> String {
+    let mut out = String::with_capacity(token.len());
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for ch in token.chars() {
+        if escaped {
+            out.push(ch);
+            escaped = false;
+            continue;
+        }
+        if !cfg!(windows) && ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if ch == active_quote {
+                quote = None;
+            } else {
+                out.push(ch);
+            }
+            continue;
+        }
+        if matches!(ch, '"' | '\'') {
+            quote = Some(ch);
+            continue;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 fn retarget_tex_command(command: &str, tex_name: &str) -> String {
@@ -699,6 +739,28 @@ mod tests {
             plan_latex_build_impl(&tex, "latexmk -pdf -silent main.tex", OsStr::new("")).unwrap();
 
         assert_eq!(plan.args, vec!["-pdf", "-silent", "a$b.tex"]);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn custom_build_unescapes_backslash_escaped_tokens() {
+        // The tokenizer treats backslash as an escape (so a backslash-escaped
+        // space keeps a token together); the executed tokens must therefore have
+        // those backslashes REMOVED — they go to execve, not a shell. Affects the
+        // program path and -output-directory value (the .tex token is replaced).
+        let tmp = tempfile::tempdir().unwrap();
+        let tex = tmp.path().join("paper.tex");
+        std::fs::write(&tex, "\\documentclass{article}").unwrap();
+
+        let plan = plan_latex_build_impl(
+            &tex,
+            r"/My\ Tools/latexmk -output-directory=my\ dir main.tex",
+            OsStr::new(""),
+        )
+        .unwrap();
+
+        assert_eq!(plan.program, "/My Tools/latexmk");
+        assert_eq!(plan.args, vec!["-output-directory=my dir", "paper.tex"]);
     }
 
     #[test]

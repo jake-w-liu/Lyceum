@@ -26,6 +26,12 @@ struct Session {
     // otherwise deadlock every terminal command). Mirrors lsp.rs's stdin.
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     killer: Box<dyn ChildKiller + Send + Sync>,
+    // The child handle lives in the session (not the reader thread) so whoever
+    // wins the gen-guarded map removal — the reader on EOF, OR a closer — owns
+    // the reap. This makes child.wait() (which frees the pid) and the killer's
+    // bare-pid SIGHUP mutually exclusive, so a closer can never signal a pid the
+    // reader just reaped and the OS may have reused.
+    child: Box<dyn portable_pty::Child + Send + Sync>,
     gen: u64,
 }
 
@@ -71,10 +77,27 @@ impl TerminalManager {
                 .collect();
             keys.iter().filter_map(|key| sessions.remove(key)).collect()
         };
-        for mut session in removed {
-            let _ = session.killer.kill();
-        }
+        kill_and_reap_detached(removed);
     }
+}
+
+/// Kill and reap the given sessions on a DETACHED thread. The window-close and
+/// tab-close paths use this so their caller — the window `Destroyed` handler on
+/// the main event-loop thread, or a Tauri command thread — never blocks on a
+/// shell slow to exit on SIGHUP. The sessions are already removed from the map,
+/// and the child lives in the Session, so the reader threads won't double-reap
+/// and the reap/kill can't race a reader's wait on the same pid. (App-exit
+/// shutdown_all stays inline + kill-only: the process is dying, the OS reaps.)
+fn kill_and_reap_detached(sessions: Vec<Session>) {
+    if sessions.is_empty() {
+        return;
+    }
+    std::thread::spawn(move || {
+        for mut session in sessions {
+            let _ = session.killer.kill();
+            let _ = session.child.wait();
+        }
+    });
 }
 
 /// Resolve the shell to spawn: an explicit override, else `$SHELL`, else a
@@ -201,6 +224,7 @@ pub fn terminal_create(
                 master: pair.master,
                 writer,
                 killer,
+                child,
                 gen,
             },
         );
@@ -227,25 +251,28 @@ pub fn terminal_create(
             }
         }
         drop(tx);
-        // The shell hit EOF, so it is exiting. Remove our session from the map
-        // BEFORE reaping the child below: once `child.wait()` reaps the pid the OS
-        // may reuse it, and the stored killer signals the BARE pid (portable_pty
-        // ProcessSignaller). A concurrent terminal_close / shutdown_all /
-        // close_sessions_for_window that grabbed the entry after the reap would
-        // then deliver SIGHUP to whatever unrelated process reused the pid.
-        // Removing first means those closers observe a miss and never signal a
-        // freed/reused pid (the child is still ours, unreaped, in this window).
-        // Only remove our own generation — a new session may have reused the id.
+        // The shell hit EOF, so it is exiting. Reclaim our session from the map —
+        // but ONLY if our generation still owns the entry. The child lives IN the
+        // session, so whoever wins this removal owns the reap. If a closer
+        // (terminal_close / shutdown_all / close_sessions_for_window) already
+        // removed it, the closer owns the child and reaps it; we must NOT touch
+        // the pid, which by then may be reaped and reused — that is exactly the
+        // bare-pid SIGHUP-to-an-unrelated-process hazard. Only our own generation
+        // matches, so a new session that reused the id is never reclaimed here.
+        let mut reclaimed: Option<Session> = None;
         if let Some(manager) = app_for_reader.try_state::<TerminalManager>() {
             let mut sessions = manager.sessions.lock().unwrap();
             if sessions
                 .get(&key_for_reader)
                 .is_some_and(|session| session.gen == gen)
             {
-                sessions.remove(&key_for_reader);
+                reclaimed = sessions.remove(&key_for_reader);
             }
         }
-        let _ = child.wait();
+        // Reap outside the lock, and only when WE won the removal.
+        if let Some(mut session) = reclaimed {
+            let _ = session.child.wait();
+        }
     });
 
     // Emitter thread: coalesce bursts (up to ~32 KiB or ~5 ms) into one event so
@@ -332,13 +359,16 @@ pub fn terminal_close(
     state: State<TerminalManager>,
     id: String,
 ) -> Result<(), String> {
-    if let Some(mut session) = state
+    let removed = state
         .sessions
         .lock()
         .unwrap()
-        .remove(&session_key(&window, &id))
-    {
-        let _ = session.killer.kill();
+        .remove(&session_key(&window, &id));
+    if let Some(session) = removed {
+        // Reap on a detached thread (see kill_and_reap_detached): the reader
+        // thread no longer reaps a session a closer removed, and this command
+        // must not block on a shell slow to exit on SIGHUP.
+        kill_and_reap_detached(vec![session]);
     }
     Ok(())
 }

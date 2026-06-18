@@ -137,11 +137,20 @@ export async function ensureServer(
       unlistens.push(await onLspMessage(id, (raw) => rpc.handleMessage(raw)));
       unlistens.push(
         await onLspExit(id, () => {
-          useLspStatusStore.getState().setStatus(languageId, "off");
           rpc.dispose("server exited");
+          // Detach this session's webview listeners (lsp:message:<id>/lsp:exit:<id>).
+          // The id is never reused, so without this they leak for the window's
+          // lifetime on every crash — matching the detach the other teardown
+          // paths already do. Safe before the ownership check: a disposed
+          // session's listeners are dead regardless of who owns the language now.
+          unlistens.forEach((off) => off());
           // Only an UNEXPECTED exit still owns the registry entry: stopServer
           // removes the session before killing, so this branch means a crash.
           if (sessions.get(languageId) !== session) return;
+          // Set "off" only when this session STILL owns the language. A stale
+          // exit (an old session dying after a newer same-language session became
+          // ready) must not clobber the live server's "ready" status back to off.
+          useLspStatusStore.getState().setStatus(languageId, "off");
           sessions.delete(languageId);
           // Attempt ONE automatic restart so a crashed server recovers without
           // requiring a new file of that language to be opened. A session that

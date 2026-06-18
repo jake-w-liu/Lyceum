@@ -177,6 +177,64 @@ describe("settingsPersistence", () => {
     expect(JSON.parse(disk).version).toBe(DEFAULT_SETTINGS.version);
   });
 
+  it("serializes overlapping saves so an out-of-order write can't clobber the newer value", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("__TAURI_INTERNALS__", {});
+    let disk = JSON.stringify({ ...DEFAULT_SETTINGS, fontSize: 13 });
+    let releaseFirstWrite!: () => void;
+    const firstWrite = new Promise<void>((resolve) => {
+      releaseFirstWrite = resolve;
+    });
+    invokeMock.mockImplementation(async (_cmd: string, args: { name: string }) =>
+      `/config/${args.name}`,
+    );
+    readFileMock.mockImplementation(async () => disk);
+    writeFileMock.mockImplementation(async (_path: string, content: string) => {
+      // Make the FIRST write complete LAST — the classic reorder hazard.
+      if (writeFileMock.mock.calls.length === 1) await firstWrite;
+      disk = content;
+    });
+
+    initSettingsPersistence();
+    useSettingsStore.getState().setSetting("fontSize", 14);
+    const a = saveSettings(); // captures 14; its write blocks
+    await flushPromises();
+    useSettingsStore.getState().setSetting("fontSize", 15);
+    const b = saveSettings(); // serialized AFTER a (a is still in flight)
+    await flushPromises();
+    releaseFirstWrite(); // a's write finally completes, out of order
+    await Promise.all([a, b]);
+
+    // b runs only after a finishes, re-reads disk, and writes the newer 15 last.
+    // Without serialization a's late write would clobber the file back to 14.
+    expect(JSON.parse(disk).fontSize).toBe(15);
+  });
+
+  it("heals a corrupt layout enum value instead of re-persisting it for an unchanged key", async () => {
+    vi.stubGlobal("__TAURI_INTERNALS__", {});
+    // layout.json hand-edited (or written by a future version) with an invalid
+    // dock position; this window does not change panelPosition this session.
+    let disk = JSON.stringify({ sidebarWidth: 200, panelPosition: "left" });
+    invokeMock.mockImplementation(async (_cmd: string, args: { name: string }) =>
+      `/config/${args.name}`,
+    );
+    readFileMock.mockImplementation(async () => disk);
+    writeFileMock.mockImplementation(async (_path: string, content: string) => {
+      disk = content;
+    });
+
+    initSettingsPersistence();
+    // Change an UNRELATED layout key so panelPosition stays non-dirty.
+    useLayoutStore.getState().setSidebarWidth(321);
+    await saveLayout();
+
+    // sanitizeLayoutData drops the invalid enum; the defaults-fill replaces it
+    // with a valid default rather than copying "left" back verbatim.
+    const written = JSON.parse(disk);
+    expect(written.panelPosition).not.toBe("left");
+    expect(["bottom", "right"]).toContain(written.panelPosition);
+  });
+
   it("flushes pending debounced settings and layout saves", async () => {
     vi.useFakeTimers();
     vi.stubGlobal("__TAURI_INTERNALS__", {});

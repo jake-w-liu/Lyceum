@@ -617,7 +617,16 @@ fn move_entry(from: &Path, to: &Path) -> std::io::Result<()> {
         Ok(()) => Ok(()),
         Err(e) if is_cross_device(&e) => {
             copy_recursive(from, to)?;
-            remove_entry(from)
+            // If the source can't be removed after a successful copy, the data
+            // would otherwise exist at BOTH paths while the move reports failure
+            // (callers' rollback only reverses moves already recorded as done,
+            // never this half-finished one). Best-effort remove the fresh copy so
+            // the cross-device path stays all-or-nothing like the rename path.
+            if let Err(remove_err) = remove_entry(from) {
+                let _ = remove_entry(to);
+                return Err(remove_err);
+            }
+            Ok(())
         }
         Err(e) => Err(e),
     }

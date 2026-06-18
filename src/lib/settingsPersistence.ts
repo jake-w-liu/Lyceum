@@ -7,6 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { canonicalizePath, readFile, writeFile } from "./ipc";
 import {
   type LayoutData,
+  initialLayoutData,
   persistedLayoutData,
   sanitizeLayoutData,
   useLayoutStore,
@@ -138,7 +139,26 @@ function clearSavedDirtyKeys(
   }
 }
 
-export async function saveSettings(): Promise<void> {
+// Saves are serialized per file so two debounced/flush writes never overlap:
+// without this, an OLDER save whose writeFile resolves AFTER a newer one would
+// clobber the newer value with stale data (a lost write). When no save is in
+// flight the next one starts synchronously (no added latency); overlapping saves
+// chain. `*SaveTail` holds the in-flight tail, reset to null once it settles.
+let settingsSaveTail: Promise<void> | null = null;
+let layoutSaveTail: Promise<void> | null = null;
+
+export function saveSettings(): Promise<void> {
+  const next = settingsSaveTail
+    ? settingsSaveTail.then(doSaveSettings)
+    : doSaveSettings();
+  settingsSaveTail = next;
+  void next.finally(() => {
+    if (settingsSaveTail === next) settingsSaveTail = null;
+  });
+  return next;
+}
+
+async function doSaveSettings(): Promise<void> {
   try {
     const path = await configPath(SETTINGS_FILE);
     const onDisk = await readConfigObject(SETTINGS_FILE);
@@ -194,15 +214,31 @@ export async function loadLayout(): Promise<void> {
   }
 }
 
-export async function saveLayout(): Promise<void> {
+export function saveLayout(): Promise<void> {
+  const next = layoutSaveTail
+    ? layoutSaveTail.then(doSaveLayout)
+    : doSaveLayout();
+  layoutSaveTail = next;
+  void next.finally(() => {
+    if (layoutSaveTail === next) layoutSaveTail = null;
+  });
+  return next;
+}
+
+async function doSaveLayout(): Promise<void> {
   try {
     const path = await configPath(LAYOUT_FILE);
     const onDisk = await readConfigObject(LAYOUT_FILE);
     // Clamp/validate the on-disk layout before merging so a corrupt persisted
-    // value (e.g. a zero/negative pane size) can't be copied back verbatim for a
-    // key this window didn't change — mirrors loadLayout's sanitize on read.
+    // value can't be copied back verbatim for a key this window didn't change.
+    // sanitizeLayoutData returns a PARTIAL — it OMITS any invalid enum/boolean
+    // key — so spread the defaults BETWEEN onDisk and the sanitized result: an
+    // invalid on-disk value is then overwritten by its default instead of
+    // surviving via `...onDisk`. (Mirrors mergeSettings spreading over
+    // DEFAULT_SETTINGS, and loadLayout's sanitize on read.)
     const onDiskSanitized = {
       ...onDisk,
+      ...(persistedLayoutData(initialLayoutData) as unknown as Record<string, unknown>),
       ...(sanitizeLayoutData(onDisk) as Record<string, unknown>),
     };
     const mine = persistedLayoutData(useLayoutStore.getState()) as unknown as Record<
@@ -270,6 +306,8 @@ export function resetSettingsPersistenceForTests(): void {
   if (layoutSaveTimer) clearTimeout(layoutSaveTimer);
   saveTimer = null;
   layoutSaveTimer = null;
+  settingsSaveTail = null;
+  layoutSaveTail = null;
   for (const unsubscribe of persistenceUnsubscribes) unsubscribe();
   persistenceUnsubscribes = [];
   persistenceInitialized = false;
@@ -281,18 +319,22 @@ export function resetSettingsPersistenceForTests(): void {
 }
 
 export async function flushSettingsPersistence(): Promise<void> {
-  const pending: Promise<void>[] = [];
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;
-    pending.push(saveSettings());
+    void saveSettings();
   }
   if (layoutSaveTimer) {
     clearTimeout(layoutSaveTimer);
     layoutSaveTimer = null;
-    pending.push(saveLayout());
+    void saveLayout();
   }
-  await Promise.all(pending);
+  // Await the serialized tails so any in-flight OR just-enqueued write finishes
+  // — a debounced save already running has no live timer to detect above.
+  await Promise.all([
+    settingsSaveTail ?? Promise.resolve(),
+    layoutSaveTail ?? Promise.resolve(),
+  ]);
 }
 
 /** Subscribe stores so changes are persisted (debounced) and theme stays synced. */
@@ -306,7 +348,10 @@ export function initSettingsPersistence(): void {
       if (cur[k] !== old[k]) dirtySettingsKeys.set(k, ++settingsDirtyRevision);
     }
     if (saveTimer) clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => void saveSettings(), 400);
+    saveTimer = setTimeout(() => {
+      saveTimer = null;
+      void saveSettings();
+    }, 400);
   }));
   // Subscribe layout persistence BEFORE loading, so a layout change made during
   // loadLayout's async round-trip is recorded and persisted (not lost). The
@@ -327,7 +372,10 @@ export function initSettingsPersistence(): void {
     // — nothing to write.
     if (!changed) return;
     if (layoutSaveTimer) clearTimeout(layoutSaveTimer);
-    layoutSaveTimer = setTimeout(() => void saveLayout(), 400);
+    layoutSaveTimer = setTimeout(() => {
+      layoutSaveTimer = null;
+      void saveLayout();
+    }, 400);
   }));
   void loadLayout();
   // Theme changed via the palette → reflect into settings (which persists it).

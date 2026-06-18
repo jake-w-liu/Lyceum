@@ -217,6 +217,13 @@ fn join_requested_root_text(requested_root: &Path, relative: &Path) -> String {
         std::path::MAIN_SEPARATOR_STR
     };
     let mut out = root.trim_end_matches(['/', '\\']).to_string();
+    // A root that is purely separators (e.g. the filesystem root "/") trims to
+    // "", which would drop the leading separator and emit a RELATIVE event path
+    // that never matches an open doc's absolute path. Seed the leading separator
+    // so descendants of such a root stay absolute.
+    if out.is_empty() && !root.is_empty() {
+        out.push_str(separator);
+    }
     for component in relative.components() {
         let Component::Normal(name) = component else {
             continue;
@@ -357,6 +364,21 @@ mod tests {
         );
 
         assert_eq!(mapped, "/link/project/src/main.tex");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_root_workspace_keeps_event_paths_absolute() {
+        // A workspace opened at the filesystem root "/" must still emit ABSOLUTE
+        // event paths; a relative path would never match an open doc's absolute
+        // path, so the tab would silently not reload when the file changes.
+        let mapped = event_path_for_requested_root(
+            Path::new("/"),
+            Path::new("/"),
+            Path::new("/src/main.tex"),
+        );
+
+        assert_eq!(mapped, "/src/main.tex");
     }
 
     #[test]
