@@ -414,6 +414,19 @@ fn move_paths_impl(
     let mut moved = Vec::with_capacity(planned.len());
     let mut done: Vec<(PathBuf, PathBuf)> = Vec::new();
     for (from, to, is_dir) in planned {
+        // Re-check existence right before the move. The planning loop above ran
+        // path_entry_exists BEFORE any move, so an earlier move in THIS batch may
+        // have created `to`; and on a case-insensitive filesystem (macOS/Windows)
+        // two destinations differing only in case (note.txt vs NOTE.txt) fold to
+        // the same on-disk entry, which the byte-exact dedup HashSet misses.
+        // Without this re-check the second rename would SILENTLY overwrite the
+        // first (data loss). path_entry_exists reflects the FS's real case
+        // behavior, so it neither false-rejects on a case-sensitive FS nor misses
+        // a collision on a case-insensitive one.
+        if path_entry_exists(&to) {
+            rollback_moves(&done);
+            return Err(format!("already exists: {}", to.display()));
+        }
         if let Err(e) = move_entry(&from, &to) {
             rollback_moves(&done);
             return Err(format!("{} -> {}: {e}", from.display(), to.display()));
@@ -1467,6 +1480,50 @@ mod tests {
         let exists_err =
             move_paths_impl(root, vec![a.to_string_lossy().to_string()], &dst).unwrap_err();
         assert!(exists_err.contains("already exists"));
+    }
+
+    fn collect_file_contents(dir: &Path, out: &mut Vec<Vec<u8>>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                collect_file_contents(&path, out);
+            } else {
+                out.push(fs::read(&path).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn move_paths_does_not_silently_overwrite_case_colliding_destinations() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let dst = root.join("dst");
+        let a = root.join("a").join("Report.txt");
+        let b = root.join("b").join("report.txt");
+        fs::create_dir(&dst).unwrap();
+        fs::create_dir_all(a.parent().unwrap()).unwrap();
+        fs::create_dir_all(b.parent().unwrap()).unwrap();
+        fs::write(&a, b"AAA").unwrap();
+        fs::write(&b, b"BBB").unwrap();
+
+        // Two files from different folders whose names differ ONLY in case, moved
+        // into the same destination. On a case-insensitive FS (macOS/Windows) they
+        // collide on disk and the move must reject + roll back rather than silently
+        // overwrite one; on a case-sensitive FS both move fine. EITHER way, NEITHER
+        // file's contents may be lost — both "AAA" and "BBB" must survive somewhere.
+        let _ = move_paths_impl(
+            root,
+            vec![
+                a.to_string_lossy().to_string(),
+                b.to_string_lossy().to_string(),
+            ],
+            &dst,
+        );
+
+        let mut contents = Vec::new();
+        collect_file_contents(root, &mut contents);
+        assert!(contents.iter().any(|c| c == b"AAA"), "content AAA was lost");
+        assert!(contents.iter().any(|c| c == b"BBB"), "content BBB was lost");
     }
 
     #[cfg(unix)]
