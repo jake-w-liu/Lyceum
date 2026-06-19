@@ -25,6 +25,16 @@ export interface PdfMatch {
   occurrence: number;
 }
 
+// Case-fold for search. Beyond toLowerCase, canonicalize the Greek word-final
+// sigma ς (U+03C2) to medial σ (U+03C3): capital Σ lowercases to one or the other
+// depending on the following letter (the Unicode Final_Sigma rule), so the
+// whole-string fold in buildPageIndex and the per-text-node fold in
+// matchRectsInElement otherwise diverge at an item boundary and the highlight is
+// dropped/misplaced. Same-length substitution, so offset maps stay valid.
+export function foldCase(s: string): string {
+  return s.toLowerCase().replace(/ς/g, "σ");
+}
+
 export function buildPageIndex(
   pageNumber: number,
   content: PdfTextContent,
@@ -34,7 +44,7 @@ export function buildPageIndex(
     const str = (item as { str?: unknown }).str;
     if (typeof str === "string") text += str;
   }
-  return { pageNumber, lower: text.toLowerCase() };
+  return { pageNumber, lower: foldCase(text) };
 }
 
 /** Upper bound on collected matches. Caps the matches array and the highlight
@@ -49,7 +59,7 @@ export function findMatches(
   rawQuery: string,
   limit: number = MAX_PDF_MATCHES,
 ): PdfMatch[] {
-  const query = rawQuery.toLowerCase();
+  const query = foldCase(rawQuery);
   if (!query) return [];
   const matches: PdfMatch[] = [];
   for (const page of index) {
@@ -79,22 +89,23 @@ export function matchRectsInElement(
   query: string,
   occurrence: number,
 ): DOMRect[] {
-  const q = query.toLowerCase();
+  const q = foldCase(query);
   if (!q) return [];
 
   const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
   const nodes: Text[] = [];
-  // Per-node lowercased text. `flat` is searched in this lowercased index space,
-  // so `locate` must map positions back through the SAME lowercased lengths.
-  // A character whose lowercase has a different UTF-16 length than its original
-  // (only U+0130 'İ' in the BMP) would otherwise desync the two index spaces and
-  // place the highlight on the wrong node/offset — or drop it entirely.
+  // Per-node case-folded text. `flat` is searched in this folded index space, so
+  // `locate` must map positions back through the SAME folded lengths. A character
+  // whose lowercase has a different UTF-16 length than its original (only U+0130
+  // 'İ' in the BMP) would otherwise desync the two index spaces and place the
+  // highlight on the wrong node/offset — or drop it entirely. foldCase only
+  // substitutes final-sigma (same length), so it does not affect the length map.
   const lowered: string[] = [];
   let flat = "";
   for (let n = walker.nextNode(); n; n = walker.nextNode()) {
     const node = n as Text;
     nodes.push(node);
-    const low = node.data.toLowerCase();
+    const low = foldCase(node.data);
     lowered.push(low);
     flat += low;
   }

@@ -17,6 +17,19 @@ describe("buildPageIndex", () => {
     });
     expect(index).toEqual({ pageNumber: 3, lower: "hello world" });
   });
+
+  it("canonicalizes Greek final sigma so the index matches the query fold", () => {
+    // "ΛΟΓΟΣ" alone lowercases to "λογος" (word-final ς); the page index folds it
+    // to medial "λογοσ" so a query typed either way still matches.
+    const index = [buildPageIndex(1, { items: [{ str: "ΛΟΓΟΣ" }] })];
+    expect(index[0].lower).toBe("λογοσ");
+    expect(findMatches(index, "λογοσ")).toEqual([
+      { pageNumber: 1, occurrence: 0 },
+    ]);
+    expect(findMatches(index, "λογος")).toEqual([
+      { pageNumber: 1, occurrence: 0 },
+    ]);
+  });
 });
 
 describe("findMatches", () => {
@@ -109,5 +122,29 @@ describe("matchRectsInElement", () => {
     expect(setStart.mock.calls[0][1]).toBe(3);
     expect((setEnd.mock.calls[0][0] as Text).data).toBe("İz bar");
     expect(setEnd.mock.calls[0][1]).toBe(6);
+  });
+
+  it("folds final sigma so a match across a Σ text-item boundary still highlights", () => {
+    // pdf.js can split a word into separate spans. "ΟΔΟΣ" ending a node makes its
+    // Σ lowercase to word-final ς, while the page index sees medial σ. Without
+    // canonicalizing ς->σ the per-node search space ("οδοςμου") diverges from the
+    // query ("οσμ") and the highlight crossing the boundary is dropped.
+    const el = container("<span>ΟΔΟΣ</span><span>ΜΟΥ</span>");
+    const setStart = vi.fn();
+    const setEnd = vi.fn();
+    const rect = { left: 1, top: 2, width: 3, height: 4 } as DOMRect;
+    vi.spyOn(document, "createRange").mockReturnValue({
+      setStart,
+      setEnd,
+      getClientRects: () => [rect] as unknown as DOMRectList,
+    } as unknown as Range);
+
+    const rects = matchRectsInElement(el, "οσμ", 0);
+
+    expect(rects).toEqual([rect]);
+    expect((setStart.mock.calls[0][0] as Text).data).toBe("ΟΔΟΣ");
+    expect(setStart.mock.calls[0][1]).toBe(2);
+    expect((setEnd.mock.calls[0][0] as Text).data).toBe("ΜΟΥ");
+    expect(setEnd.mock.calls[0][1]).toBe(1);
   });
 });

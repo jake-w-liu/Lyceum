@@ -233,6 +233,21 @@ pub fn run() {
                     app.state::<workspace_watch::WorkspaceWatchManager>()
                         .shutdown_all();
                 }
+                // During a Quit, exit the whole app once the last window has run
+                // its own close guard and been destroyed — so no window's unsaved
+                // work is discarded, and so macOS (which keeps the process alive
+                // after the last window closes) still actually quits.
+                RunEvent::WindowEvent {
+                    label,
+                    event: tauri::WindowEvent::Destroyed,
+                    ..
+                } => {
+                    if window_ops::quit_requested()
+                        && app.webview_windows().into_keys().all(|l| l == label)
+                    {
+                        app.exit(0);
+                    }
+                }
                 #[cfg(target_os = "macos")]
                 RunEvent::Reopen {
                     has_visible_windows,

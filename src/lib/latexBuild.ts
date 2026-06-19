@@ -163,6 +163,9 @@ export async function runLatexBuild(
   } catch (e) {
     // Covers listen() failing (not inside Tauri) and the build invoke failing:
     // surface the error and release the run claim on every failure path.
+    // Flush first (like handleExit) so the backend's pre-spawn `$ command` line —
+    // buffered until the next frame — lands ABOVE this error, not below it.
+    flushOutputBuffer();
     useOutputStore.getState().append(cleanInvokeError(e));
     releaseRun();
     offData?.();

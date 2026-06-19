@@ -214,19 +214,20 @@ fn config_child_path(dir: &Path, name: &str) -> Result<PathBuf, String> {
 
 /// Read a file's raw bytes (used by the PDF viewer, M6). Files above
 /// `MAX_BINARY_FILE_SIZE` are refused (stat'd before reading).
-fn read_file_bytes_impl(path: &str) -> Result<Vec<u8>, String> {
-    let meta = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?;
+fn read_file_bytes_impl(path: &Path) -> Result<Vec<u8>, String> {
+    let display = path.display();
+    let meta = std::fs::metadata(path).map_err(|e| format!("{display}: {e}"))?;
     if !meta.is_file() {
-        return Err(format!("not a regular file: {path}"));
+        return Err(format!("not a regular file: {display}"));
     }
     if meta.len() > MAX_BINARY_FILE_SIZE {
         return Err(format!(
-            "{path}: file too large to open ({}, limit {})",
+            "{display}: file too large to open ({}, limit {})",
             human_size(meta.len()),
             human_size(MAX_BINARY_FILE_SIZE)
         ));
     }
-    std::fs::read(path).map_err(|e| format!("{path}: {e}"))
+    std::fs::read(path).map_err(|e| format!("{display}: {e}"))
 }
 
 /// Read a file's raw bytes as a binary IPC `Response` (`InvokeResponseBody::Raw`)
@@ -241,9 +242,7 @@ pub fn read_file_bytes(
 ) -> Result<tauri::ipc::Response, String> {
     let canonical =
         path_access::ensure_existing_file_allowed(&app, &window, &access, Path::new(&path))?;
-    Ok(tauri::ipc::Response::new(read_file_bytes_impl(
-        &canonical.to_string_lossy(),
-    )?))
+    Ok(tauri::ipc::Response::new(read_file_bytes_impl(&canonical)?))
 }
 
 #[cfg(test)]
@@ -285,7 +284,7 @@ mod tests {
     #[test]
     fn read_file_bytes_round_trips() {
         let tmp = tempfile::tempdir().expect("create temp dir");
-        let path = tmp.path().join("data.bin").to_string_lossy().to_string();
+        let path = tmp.path().join("data.bin");
         let bytes = vec![0u8, 1, 2, 253, 254, 255];
         std::fs::write(&path, &bytes).unwrap();
         // Test the inner helper; the command wraps it in a binary IPC Response.
