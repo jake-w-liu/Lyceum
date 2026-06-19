@@ -1238,6 +1238,8 @@ export default function PdfViewer({ path }: { path: string }) {
     const isScrollKey =
       event.key === "ArrowUp" ||
       event.key === "ArrowDown" ||
+      event.key === "ArrowLeft" ||
+      event.key === "ArrowRight" ||
       event.key === "PageUp" ||
       event.key === "PageDown" ||
       event.key === "Home" ||

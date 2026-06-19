@@ -134,10 +134,10 @@ fn path_string(path: &Path) -> String {
 
 fn repo_top_level(program: &OsString, cwd: &Path) -> Option<PathBuf> {
     let top = run_git(program, cwd, &["rev-parse", "--show-toplevel"])?;
-    // Trim ONLY the trailing line terminator git appends — not all whitespace, or
-    // a repo whose top-level directory name legitimately ends in a space would be
-    // turned into a nonexistent path, silently dropping every git decoration.
-    let trimmed = top.trim_end_matches(['\n', '\r']);
+    // Strip ONLY the single trailing LF git appends — git emits LF-only on stdout
+    // (no CR, no extra whitespace), so a top-level directory name that legitimately
+    // ends in a space or carriage return isn't turned into a nonexistent path.
+    let trimmed = top.strip_suffix('\n').unwrap_or(&top);
     if trimmed.is_empty() {
         None
     } else {

@@ -136,10 +136,14 @@ export function mergeSettings(partial: unknown): Settings {
     out.terminalCwdBehavior = p.terminalCwdBehavior as TerminalCwdBehavior;
   }
   out.runtimePaths = mergeRuntimePaths(p.runtimePaths);
-  // Backward-compatible migration from schema v1. The deprecated top-level key
-  // is read only when the new nested key did not already specify Julia.
-  if (typeof p.juliaPath === "string") {
-    out.runtimePaths.julia ||= p.juliaPath.trim();
+  // Backward-compatible migration from schema v1. Read the deprecated top-level
+  // key ONLY when the new nested runtimePaths.julia is entirely ABSENT — gating on
+  // emptiness (the old `||=`) would resurrect a value the user deliberately
+  // cleared. ponytail: once any save writes runtimePaths.julia the stale juliaPath
+  // key is inert, so it isn't worth stripping on write.
+  const nestedJulia = (p.runtimePaths as { julia?: unknown } | undefined)?.julia;
+  if (typeof p.juliaPath === "string" && typeof nestedJulia !== "string") {
+    out.runtimePaths.julia = p.juliaPath.trim();
   }
   if (typeof p.latexBuildCommand === "string") {
     out.latexBuildCommand = p.latexBuildCommand;

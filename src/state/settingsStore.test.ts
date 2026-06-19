@@ -69,6 +69,14 @@ describe("mergeSettings", () => {
         runtimePaths: { julia: "/new/julia" },
       }).runtimePaths.julia,
     ).toBe("/new/julia");
+    // A deliberately-cleared nested julia ("") must NOT be resurrected from the
+    // deprecated key — the nested key is present, so migration must not run.
+    expect(
+      mergeSettings({
+        juliaPath: "/old/julia",
+        runtimePaths: { julia: "" },
+      }).runtimePaths.julia,
+    ).toBe("");
   });
 
   it("trims runtime path strings", () => {
