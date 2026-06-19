@@ -23,8 +23,17 @@ const LATEX_TOOL_ORDER: [&str; 5] = ["latexmk", "tectonic", "pdflatex", "xelatex
 // Value-taking flags in the SPACE-separated form (`-flag value`). Shared by
 // tex_placeholder_index (so a value ending in .tex isn't mistaken for the input)
 // and custom_pdf_path (so PDF prediction and input selection can't diverge).
-const OUTDIR_FLAGS: [&str; 3] = ["-output-directory", "-outdir", "--outdir"];
-const JOBNAME_FLAGS: [&str; 1] = ["-jobname"];
+// Both single- and double-dash spellings: web2c TeX engines treat `-foo`/`--foo`
+// as the same long option, and latexmk's Getopt::Long accepts either. Recognizing
+// only some spellings would mispredict the PDF path (and mis-pick the input file)
+// for the unrecognized ones.
+const OUTDIR_FLAGS: [&str; 4] = [
+    "-output-directory",
+    "--output-directory",
+    "-outdir",
+    "--outdir",
+];
+const JOBNAME_FLAGS: [&str; 2] = ["-jobname", "--jobname"];
 // latexmk/MiKTeX also accept these path-valued flags in space-separated form; a
 // value ending in .tex must NOT be mistaken for the input file. (Kept separate
 // from OUTDIR_FLAGS because the aux dir does not move the output PDF.)
@@ -769,6 +778,27 @@ mod tests {
         assert_eq!(
             plan.args,
             vec!["paper.tex", "-output-directory", "build.tex"]
+        );
+    }
+
+    #[test]
+    fn custom_build_does_not_treat_a_double_dash_output_directory_value_ending_in_tex_as_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tex = tmp.path().join("paper.tex");
+        std::fs::write(&tex, "\\documentclass{article}").unwrap();
+
+        // Double-dash `--output-directory` (web2c/latexmk accept it the same as the
+        // single-dash form). Its .tex-ending value is the dir, not the input.
+        let plan = plan_latex_build_impl(
+            &tex,
+            "pdflatex --output-directory build.tex main.tex",
+            OsStr::new(""),
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.args,
+            vec!["--output-directory", "build.tex", "paper.tex"]
         );
     }
 
