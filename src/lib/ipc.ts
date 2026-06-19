@@ -108,6 +108,11 @@ export async function quitApp(): Promise<void> {
   await invoke("quit_app");
 }
 
+/** Abort an in-progress Quit when a window's discard prompt is declined. */
+export async function cancelQuit(): Promise<void> {
+  await invoke("cancel_quit");
+}
+
 /** List the immediate children of a directory (file explorer, M2). */
 export async function readDirectory(path: string): Promise<DirEntry[]> {
   await ensureCurrentWorkspaceAccess(path);

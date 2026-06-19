@@ -31,6 +31,9 @@ vi.mock("../lib/settingsPersistence", () => ({
   flushSettingsPersistence: flushSettingsPersistenceMock,
 }));
 
+const cancelQuitMock = vi.hoisted(() => vi.fn(async () => {}));
+vi.mock("../lib/ipc", () => ({ cancelQuit: cancelQuitMock }));
+
 import { initialEditorData, useEditorStore } from "../state/editorStore";
 import { initialGitData, useGitStore } from "../state/gitStore";
 import {
@@ -105,6 +108,7 @@ describe("useWorkspaceLifecycle", () => {
     flushSettingsPersistenceMock.mockReset().mockResolvedValue(undefined);
     onCloseRequestedMock.mockClear();
     destroyMock.mockClear();
+    cancelQuitMock.mockClear();
   });
   afterEach(() => vi.unstubAllGlobals());
 
@@ -290,6 +294,8 @@ describe("useWorkspaceLifecycle", () => {
       expect(preventDefault).toHaveBeenCalledTimes(1);
       expect(flushSettingsPersistenceMock).not.toHaveBeenCalled();
       expect(destroyMock).not.toHaveBeenCalled();
+      // Declining aborts any in-progress quit so the QUIT_REQUESTED latch clears.
+      expect(cancelQuitMock).toHaveBeenCalledTimes(1);
     });
 
     it("allows the close when the discard is confirmed", async () => {
@@ -305,6 +311,8 @@ describe("useWorkspaceLifecycle", () => {
 
       expect(preventDefault).toHaveBeenCalledTimes(1);
       await waitFor(() => expect(destroyMock).toHaveBeenCalledTimes(1));
+      // Confirming a close is not a quit-abort, so the latch must be left alone.
+      expect(cancelQuitMock).not.toHaveBeenCalled();
     });
 
     it("detaches the close listener on unmount", async () => {

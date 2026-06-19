@@ -17,6 +17,7 @@ import { initialPreviewData, usePreviewStore } from "../state/previewStore";
 import { initialSearchData, useSearchStore } from "../state/searchStore";
 import { initialTreeData, useTreeStore } from "../state/treeStore";
 import { useWorkspaceStore } from "../state/workspaceStore";
+import { cancelQuit } from "../lib/ipc";
 import { flushSettingsPersistence } from "../lib/settingsPersistence";
 
 export function resetWorkspaceScopedUi(): void {
@@ -100,7 +101,13 @@ export function useWorkspaceLifecycle(): void {
               const ok = await askDiscard(
                 "Discard unsaved changes and close the window?",
               );
-              if (!ok || disposed) return;
+              if (!ok) {
+                // Declined: abort any in-progress Quit so its QUIT_REQUESTED latch
+                // can't force-exit the app on a later, unrelated last-window close.
+                void cancelQuit();
+                return;
+              }
+              if (disposed) return;
             }
             closing = true;
             try {

@@ -213,6 +213,7 @@ pub fn run() {
             workspace_watch::unwatch_workspace,
             window_ops::new_window,
             window_ops::quit_app,
+            window_ops::cancel_quit,
             lsp::lsp_start,
             lsp::lsp_send,
             lsp::lsp_stop

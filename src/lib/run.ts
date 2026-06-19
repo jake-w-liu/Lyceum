@@ -3,12 +3,15 @@
 // running/runId state (so a stopped run also unblocks the next run).
 
 import { runCancel } from "./ipc";
-import { useOutputStore } from "../state/outputStore";
+import { flushOutputBuffer, useOutputStore } from "../state/outputStore";
 
 /** Stop the currently running code/build process, if any. Best-effort. */
 export async function stopActiveRun(): Promise<void> {
   const { running, runId } = useOutputStore.getState();
   if (!running || !runId) return;
+  // Flush buffered streamed output first (like handleExit / the latex catch) so
+  // earlier process lines stay ABOVE this marker instead of flushing below it.
+  flushOutputBuffer();
   useOutputStore.getState().append("[stopping…]");
   try {
     await runCancel(runId);

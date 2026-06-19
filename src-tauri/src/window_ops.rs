@@ -107,6 +107,14 @@ pub fn quit_requested() -> bool {
     QUIT_REQUESTED.load(Ordering::SeqCst)
 }
 
+/// Abort an in-progress Quit. The frontend calls this when a window's user
+/// declines its discard prompt: without it the QUIT_REQUESTED latch would stay
+/// set and a later, unrelated last-window close could force-exit the app.
+#[tauri::command]
+pub fn cancel_quit() {
+    QUIT_REQUESTED.store(false, Ordering::SeqCst);
+}
+
 #[cfg(test)]
 mod tests {
     use super::{next_available_window_label, window_label};
