@@ -20,6 +20,11 @@ use crate::path_access::{self, PathAccessManager};
 
 const STOCK_LATEX_BUILD_COMMAND: &str = "latexmk -pdf main.tex";
 const LATEX_TOOL_ORDER: [&str; 5] = ["latexmk", "tectonic", "pdflatex", "xelatex", "lualatex"];
+// Value-taking flags in the SPACE-separated form (`-flag value`). Shared by
+// tex_placeholder_index (so a value ending in .tex isn't mistaken for the input)
+// and custom_pdf_path (so PDF prediction and input selection can't diverge).
+const OUTDIR_FLAGS: [&str; 3] = ["-output-directory", "-outdir", "--outdir"];
+const JOBNAME_FLAGS: [&str; 1] = ["-jobname"];
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -274,9 +279,6 @@ fn pdf_path_for_tex(path: &Path) -> Result<PathBuf, String> {
 /// Without this, Lyceum would delete/predict/auto-open the wrong PDF for commands
 /// like `latexmk -pdf -output-directory=build main.tex`.
 fn custom_pdf_path(command: &str, tex_name: &str, cwd: &Path) -> Option<PathBuf> {
-    const OUTDIR_FLAGS: [&str; 3] = ["-output-directory", "-outdir", "--outdir"];
-    const JOBNAME_FLAGS: [&str; 1] = ["-jobname"];
-
     let tokens: Vec<String> = shell_token_spans(command)
         .iter()
         .map(|span| unquote_token(&command[span.start..span.end]))
@@ -485,19 +487,33 @@ fn unquote_token(token: &str) -> String {
 
 /// Index (in `shell_token_spans` order) of the token holding the user's input
 /// `.tex` placeholder: the LAST PLAIN OPERAND whose unquoted value ends in
-/// ".tex". A flag value such as `-o="x.tex"` (its token starts with '-') is never
-/// chosen. Returns None when no such operand exists (the caller appends the real
-/// name). SHARED by the display retarget and the executed-arg substitution so the
-/// two can never pick different tokens — otherwise the build would run a
-/// different file than the one shown (and used for PDF prediction).
+/// ".tex". A flag value is never chosen — neither the inline form `-o="x.tex"`
+/// (its token starts with '-') NOR the space-separated form `-output-directory
+/// build.tex` / `-jobname draft.tex` (the value token does not start with '-', so
+/// it is detected by skipping the token after a known value-taking flag). Returns
+/// None when no such operand exists (the caller appends the real name). SHARED by
+/// the display retarget AND the executed-arg substitution so the two can never
+/// pick different tokens, and uses the SAME flag set as custom_pdf_path so input
+/// selection and PDF prediction can't diverge.
 fn tex_placeholder_index(command: &str) -> Option<usize> {
-    shell_token_spans(command)
+    let tokens: Vec<String> = shell_token_spans(command)
+        .iter()
+        .map(|span| unquote_token(&command[span.start..span.end]))
+        .collect();
+    // Mark each token that is the VALUE of a space-separated value-taking flag.
+    let mut is_flag_value = vec![false; tokens.len()];
+    for i in 0..tokens.len() {
+        let tok = tokens[i].as_str();
+        if (OUTDIR_FLAGS.contains(&tok) || JOBNAME_FLAGS.contains(&tok)) && i + 1 < tokens.len() {
+            is_flag_value[i + 1] = true;
+        }
+    }
+    tokens
         .iter()
         .enumerate()
         .rev()
-        .find(|(_, span)| {
-            let unquoted = unquote_token(&command[span.start..span.end]);
-            !unquoted.starts_with('-') && unquoted.to_lowercase().ends_with(".tex")
+        .find(|(idx, tok)| {
+            !is_flag_value[*idx] && !tok.starts_with('-') && tok.to_lowercase().ends_with(".tex")
         })
         .map(|(idx, _)| idx)
 }
@@ -722,6 +738,28 @@ mod tests {
         assert_eq!(plan.args, vec!["real.tex", "-o=x.tex"]);
         assert!(plan.command.contains("\"real.tex\""));
         assert!(plan.command.contains("-o=\"x.tex\""));
+    }
+
+    #[test]
+    fn custom_build_does_not_treat_a_space_separated_flag_value_ending_in_tex_as_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tex = tmp.path().join("paper.tex");
+        std::fs::write(&tex, "\\documentclass{article}").unwrap();
+
+        // `-output-directory build.tex` — the flag VALUE ends in .tex but is the
+        // directory, not the input file. main.tex is the input and must be the one
+        // replaced; the flag value must be left intact.
+        let plan = plan_latex_build_impl(
+            &tex,
+            "latexmk main.tex -output-directory build.tex",
+            OsStr::new(""),
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.args,
+            vec!["paper.tex", "-output-directory", "build.tex"]
+        );
     }
 
     #[test]

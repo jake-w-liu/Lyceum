@@ -191,6 +191,14 @@ export function TerminalView({
           return;
         }
         useTerminalStore.getState().setBackendPtyId(id, ptyId);
+        // Re-sync the PTY to the CURRENT grid. A resize during the createPty
+        // round-trip was sent to a not-yet-existent PTY (and silently dropped),
+        // while createPty captured the pre-resize grid and the observer already
+        // advanced lastCols/lastRows — so its guard would never re-send. Without
+        // this, the PTY stays sized to the old grid and output is misaligned.
+        lastCols = term.cols;
+        lastRows = term.rows;
+        void resizePty(ptyId, term.cols, term.rows);
         // Flush any keystrokes buffered before the PTY existed.
         ready = true;
         for (const chunk of pending) void writePty(ptyId, chunk);

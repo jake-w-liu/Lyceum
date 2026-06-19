@@ -624,7 +624,15 @@ fn move_entry(from: &Path, to: &Path) -> std::io::Result<()> {
     match std::fs::rename(from, to) {
         Ok(()) => Ok(()),
         Err(e) if is_cross_device(&e) => {
-            copy_recursive(from, to)?;
+            if let Err(copy_err) = copy_recursive(from, to) {
+                // The copy failed partway and the source is untouched (removal
+                // happens only below). Remove any partial destination so callers
+                // see no stray copy — and so the trash path's "kept a copy?" check
+                // (symlink_metadata(destination)) only ever sees a DELIBERATELY
+                // kept complete copy, never this benign partial one.
+                let _ = remove_entry(to);
+                return Err(copy_err);
+            }
             // If the source can't be removed after a successful copy, the data
             // would otherwise exist at BOTH paths while the move reports failure
             // (callers' rollback only reverses moves already recorded as done,

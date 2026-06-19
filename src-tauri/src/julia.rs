@@ -166,12 +166,18 @@ pub(crate) fn augmented_path(path: Option<&OsStr>, home: Option<&OsStr>) -> OsSt
         dirs.push(PathBuf::from("/usr/sbin"));
         dirs.push(PathBuf::from("/sbin"));
     }
-    // env::join_paths fails if ANY element contains the path separator (a ':' in
-    // $HOME taints the .juliaup/.cargo entries). Fall back to the ORIGINAL PATH
-    // rather than an empty string — an empty PATH both breaks the child process
-    // and makes bare program names resolve relative to CWD (confused deputy).
-    env::join_paths(dedup_paths(dirs))
-        .unwrap_or_else(|_| path.map(|p| p.to_os_string()).unwrap_or_default())
+    // env::join_paths fails if ANY element contains the path list-separator (a
+    // ':' in $HOME taints the .juliaup/.cargo entries). Drop ONLY the tainted
+    // entries and join the rest, rather than collapsing PATH to empty — an empty
+    // PATH both breaks the child process and makes bare program names resolve
+    // relative to CWD (a confused-deputy vector). The hardcoded fallback dirs
+    // (/usr/bin, …) never contain the separator, so PATH is never empty — for an
+    // inherited PATH AND an unset one (None).
+    let dirs: Vec<PathBuf> = dirs
+        .into_iter()
+        .filter(|dir| env::join_paths(std::iter::once(dir)).is_ok())
+        .collect();
+    env::join_paths(dedup_paths(dirs)).unwrap_or_default()
 }
 
 fn dedup_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -851,16 +857,20 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn augmented_path_falls_back_to_original_when_home_contains_colon() {
-        // A ':' in $HOME taints the .juliaup/.cargo entries, so env::join_paths
-        // fails; PATH must fall back to the ORIGINAL value, not collapse to empty
-        // (which breaks the child and resolves bare program names against CWD).
+    fn augmented_path_never_collapses_to_empty_when_home_contains_colon() {
+        // A ':' in $HOME taints the .juliaup/.cargo entries, which would make
+        // env::join_paths fail. Those entries are dropped (not the whole PATH), so
+        // PATH stays non-empty (the hardcoded /usr/bin etc. always survive) — for
+        // BOTH an inherited PATH and an UNSET one (the case an earlier fix missed,
+        // which collapses to empty -> confused-deputy CWD resolution).
         let original = env::join_paths(["/usr/bin", "/bin"]).unwrap();
-        let augmented = augmented_path(Some(original.as_os_str()), Some(OsStr::new("/home/a:b")));
+        let with_path = augmented_path(Some(original.as_os_str()), Some(OsStr::new("/home/a:b")));
+        assert!(!with_path.is_empty());
+        assert!(env::split_paths(&with_path).any(|d| d == Path::new("/usr/bin")));
 
-        assert!(!augmented.is_empty());
-        let dirs: Vec<PathBuf> = env::split_paths(&augmented).collect();
-        assert!(dirs.iter().any(|d| d == Path::new("/usr/bin")));
+        let no_path = augmented_path(None, Some(OsStr::new("/home/a:b")));
+        assert!(!no_path.is_empty());
+        assert!(env::split_paths(&no_path).any(|d| d == Path::new("/usr/bin")));
     }
 
     #[test]

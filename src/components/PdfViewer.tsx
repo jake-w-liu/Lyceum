@@ -430,7 +430,14 @@ function PdfPage({
         pageRef.current = pdfPage;
         const viewport = pdfPage.getViewport({ scale: zoom });
         const baseViewport = pdfPage.getViewport({ scale: 1 });
-        setSize({ w: baseViewport.width, h: baseViewport.height });
+        // Only update when the intrinsic size actually changed: an equal-valued
+        // setState still creates a new object and would fire onResized (the parent
+        // re-pin), spuriously yanking the scroll on a release+re-render.
+        setSize((prev) =>
+          prev.w === baseViewport.width && prev.h === baseViewport.height
+            ? prev
+            : { w: baseViewport.width, h: baseViewport.height },
+        );
 
         const canvas = canvasRef.current;
         const textLayerElement = textLayerRef.current;
@@ -1220,6 +1227,11 @@ export default function PdfViewer({ path }: { path: string }) {
 
   // Cmd/Ctrl+F opens find when focus is anywhere inside the viewer.
   const handleRootKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    // Any key in the viewer (PageUp/Down, arrows, space) cancels a pending
+    // far-jump re-pin so keyboard scrolling isn't yanked back to the jump target
+    // — wheel/pointerdown already cancel it, but keyboard events don't reach the
+    // scroll container's listeners.
+    pendingScrollRef.current = null;
     if ((event.metaKey || event.ctrlKey) && (event.key === "f" || event.key === "F")) {
       event.preventDefault();
       setFindOpen(true);
