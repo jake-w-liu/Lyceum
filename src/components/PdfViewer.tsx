@@ -1227,11 +1227,25 @@ export default function PdfViewer({ path }: { path: string }) {
 
   // Cmd/Ctrl+F opens find when focus is anywhere inside the viewer.
   const handleRootKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    // Any key in the viewer (PageUp/Down, arrows, space) cancels a pending
-    // far-jump re-pin so keyboard scrolling isn't yanked back to the jump target
-    // — wheel/pointerdown already cancel it, but keyboard events don't reach the
-    // scroll container's listeners.
-    pendingScrollRef.current = null;
+    // A keyboard SCROLL in the document view (PageUp/Down, arrows, Home/End,
+    // space) cancels a pending far-jump re-pin so keyboard scrolling isn't yanked
+    // back to the target (wheel/pointerdown already cancel it). Gate on actual
+    // scroll keys AND a non-text-entry origin so typing in the find box or the
+    // page-number input does NOT cancel an in-flight jump-to-match / restore.
+    const target = event.target as HTMLElement;
+    const isTextEntry =
+      target.tagName === "INPUT" || target.tagName === "TEXTAREA";
+    const isScrollKey =
+      event.key === "ArrowUp" ||
+      event.key === "ArrowDown" ||
+      event.key === "PageUp" ||
+      event.key === "PageDown" ||
+      event.key === "Home" ||
+      event.key === "End" ||
+      event.key === " ";
+    if (isScrollKey && !isTextEntry) {
+      pendingScrollRef.current = null;
+    }
     if ((event.metaKey || event.ctrlKey) && (event.key === "f" || event.key === "F")) {
       event.preventDefault();
       setFindOpen(true);

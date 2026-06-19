@@ -252,6 +252,22 @@ describe("Explorer", () => {
     expect(createDirectory).toHaveBeenCalledWith("/ws/src/components");
   });
 
+  it("creates a new file in the selected directory even after Collapse All hides it", async () => {
+    render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await userEvent.click(await screen.findByText("src"));
+    await userEvent.click(await screen.findByText("main.tsx"));
+    // Collapse All hides main.tsx but keeps it selected (resolved-selection design).
+    await userEvent.click(screen.getByRole("button", { name: "Collapse All" }));
+    expect(screen.queryByText("main.tsx")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "New File" }));
+    const input = screen.getByLabelText("New file name");
+    await userEvent.type(input, "child.ts{Enter}");
+
+    // Must target src (the hidden selection's dir), NOT the workspace root.
+    expect(createFile).toHaveBeenCalledWith("/ws/src/child.ts");
+  });
+
   it("rejects create names that would escape the workspace", async () => {
     render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
     await screen.findByText("src");

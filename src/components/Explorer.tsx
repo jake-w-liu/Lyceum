@@ -671,22 +671,15 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     () => visibleEntries.map(({ entry }) => entry.path),
     [visibleEntries],
   );
-  const selectedEntries = useMemo(
-    () =>
-      visibleEntries
-        .map(({ entry }) => entry)
-        .filter((entry) => selectedPaths.includes(entry.path)),
-    [selectedPaths, visibleEntries],
-  );
   const entryByPath = useMemo(() => {
     const map = new Map<string, DirEntry>();
     for (const { entry } of visibleEntries) map.set(entry.path, entry);
     return map;
   }, [visibleEntries]);
   // Resolve the selection through the FULL loaded tree (not just visible rows) so
-  // delete/move act on every selected path even when an ancestor folder was
-  // collapsed (e.g. Collapse All) AFTER the items were selected. Using the
-  // visible-only `selectedEntries` there silently skips hidden-but-selected items.
+  // delete/move/create act on every selected path even when an ancestor folder
+  // was collapsed (e.g. Collapse All) AFTER the items were selected. A
+  // visible-only projection would silently skip hidden-but-selected items.
   const allEntryByPath = useMemo(() => {
     const map = new Map<string, DirEntry>();
     for (const children of Object.values(allChildren)) {
@@ -779,8 +772,12 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
   }, [createRequest]);
 
   function createParentPath(): string {
-    if (selectedEntries.length !== 1) return rootPath;
-    const selected = selectedEntries[0];
+    // Resolve through the FULL tree (like delete/move) so New File/New Folder
+    // still target the selected directory when an ancestor was collapsed (e.g.
+    // Collapse All) after selection — the visible-only selectedEntries would be
+    // empty and wrongly create the item at the workspace root.
+    if (resolvedSelectedEntries.length !== 1) return rootPath;
+    const selected = resolvedSelectedEntries[0];
     return selected.isDir ? selected.path : parentDir(selected.path);
   }
 
