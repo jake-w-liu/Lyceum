@@ -92,9 +92,10 @@ export function hasRunProfileForDoc(doc: EditorDoc | null | undefined): boolean 
 }
 
 function explicitRuntimePath(profile: RunProfile, settings: Settings): string {
-  if (profile.id === "shell") {
-    return (settings.runtimePaths.shell || settings.shellPath).trim();
-  }
+  // NOTE: the shell profile must NOT fall back to settings.shellPath — that is
+  // the INTERACTIVE terminal shell, which may be a non-POSIX shell (fish/nu/csh)
+  // the backend run-profile allowlist rejects (only sh/bash/zsh). When
+  // runtimePaths.shell is unset, fall through to the sh/bash/zsh default instead.
   return settings.runtimePaths[profile.id].trim();
 }
 
@@ -156,10 +157,7 @@ export function missingRuntimeMessage(
   if (!/No such file|os error 2|not found|failed to start/i.test(errorMessage)) {
     return null;
   }
-  const setting =
-    profile.id === "shell"
-      ? "runtimePaths.shell or shellPath"
-      : `runtimePaths.${profile.id}`;
+  const setting = `runtimePaths.${profile.id}`;
   return [
     `${profile.label} runtime was not found.`,
     `Install ${profile.label} or set ${setting} in settings to a matching runtime executable path.`,

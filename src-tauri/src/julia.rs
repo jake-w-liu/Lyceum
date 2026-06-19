@@ -288,9 +288,14 @@ fn normalized_program_name(program: &str) -> Option<String> {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or(trimmed);
+    // Lowercase BEFORE stripping the Windows .exe suffix so the strip is
+    // case-insensitive (Windows filenames are): a configured `PYTHON.EXE` must
+    // normalize to `python`, not `python.exe`, or the run-profile allowlist would
+    // reject a legitimate runtime.
+    let lower = file_name.to_ascii_lowercase();
     #[cfg(windows)]
-    let file_name = file_name.strip_suffix(".exe").unwrap_or(file_name);
-    Some(file_name.to_ascii_lowercase())
+    let lower = lower.strip_suffix(".exe").unwrap_or(&lower).to_string();
+    Some(lower)
 }
 
 pub(crate) fn validate_run_profile_programs(
@@ -871,6 +876,22 @@ mod tests {
         let no_path = augmented_path(None, Some(OsStr::new("/home/a:b")));
         assert!(!no_path.is_empty());
         assert!(env::split_paths(&no_path).any(|d| d == Path::new("/usr/bin")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_uppercase_exe_extension_is_accepted_by_run_profile() {
+        // Windows filenames are case-insensitive: an uppercase .EXE must normalize
+        // to the base name so a legitimate runtime is not rejected.
+        assert_eq!(
+            normalized_program_name(r"C:\Python\PYTHON.EXE").as_deref(),
+            Some("python")
+        );
+        assert_eq!(
+            normalized_program_name("python3.EXE").as_deref(),
+            Some("python3")
+        );
+        assert!(validate_run_profile_programs("python", r"C:\Python\PYTHON.EXE", &[]).is_ok());
     }
 
     #[test]

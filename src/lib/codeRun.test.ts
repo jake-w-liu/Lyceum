@@ -203,6 +203,23 @@ describe("runActiveCode", () => {
     ).toBe("sh");
   });
 
+  it("does not use the interactive shellPath as the shell-script interpreter", () => {
+    // shellPath is the TERMINAL shell and may be non-POSIX (fish/nu) which the
+    // backend rejects for the shell run profile. With runtimePaths.shell unset,
+    // Run on a .sh must fall through to the sh/bash/zsh default, not shellPath.
+    const settings = {
+      ...DEFAULT_SETTINGS,
+      shellPath: "/opt/homebrew/bin/fish",
+      runtimePaths: { ...DEFAULT_SETTINGS.runtimePaths, shell: "" },
+    };
+    const command = runInvocation(
+      doc("/w/script.sh", "shell"),
+      "",
+      settings,
+    )?.command;
+    expect(command?.program).toBe("sh");
+  });
+
   it("uses configured runtime paths", async () => {
     useSettingsStore.getState().replaceAll({
       ...DEFAULT_SETTINGS,

@@ -367,8 +367,10 @@ fn parse_custom_latex_command(
 
 fn latex_tool_name(program: &str) -> Option<String> {
     let name = Path::new(program).file_name()?.to_str()?;
-    let name = name.strip_suffix(".exe").unwrap_or(name);
-    let lower = name.to_ascii_lowercase();
+    // Lowercase BEFORE stripping `.exe` so an uppercase/mixed-case extension
+    // (e.g. `LATEXMK.EXE` on case-insensitive Windows) still maps to the tool.
+    let lowered = name.to_ascii_lowercase();
+    let lower = lowered.strip_suffix(".exe").unwrap_or(&lowered).to_string();
     LATEX_TOOL_ORDER
         .iter()
         .find(|tool| **tool == lower)
@@ -846,6 +848,16 @@ mod tests {
             .unwrap_err();
 
         assert!(err.contains("latexBuildCommand must start with one of"));
+    }
+
+    #[test]
+    fn latex_tool_name_strips_exe_case_insensitively() {
+        // Windows filenames are case-insensitive, so an uppercase/mixed-case .exe
+        // must still map to the tool (the strip used to be case-sensitive).
+        assert_eq!(latex_tool_name("LATEXMK.EXE").as_deref(), Some("latexmk"));
+        assert_eq!(latex_tool_name("Tectonic.Exe").as_deref(), Some("tectonic"));
+        assert_eq!(latex_tool_name("latexmk").as_deref(), Some("latexmk"));
+        assert_eq!(latex_tool_name("notatool").as_deref(), None);
     }
 
     #[test]
