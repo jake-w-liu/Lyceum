@@ -242,12 +242,10 @@ pub fn run() {
                     label,
                     event: tauri::WindowEvent::Destroyed,
                     ..
-                } => {
-                    if window_ops::quit_requested()
-                        && app.webview_windows().into_keys().all(|l| l == label)
-                    {
-                        app.exit(0);
-                    }
+                } if window_ops::quit_requested()
+                    && app.webview_windows().into_keys().all(|l| l == label) =>
+                {
+                    app.exit(0);
                 }
                 #[cfg(target_os = "macos")]
                 RunEvent::Reopen {

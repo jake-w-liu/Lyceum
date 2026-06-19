@@ -318,6 +318,11 @@ mod tests {
         assert!(leftovers.is_empty(), "temp file leaked: {leftovers:?}");
     }
 
+    // Non-Windows: this exercises the per-component NAME_MAX (255-byte) clamp. On
+    // Windows the binding limit is MAX_PATH (260 for the whole path), so a 254-byte
+    // name in a temp dir can't be created at all — a different constraint than the
+    // clamp targets. The clamp itself still applies on every platform.
+    #[cfg(not(windows))]
     #[test]
     fn write_file_atomically_handles_near_max_length_names() {
         // A legal 254-byte filename: the derived temp name must be clamped to stay
