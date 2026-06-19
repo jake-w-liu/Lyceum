@@ -47,9 +47,20 @@ export function evaluateWhen(expr: string | undefined, ctx: KeyContext): boolean
   if (typeof expr !== "string") return true;
   const trimmed = expr.trim();
   if (trimmed === "") return true;
-  const parser = new WhenParser(tokenizeWhen(trimmed), ctx);
-  return parser.parse();
+  try {
+    return new WhenParser(tokenizeWhen(trimmed), ctx).parse();
+  } catch {
+    // A pathologically deep / malformed `when` (e.g. thousands of nested parens
+    // in a hand-edited keybindings.json) must not throw out of the global keydown
+    // handler. Treat it as not-matched so the binding simply doesn't fire.
+    return false;
+  }
 }
+
+// Cap recursion in WhenParser so an adversarially deep `when` throws a controlled
+// error (caught above) instead of overflowing the stack. Real `when` clauses
+// nest only a handful of levels.
+const MAX_WHEN_DEPTH = 100;
 
 type WhenToken =
   | { type: "ident"; value: string }
@@ -101,6 +112,7 @@ function tokenizeWhen(expr: string): WhenToken[] {
 
 class WhenParser {
   private pos = 0;
+  private depth = 0;
 
   constructor(
     private readonly tokens: WhenToken[],
@@ -113,14 +125,20 @@ class WhenParser {
   }
 
   private parseOr(): boolean | null {
-    let value = this.parseAnd();
-    if (value === null) return null;
-    while (this.match("or")) {
-      const right = this.parseAnd();
-      if (right === null) return null;
-      value = value || right;
+    this.depth += 1;
+    if (this.depth > MAX_WHEN_DEPTH) throw new Error("when clause too deeply nested");
+    try {
+      let value = this.parseAnd();
+      if (value === null) return null;
+      while (this.match("or")) {
+        const right = this.parseAnd();
+        if (right === null) return null;
+        value = value || right;
+      }
+      return value;
+    } finally {
+      this.depth -= 1;
     }
-    return value;
   }
 
   private parseAnd(): boolean | null {
@@ -147,8 +165,14 @@ class WhenParser {
 
   private parseUnary(): boolean | null {
     if (this.match("not")) {
-      const value = this.parseUnary();
-      return value === null ? null : !value;
+      this.depth += 1;
+      if (this.depth > MAX_WHEN_DEPTH) throw new Error("when clause too deeply nested");
+      try {
+        const value = this.parseUnary();
+        return value === null ? null : !value;
+      } finally {
+        this.depth -= 1;
+      }
     }
     return this.parsePrimary();
   }

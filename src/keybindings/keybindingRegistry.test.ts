@@ -209,6 +209,15 @@ describe("evaluateWhen", () => {
     expect(evaluateWhen({} as unknown as string, {})).toBe(true);
   });
 
+  it("returns false (does not overflow the stack) on a pathologically deep when", () => {
+    // A hand-edited keybindings.json with thousands of nested parens / `!` must
+    // not throw RangeError out of the global keydown handler.
+    const deepParens = "(".repeat(5000) + "a" + ")".repeat(5000);
+    expect(evaluateWhen(deepParens, { a: true })).toBe(false);
+    const deepBangs = "!".repeat(5000) + "a";
+    expect(evaluateWhen(deepBangs, {})).toBe(false);
+  });
+
   it("'a' => false when absent", () => {
     expect(evaluateWhen("a", {})).toBe(false);
   });

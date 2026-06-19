@@ -168,11 +168,12 @@ pub(crate) fn augmented_path(path: Option<&OsStr>, home: Option<&OsStr>) -> OsSt
     }
     // env::join_paths fails if ANY element contains the path list-separator (a
     // ':' in $HOME taints the .juliaup/.cargo entries). Drop ONLY the tainted
-    // entries and join the rest, rather than collapsing PATH to empty — an empty
-    // PATH both breaks the child process and makes bare program names resolve
-    // relative to CWD (a confused-deputy vector). The hardcoded fallback dirs
-    // (/usr/bin, …) never contain the separator, so PATH is never empty — for an
-    // inherited PATH AND an unset one (None).
+    // entries and join the rest, rather than collapsing PATH to empty. On Unix an
+    // empty PATH breaks the child AND makes bare program names resolve relative to
+    // CWD (a confused-deputy vector); the hardcoded fallback dirs (/usr/bin, …)
+    // keep PATH non-empty even when the inbound PATH is unset. (On Windows there
+    // are no hardcoded dirs here, but std::process resolves the program itself via
+    // the app dir / System32 — never the CWD — so an empty PATH is not a vector.)
     let dirs: Vec<PathBuf> = dirs
         .into_iter()
         .filter(|dir| env::join_paths(std::iter::once(dir)).is_ok())
