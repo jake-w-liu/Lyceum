@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { buildInitializeParams, pathToUri, uriToPath } from "./lspProtocol";
+import {
+  buildInitializeParams,
+  leafName,
+  pathToUri,
+  uriToPath,
+} from "./lspProtocol";
 
 describe("lsp protocol helpers", () => {
   it("converts a path to a file URI and back", () => {
@@ -28,6 +33,16 @@ describe("lsp protocol helpers", () => {
     const params = buildInitializeParams(null);
     expect(params.rootUri).toBeNull();
     expect(params.workspaceFolders).toBeNull();
+  });
+
+  it("derives the workspace-folder name as the leaf for posix and windows roots", () => {
+    expect(leafName("/Users/jake/proj")).toBe("proj");
+    expect(leafName("/Users/jake/proj/")).toBe("proj"); // trailing separator
+    expect(leafName("C:\\Users\\jake\\proj")).toBe("proj"); // windows backslash
+    expect(leafName("\\\\?\\C:\\Users\\jake\\proj")).toBe("proj"); // \\?\ prefix
+    expect(buildInitializeParams("C:\\Users\\jake\\proj").workspaceFolders).toEqual(
+      [{ uri: pathToUri("C:\\Users\\jake\\proj"), name: "proj" }],
+    );
   });
 
   it("falls back to the raw form on malformed percent-encoding (never throws)", () => {

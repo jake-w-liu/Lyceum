@@ -18,6 +18,16 @@ export function uriToPath(uri: string): string {
   }
 }
 
+/** Last path segment, for the workspace-folder display label. Handles both `/`
+ *  and `\` separators, trailing separators, and a Windows `\\?\` extended-length
+ *  prefix — canonical Windows roots are backslash-delimited, so a plain
+ *  `split("/")` would return the whole path as the name. */
+export function leafName(rootPath: string): string {
+  const normalized = rootPath.replace(/^\\\\\?\\/, "");
+  const segments = normalized.split(/[/\\]+/).filter((s) => s.length > 0);
+  return segments[segments.length - 1] ?? rootPath;
+}
+
 export interface InitializeParams {
   processId: number | null;
   rootUri: string | null;
@@ -43,7 +53,7 @@ export function buildInitializeParams(rootPath: string | null): InitializeParams
       },
     },
     workspaceFolders: rootPath
-      ? [{ uri: pathToUri(rootPath), name: rootPath.split("/").pop() ?? rootPath }]
+      ? [{ uri: pathToUri(rootPath), name: leafName(rootPath) }]
       : null,
   };
 }

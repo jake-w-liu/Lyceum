@@ -148,10 +148,21 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         .and_then(|n| n.to_str())
         .unwrap_or("lyceum-file");
     let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp = parent.join(format!(
-        ".{file_name}.lyceum-tmp.{}.{seq}",
-        std::process::id()
-    ));
+    // The temp component is `.{file_name}{suffix}`. Clamp the embedded name so the
+    // whole component stays within the 255-byte per-component limit used by
+    // APFS/ext4/NTFS — otherwise a legal but near-max-length filename overflows
+    // NAME_MAX and the save is refused. The temp name only needs to be unique in
+    // `parent` (pid+seq guarantee that), not a faithful copy of the original.
+    // ponytail: 255 is the standard component limit; a filesystem with a smaller
+    // one would already constrain the original name too.
+    const NAME_MAX: usize = 255;
+    let suffix = format!(".lyceum-tmp.{}.{seq}", std::process::id());
+    let budget = NAME_MAX.saturating_sub(1 + suffix.len()); // 1 for the leading '.'
+    let mut keep = file_name.len().min(budget);
+    while keep > 0 && !file_name.is_char_boundary(keep) {
+        keep -= 1; // don't split a UTF-8 codepoint
+    }
+    let tmp = parent.join(format!(".{}{suffix}", &file_name[..keep]));
 
     // Write fully, flush, and fsync the temp file before swapping it in.
     let write_result = (|| -> std::io::Result<()> {
@@ -299,6 +310,25 @@ mod tests {
         write_file_impl(Path::new(&path), "new").expect("overwrite");
         assert_eq!(read_file_impl(Path::new(&path)).expect("read"), "new");
         // No temp files should be left behind in the directory.
+        let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("lyceum-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp file leaked: {leftovers:?}");
+    }
+
+    #[test]
+    fn write_file_atomically_handles_near_max_length_names() {
+        // A legal 254-byte filename: the derived temp name must be clamped to stay
+        // within NAME_MAX, or File::create fails with ENAMETOOLONG and the save is
+        // wrongly refused for a perfectly valid file.
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let name = format!("{}.txt", "a".repeat(250)); // 254 bytes
+        let path = tmp.path().join(&name);
+        write_file_impl(&path, "content").expect("write long-named file");
+        assert_eq!(read_file_impl(&path).expect("read back"), "content");
+        // And no temp file is left behind.
         let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
             .unwrap()
             .filter_map(|e| e.ok())
