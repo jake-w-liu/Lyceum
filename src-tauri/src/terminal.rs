@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 /// Monotonic generation stamp for sessions. The reader thread only removes its
@@ -25,12 +25,11 @@ struct Session {
     // manager map lock across blocking PTY I/O (a full PTY buffer would
     // otherwise deadlock every terminal command). Mirrors lsp.rs's stdin.
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    killer: Box<dyn ChildKiller + Send + Sync>,
     // The child handle lives in the session (not the reader thread) so whoever
     // wins the gen-guarded map removal — the reader on EOF, OR a closer — owns
-    // the reap. This makes child.wait() (which frees the pid) and the killer's
-    // bare-pid SIGHUP mutually exclusive, so a closer can never signal a pid the
-    // reader just reaped and the OS may have reused.
+    // the reap. All kills go through this one owned handle (child.kill() escalates
+    // SIGHUP -> grace -> SIGKILL), so child.wait() and any kill share a single
+    // handle and a closer can never signal a pid the reader just reaped.
     child: Box<dyn portable_pty::Child + Send + Sync>,
     gen: u64,
 }
@@ -52,7 +51,10 @@ impl TerminalManager {
     pub fn shutdown_all(&self) {
         if let Ok(mut sessions) = self.sessions.lock() {
             for (_id, mut session) in sessions.drain() {
-                let _ = session.killer.kill();
+                // child.kill() escalates SIGHUP -> grace -> SIGKILL so a shell
+                // that traps/ignores SIGHUP is terminated, not left orphaned.
+                let _ = session.child.kill();
+                let _ = session.child.wait();
             }
         }
     }
@@ -87,7 +89,8 @@ impl TerminalManager {
 /// shell slow to exit on SIGHUP. The sessions are already removed from the map,
 /// and the child lives in the Session, so the reader threads won't double-reap
 /// and the reap/kill can't race a reader's wait on the same pid. (App-exit
-/// shutdown_all stays inline + kill-only: the process is dying, the OS reaps.)
+/// shutdown_all does the same kill+reap inline — the app is quitting, so there's
+/// nothing left for it to block.)
 fn kill_and_reap_detached(sessions: Vec<Session>) {
     if sessions.is_empty() {
         return;
@@ -97,7 +100,6 @@ fn kill_and_reap_detached(sessions: Vec<Session>) {
             // child.kill() escalates SIGHUP -> grace -> SIGKILL (portable_pty),
             // so a shell that traps/ignores SIGHUP can't block child.wait()
             // forever and leak this thread, the process, and the PTY fds.
-            // (killer.kill() sends only a bare SIGHUP with no escalation.)
             let _ = session.child.kill();
             let _ = session.child.wait();
         }
@@ -227,7 +229,6 @@ pub fn terminal_create(
             Session {
                 master: pair.master,
                 writer,
-                killer,
                 child,
                 gen,
             },

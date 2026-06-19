@@ -25,6 +25,10 @@ const LATEX_TOOL_ORDER: [&str; 5] = ["latexmk", "tectonic", "pdflatex", "xelatex
 // and custom_pdf_path (so PDF prediction and input selection can't diverge).
 const OUTDIR_FLAGS: [&str; 3] = ["-output-directory", "-outdir", "--outdir"];
 const JOBNAME_FLAGS: [&str; 1] = ["-jobname"];
+// latexmk/MiKTeX also accept these path-valued flags in space-separated form; a
+// value ending in .tex must NOT be mistaken for the input file. (Kept separate
+// from OUTDIR_FLAGS because the aux dir does not move the output PDF.)
+const AUXDIR_FLAGS: [&str; 4] = ["-aux-directory", "--aux-directory", "-auxdir", "--auxdir"];
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -506,7 +510,11 @@ fn tex_placeholder_index(command: &str) -> Option<usize> {
     let mut is_flag_value = vec![false; tokens.len()];
     for i in 0..tokens.len() {
         let tok = tokens[i].as_str();
-        if (OUTDIR_FLAGS.contains(&tok) || JOBNAME_FLAGS.contains(&tok)) && i + 1 < tokens.len() {
+        if (OUTDIR_FLAGS.contains(&tok)
+            || JOBNAME_FLAGS.contains(&tok)
+            || AUXDIR_FLAGS.contains(&tok))
+            && i + 1 < tokens.len()
+        {
             is_flag_value[i + 1] = true;
         }
     }
@@ -762,6 +770,25 @@ mod tests {
             plan.args,
             vec!["paper.tex", "-output-directory", "build.tex"]
         );
+    }
+
+    #[test]
+    fn custom_build_does_not_treat_an_aux_directory_value_ending_in_tex_as_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tex = tmp.path().join("paper.tex");
+        std::fs::write(&tex, "\\documentclass{article}").unwrap();
+
+        // `-aux-directory aux.tex` — the flag VALUE ends in .tex but is the aux
+        // directory, not the input. main.tex is the input and must be the one
+        // replaced; the aux-directory value must be left intact.
+        let plan = plan_latex_build_impl(
+            &tex,
+            "latexmk main.tex -aux-directory aux.tex",
+            OsStr::new(""),
+        )
+        .unwrap();
+
+        assert_eq!(plan.args, vec!["paper.tex", "-aux-directory", "aux.tex"]);
     }
 
     #[test]
