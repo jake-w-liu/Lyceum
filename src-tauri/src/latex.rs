@@ -38,6 +38,28 @@ const JOBNAME_FLAGS: [&str; 2] = ["-jobname", "--jobname"];
 // value ending in .tex must NOT be mistaken for the input file. (Kept separate
 // from OUTDIR_FLAGS because the aux dir does not move the output PDF.)
 const AUXDIR_FLAGS: [&str; 4] = ["-aux-directory", "--aux-directory", "-auxdir", "--auxdir"];
+// Tectonic uniquely documents a SHORT output-directory flag (`-o, --outdir`). The
+// web2c engines and latexmk use only the long spellings, and `-o` is not confirmed
+// to mean output-dir for them, so it is honored ONLY for tectonic (flag_value is
+// exact, so `-o` never matches `-outdir`/`-output-directory`).
+const TECTONIC_OUTDIR_FLAGS: [&str; 5] = [
+    "-output-directory",
+    "--output-directory",
+    "-outdir",
+    "--outdir",
+    "-o",
+];
+
+/// The output-directory flag spellings to honor for the engine named by `program`
+/// — tectonic's `-o` short form is added only for tectonic. SHARED by custom_pdf_path
+/// and tex_placeholder_index so PDF prediction and input selection stay consistent.
+fn outdir_flags_for(program: &str) -> &'static [&'static str] {
+    if latex_tool_name(program).as_deref() == Some("tectonic") {
+        &TECTONIC_OUTDIR_FLAGS
+    } else {
+        &OUTDIR_FLAGS
+    }
+}
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -297,6 +319,7 @@ fn custom_pdf_path(command: &str, tex_name: &str, cwd: &Path) -> Option<PathBuf>
         .map(|span| unquote_token(&command[span.start..span.end]))
         .collect();
 
+    let outdir_flags = outdir_flags_for(tokens.first().map(String::as_str).unwrap_or(""));
     let mut outdir: Option<String> = None;
     let mut jobname: Option<String> = None;
     let mut i = 0;
@@ -305,7 +328,7 @@ fn custom_pdf_path(command: &str, tex_name: &str, cwd: &Path) -> Option<PathBuf>
         let next = tokens.get(i + 1);
         let mut consumed_next = false;
         if outdir.is_none() {
-            for flag in OUTDIR_FLAGS {
+            for &flag in outdir_flags {
                 if let Some((value, used_next)) = flag_value(tok, next, flag) {
                     outdir = Some(value);
                     consumed_next = used_next;
@@ -516,10 +539,11 @@ fn tex_placeholder_index(command: &str) -> Option<usize> {
         .map(|span| unquote_token(&command[span.start..span.end]))
         .collect();
     // Mark each token that is the VALUE of a space-separated value-taking flag.
+    let outdir_flags = outdir_flags_for(tokens.first().map(String::as_str).unwrap_or(""));
     let mut is_flag_value = vec![false; tokens.len()];
     for i in 0..tokens.len() {
         let tok = tokens[i].as_str();
-        if (OUTDIR_FLAGS.contains(&tok)
+        if (outdir_flags.contains(&tok)
             || JOBNAME_FLAGS.contains(&tok)
             || AUXDIR_FLAGS.contains(&tok))
             && i + 1 < tokens.len()
@@ -819,6 +843,29 @@ mod tests {
         .unwrap();
 
         assert_eq!(plan.args, vec!["paper.tex", "-aux-directory", "aux.tex"]);
+    }
+
+    #[test]
+    fn outdir_short_o_flag_is_scoped_to_tectonic() {
+        assert!(outdir_flags_for("tectonic").contains(&"-o"));
+        assert!(outdir_flags_for("/usr/local/bin/tectonic").contains(&"-o"));
+        // Other engines must NOT treat `-o` as output-directory (unverified there).
+        assert!(!outdir_flags_for("pdflatex").contains(&"-o"));
+        assert!(!outdir_flags_for("latexmk").contains(&"-o"));
+    }
+
+    #[test]
+    fn custom_build_treats_tectonic_short_o_value_as_outdir_not_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tex = tmp.path().join("paper.tex");
+        std::fs::write(&tex, "\\documentclass{article}").unwrap();
+
+        // tectonic `-o <dir>`: the value (even ending in .tex) is the output dir,
+        // not the input. main.tex is the input and is the token retargeted.
+        let plan =
+            plan_latex_build_impl(&tex, "tectonic main.tex -o out.tex", OsStr::new("")).unwrap();
+
+        assert_eq!(plan.args, vec!["paper.tex", "-o", "out.tex"]);
     }
 
     #[test]

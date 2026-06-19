@@ -268,6 +268,32 @@ describe("Explorer", () => {
     expect(createFile).toHaveBeenCalledWith("/ws/src/child.ts");
   });
 
+  it("mounts the create input for a DEEPLY nested target after Collapse All", async () => {
+    // Two levels deep: an intervening ancestor (src) is collapsed. startCreate must
+    // expand the whole chain (root/src/components), or components' node — and the
+    // inline create input — never render, silently no-opping the create.
+    vi.mocked(readDirectory).mockImplementation(async (p: string) => {
+      if (p === ROOT) return [dir("src")];
+      if (p === "/ws/src") return [dir("components", "/ws/src")];
+      if (p === "/ws/src/components")
+        return [file("Button.tsx", "/ws/src/components")];
+      return [];
+    });
+    render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await userEvent.click(await screen.findByText("src"));
+    await userEvent.click(await screen.findByText("components"));
+    await userEvent.click(await screen.findByText("Button.tsx"));
+    await userEvent.click(screen.getByRole("button", { name: "Collapse All" }));
+    expect(screen.queryByText("Button.tsx")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "New File" }));
+    // The input must MOUNT — it wouldn't if an intervening ancestor stayed collapsed.
+    const input = await screen.findByLabelText("New file name");
+    await userEvent.type(input, "child.ts{Enter}");
+
+    expect(createFile).toHaveBeenCalledWith("/ws/src/components/child.ts");
+  });
+
   it("rejects create names that would escape the workspace", async () => {
     render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
     await screen.findByText("src");

@@ -785,9 +785,24 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     const parentPath = createParentPath();
     createCommittedRef.current = false;
     if (parentPath !== rootPath) {
-      useTreeStore.getState().setExpanded(parentPath, true);
-      if (useTreeStore.getState().children[parentPath] === undefined) {
-        loadInto(parentPath);
+      // Expand the WHOLE ancestor chain from the root down to parentPath, not just
+      // parentPath itself. createParentPath resolves through the full tree, so the
+      // target can sit under a collapsed ancestor (e.g. after Collapse All); if any
+      // intervening ancestor stays collapsed, parentPath's TreeNode — and the inline
+      // create input — never renders and New File/New Folder silently no-ops with a
+      // stuck `creating` state. Mirror revealActiveFile's ancestor walk.
+      const sep = rootPath.includes("\\") ? "\\" : "/";
+      const rel = parentPath.slice(rootPath.length).replace(/^[/\\]/, "");
+      const ancestors = [rootPath];
+      let cur = rootPath;
+      for (const segment of rel.split(/[/\\]/)) {
+        cur = `${cur}${sep}${segment}`;
+        ancestors.push(cur);
+      }
+      useTreeStore.getState().expandPaths(ancestors);
+      const cached = useTreeStore.getState().children;
+      for (const ancestor of ancestors) {
+        if (cached[ancestor] === undefined) loadInto(ancestor);
       }
     }
     setCreating({ kind, parentPath });
