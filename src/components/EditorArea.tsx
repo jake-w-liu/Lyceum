@@ -2,7 +2,7 @@
 // lazily-loaded Monaco editor; with none open it shows the welcome screen with
 // the layout-toggle keyboard hints.
 
-import { Suspense, lazy } from "react";
+import { Suspense, lazy, useLayoutEffect, useRef, useState } from "react";
 import { isMac } from "../hooks/useLayoutKeybindings";
 import {
   isHtmlPath,
@@ -75,8 +75,24 @@ export function EditorArea() {
   const previewLabel =
     activePath && isHtmlPath(activePath) ? "HTML preview" : "Markdown preview";
 
+  // Hide the welcome screen when the editor column is too narrow to show it
+  // (e.g. a right-docked terminal dragged wide) so it never paints clipped
+  // fragments. 320px comfortably fits the title and the widest hint row.
+  const areaRef = useRef<HTMLElement>(null);
+  const [tooNarrowForWelcome, setTooNarrowForWelcome] = useState(false);
+  useLayoutEffect(() => {
+    const el = areaRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width ?? 0;
+      setTooNarrowForWelcome(width > 0 && width < 320);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
   return (
-    <section className="editor-area" aria-label="Editor">
+    <section className="editor-area" aria-label="Editor" ref={areaRef}>
       {hasDocs ? (
         <>
           <TabBar />
@@ -129,7 +145,7 @@ export function EditorArea() {
             )}
           </div>
         </>
-      ) : (
+      ) : tooNarrowForWelcome ? null : (
         <Welcome />
       )}
     </section>

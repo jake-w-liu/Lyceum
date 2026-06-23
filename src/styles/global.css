@@ -472,8 +472,14 @@ kbd {
   flex-direction: column;
   min-height: 0;
   /* Allow the editor to shrink to nothing so a right-docked panel can fill the
-     center (default flex min-width:auto would floor it at its content width). */
+     center (default flex min-width:auto would floor it at its content width).
+     overflow:hidden clips the centered welcome screen instead of letting it
+     bleed across the sidebar/panel once the column is narrower than its
+     content. */
   min-width: 0;
+  /* Clip any content (Monaco, previews) that can't shrink with the column. The
+     welcome screen is removed in JS when too narrow (see EditorArea). */
+  overflow: hidden;
   background: var(--bg);
 }
 

@@ -66,8 +66,9 @@ function getSidebarMaxWidth(): number {
 function getPanelMaxWidth(center: HTMLDivElement | null): number {
   const centerWidth = getElementWidth(center);
   if (centerWidth <= 0) return PANEL_MAX_WIDTH;
-  // .resizer-vertical occupies 4px between the editor and the panel.
-  return Math.max(PANEL_MIN_WIDTH, centerWidth - 4);
+  // The .resizer-vertical has negative margins (net ~0 footprint), so the panel
+  // can take the full center and squeeze the editor to nothing.
+  return Math.max(PANEL_MIN_WIDTH, centerWidth);
 }
 
 function getBottomPanelMaxHeight(center: HTMLDivElement | null): number {
