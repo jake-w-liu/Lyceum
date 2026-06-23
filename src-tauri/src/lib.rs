@@ -198,6 +198,7 @@ pub fn run() {
             fs_ops::create_directory,
             fs_ops::rename_path,
             fs_ops::move_paths,
+            fs_ops::copy_paths,
             fs_ops::move_paths_to_trash,
             fs_ops::restore_trash_batch,
             fs_ops::redo_trash_batch,

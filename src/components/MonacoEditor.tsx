@@ -44,6 +44,7 @@ import {
 import type { LspSession } from "../lsp/lspClient";
 import { serverForLanguage } from "../lsp/servers";
 import { setActiveEditor } from "../lib/editorBridge";
+import { commandRegistry } from "../commands/commandRegistry";
 
 // Monotonic LSP document version (incremented on every edit across models).
 let lspChangeVersion = 1;
@@ -239,6 +240,14 @@ export default function MonacoEditor() {
     });
     editorRef.current = editor;
     setActiveEditor(editor); // expose to workbench commands (format/goto/rename)
+
+    // Override Monaco's built-in Alt+Z (which toggles Monaco's own wrap, leaving
+    // our persisted setting out of sync) so it drives the settings store — the
+    // single source of truth that the subscription below applies live. When the
+    // editor isn't focused, the global keymap's alt+z handles it instead.
+    editor.addCommand(monaco.KeyMod.Alt | monaco.KeyCode.KeyZ, () => {
+      void commandRegistry.execute("editor.toggleWordWrap");
+    });
 
     // Keep Monaco's theme in sync with the app theme.
     const unsubTheme = useThemeStore.subscribe((s) =>

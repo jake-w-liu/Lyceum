@@ -29,6 +29,9 @@ export const DEFAULT_KEYMAP: Keybinding[] = [
   { key: "mod+shift+v", command: "preview.open" },
   { key: "mod+shift+f", command: "workbench.searchWorkspace" },
   { key: "mod+enter", command: "editor.run" },
+  // When the editor is focused Monaco's own Alt+Z (rerouted to this command)
+  // handles it; this covers the case when focus is elsewhere (e.g. explorer).
+  { key: "alt+z", command: "editor.toggleWordWrap", when: "!editorFocus" },
   // Editor font zoom (VS Code-style). Both with and without Shift on the Equal
   // key so Cmd+= and Cmd++ both enlarge; Cmd+- shrinks; Cmd+0 resets.
   { key: "mod+equal", command: "view.zoomIn" },

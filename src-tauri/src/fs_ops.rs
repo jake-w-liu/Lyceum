@@ -263,6 +263,23 @@ pub fn move_paths(
     move_paths_impl(&root_path, paths, Path::new(&destination_dir))
 }
 
+/// Copy one or more source paths — which may live OUTSIDE the workspace (e.g.
+/// files dropped from the OS file manager) — into an existing destination
+/// directory under the workspace root.
+#[tauri::command]
+pub fn copy_paths(
+    app: AppHandle,
+    window: tauri::Window,
+    access: State<'_, PathAccessManager>,
+    root: String,
+    paths: Vec<String>,
+    destination_dir: String,
+) -> Result<Vec<MovedPathDto>, String> {
+    let root_path =
+        path_access::ensure_existing_dir_allowed(&app, &window, &access, Path::new(&root))?;
+    copy_paths_impl(&root_path, paths, Path::new(&destination_dir))
+}
+
 #[tauri::command]
 pub fn move_paths_to_trash(
     app: AppHandle,
@@ -439,6 +456,88 @@ fn move_paths_impl(
         });
     }
     Ok(moved)
+}
+
+fn copy_paths_impl(
+    root: &Path,
+    paths: Vec<String>,
+    destination_dir: &Path,
+) -> Result<Vec<MovedPathDto>, String> {
+    let requested_root = root.to_path_buf();
+    let root = canonical_dir(root)?;
+    let destination = destination_dir
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", destination_dir.display()))?;
+    validate_move_destination(&root, &destination)?;
+
+    // Plan: resolve every source and its destination name, rejecting collisions
+    // and duplicate destinations BEFORE copying anything, so an invalid drop
+    // leaves the workspace untouched.
+    let mut planned: Vec<(PathBuf, PathBuf, bool)> = Vec::new();
+    let mut destinations = HashSet::new();
+    for raw in paths {
+        let source = Path::new(&raw)
+            .canonicalize()
+            .map_err(|e| format!("{raw}: {e}"))?;
+        let is_dir = std::fs::symlink_metadata(&source)
+            .map_err(|e| format!("{}: {e}", source.display()))?
+            .file_type()
+            .is_dir();
+        // Copying a folder into itself or its own descendant would recurse
+        // forever as the copy keeps re-reading what it just wrote.
+        if is_dir && destination.starts_with(&source) {
+            return Err(format!(
+                "cannot copy a folder into itself: {} -> {}",
+                source.display(),
+                destination.display()
+            ));
+        }
+        let name = source
+            .file_name()
+            .ok_or_else(|| format!("cannot determine file name for {}", source.display()))?;
+        let to = destination.join(name);
+        if !destinations.insert(to.clone()) {
+            return Err(format!("multiple items would overwrite {}", to.display()));
+        }
+        if path_entry_exists(&to) {
+            return Err(format!("already exists: {}", to.display()));
+        }
+        planned.push((source, to, is_dir));
+    }
+
+    let mut copied = Vec::with_capacity(planned.len());
+    // Destinations created so far; on any failure they're removed so a partial
+    // multi-item import leaves nothing stray behind. The sources are external
+    // and never touched, so removing the copies is always safe.
+    let mut done: Vec<PathBuf> = Vec::new();
+    for (from, to, is_dir) in planned {
+        // Re-check right before copying: an earlier copy in THIS batch, or a
+        // case-insensitive FS folding two names together (note.txt vs NOTE.txt),
+        // may have created `to` after the planning loop's check.
+        if path_entry_exists(&to) {
+            rollback_copies(&done);
+            return Err(format!("already exists: {}", to.display()));
+        }
+        if let Err(e) = copy_recursive(&from, &to) {
+            let _ = remove_entry(&to);
+            rollback_copies(&done);
+            return Err(format!("{} -> {}: {e}", from.display(), to.display()));
+        }
+        done.push(to.clone());
+        copied.push(MovedPathDto {
+            from: from.to_string_lossy().to_string(),
+            to: path_for_requested_root(&root, &requested_root, &to),
+            is_dir,
+        });
+    }
+    Ok(copied)
+}
+
+/// Remove already-copied destinations to undo a partially-failed import.
+fn rollback_copies(done: &[PathBuf]) {
+    for dest in done.iter().rev() {
+        let _ = remove_entry(dest);
+    }
 }
 
 fn restore_trash_batch_impl(root: &Path, items: Vec<TrashItemDto>) -> Result<(), String> {
@@ -1327,6 +1426,53 @@ mod tests {
         assert_eq!(moved[0].to, expected_to);
         assert!(!src.exists());
         assert_eq!(fs::read(dst.join("note.txt")).unwrap(), b"note");
+    }
+
+    #[test]
+    fn copy_paths_imports_external_files_and_keeps_the_source() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let dst = root.join("folder");
+        fs::create_dir(&dst).unwrap();
+        // Source lives OUTSIDE the workspace, like a file dropped from Finder.
+        let outside = tempfile::tempdir().expect("create temp dir");
+        let src = outside.path().join("note.txt");
+        fs::write(&src, b"note").unwrap();
+
+        let copied = copy_paths_impl(root, vec![src.to_string_lossy().to_string()], &dst)
+            .expect("copy file");
+
+        assert_eq!(copied.len(), 1);
+        assert_eq!(copied[0].to, dst.join("note.txt").to_string_lossy());
+        assert_eq!(fs::read(dst.join("note.txt")).unwrap(), b"note");
+        assert!(src.exists(), "source must be left untouched");
+    }
+
+    #[test]
+    fn copy_paths_rejects_collision_and_rolls_back_the_batch() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let outside = tempfile::tempdir().expect("create temp dir");
+        let good = outside.path().join("fresh.txt");
+        let clash = outside.path().join("taken.txt");
+        fs::write(&good, b"good").unwrap();
+        fs::write(&clash, b"new").unwrap();
+        // A file named `taken.txt` already exists at the destination.
+        fs::write(root.join("taken.txt"), b"old").unwrap();
+
+        let err = copy_paths_impl(
+            root,
+            vec![
+                good.to_string_lossy().to_string(),
+                clash.to_string_lossy().to_string(),
+            ],
+            root,
+        )
+        .expect_err("collision must fail the whole import");
+        assert!(err.contains("already exists"), "{err}");
+        // Pre-collision check rejects before copying, so nothing strays in.
+        assert!(!root.join("fresh.txt").exists(), "batch must roll back");
+        assert_eq!(fs::read(root.join("taken.txt")).unwrap(), b"old");
     }
 
     #[cfg(unix)]

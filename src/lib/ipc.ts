@@ -192,6 +192,16 @@ export async function movePaths(
   return invoke<MovedPath[]>("move_paths", { root, paths, destinationDir });
 }
 
+/** Copy external (or workspace) files/directories into a workspace directory. */
+export async function copyPaths(
+  root: string,
+  paths: string[],
+  destinationDir: string,
+): Promise<MovedPath[]> {
+  await authorizeWorkspaceRoot(root);
+  return invoke<MovedPath[]>("copy_paths", { root, paths, destinationDir });
+}
+
 /** Move files/directories into Lyceum's workspace-local trash for undoable delete. */
 export async function movePathsToTrash(
   root: string,

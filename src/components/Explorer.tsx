@@ -4,7 +4,9 @@
 
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { ask, message } from "@tauri-apps/plugin-dialog";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
+  copyPaths,
   createDirectory,
   createFile,
   movePaths,
@@ -418,6 +420,7 @@ function TreeNode({
           aria-selected={selected}
           className="tree-row-main"
           data-path={entry.path}
+          data-isdir={entry.isDir ? "1" : ""}
           aria-expanded={entry.isDir ? expanded : undefined}
           title={
             gitStatus
@@ -663,6 +666,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
   const createInputRef = useRef<HTMLInputElement>(null);
   const createCommittedRef = useRef(false);
   const treeRef = useRef<HTMLUListElement>(null);
+  const explorerRef = useRef<HTMLDivElement>(null);
   const visibleEntries = useMemo(
     () => flattenVisibleEntries(rootChildren, allChildren, expanded),
     [rootChildren, allChildren, expanded],
@@ -963,6 +967,74 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     }
   }
 
+  // Copy OS files dropped into the explorer (from Finder etc.) into the folder
+  // under the cursor — VS Code-style import.
+  async function importPaths(sourcePaths: string[], destinationDir: string) {
+    if (sourcePaths.length === 0) return;
+    try {
+      const copied = await copyPaths(rootPath, sourcePaths, destinationDir);
+      if (destinationDir !== rootPath) {
+        useTreeStore.getState().setExpanded(destinationDir, true);
+      }
+      if (copied.length > 0) {
+        useTreeStore.getState().setSelection(copied.map((item) => item.to));
+      }
+      useTreeStore.getState().refresh();
+    } catch (err) {
+      console.error("import failed", err);
+      void message(`Import failed: ${String(err)}`);
+    }
+  }
+
+  // Tauri intercepts native file drops, so the destination folder is resolved by
+  // hit-testing the DOM under the (physical-pixel) cursor rather than via web
+  // dragover events. Returns null when the cursor is outside the explorer.
+  function resolveImportDir(position: { x: number; y: number }): string | null {
+    const dpr = window.devicePixelRatio || 1;
+    const el = document.elementFromPoint(position.x / dpr, position.y / dpr);
+    if (!el || !explorerRef.current?.contains(el)) return null;
+    const row = el.closest<HTMLElement>("[data-path]");
+    if (!row) return rootPath; // inside the explorer but not on a row → root
+    const path = row.dataset.path!;
+    return row.dataset.isdir === "1" ? path : parentDir(path);
+  }
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    let webview;
+    try {
+      webview = getCurrentWebview();
+    } catch {
+      // Not running inside a Tauri webview (e.g. unit tests) — file-drop import
+      // simply isn't wired; the explorer still renders and works normally.
+      return;
+    }
+    void webview
+      .onDragDropEvent((event) => {
+        const payload = event.payload;
+        if (payload.type === "drop") {
+          setDropTargetPath(null);
+          const dir = resolveImportDir(payload.position);
+          if (dir) void importPaths(payload.paths, dir);
+        } else if (payload.type === "enter" || payload.type === "over") {
+          setDropTargetPath(resolveImportDir(payload.position));
+        } else {
+          setDropTargetPath(null); // leave
+        }
+      })
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+    // resolveImportDir/importPaths close over rootPath; re-subscribe when it changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rootPath]);
+
   function onExplorerKeyDown(e: React.KeyboardEvent) {
     if (isEditableEventTarget(e.target)) return;
     const key = e.key.toLowerCase();
@@ -1074,7 +1146,12 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
   }
 
   return (
-    <div className="explorer" tabIndex={0} onKeyDown={onExplorerKeyDown}>
+    <div
+      className="explorer"
+      tabIndex={0}
+      ref={explorerRef}
+      onKeyDown={onExplorerKeyDown}
+    >
       <div className="explorer-toolbar">
         <button
           type="button"

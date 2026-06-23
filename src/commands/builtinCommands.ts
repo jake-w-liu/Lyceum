@@ -262,6 +262,16 @@ export function registerBuiltinCommands(): void {
     run: () => useThemeStore.getState().cycleTheme(),
   });
 
+  commandRegistry.register({
+    id: "editor.toggleWordWrap",
+    title: "Toggle Word Wrap",
+    category: "View",
+    run: () => {
+      const { settings, setSetting } = useSettingsStore.getState();
+      setSetting("wordWrap", settings.wordWrap === "off" ? "on" : "off");
+    },
+  });
+
   // --- Window zoom (Cmd/Ctrl + = / - / 0), VS Code-style: scales the WHOLE UI
   // (explorer, tabs, terminal, editor) via the native webview zoom. The level is
   // persisted in settings; lib/zoom applies it to the webview when it changes. ---
