@@ -2053,7 +2053,7 @@ checksum = "616ec5685824bcc94416c6d4a7a446eea774a31efd7062c8480ba6fd06d7a6e5"
 
 [[package]]
 name = "lyceum"
-version = "0.5.17"
+version = "0.5.18"
 dependencies = [
  "base64 0.22.1",
  "libc",

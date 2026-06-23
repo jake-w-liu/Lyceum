@@ -12,6 +12,8 @@ mod git;
 mod julia;
 mod latex;
 mod lsp;
+#[cfg(target_os = "macos")]
+mod macos_service;
 mod menu;
 mod path_access;
 mod search;
@@ -104,6 +106,12 @@ pub fn run() {
         .setup(|app| {
             let menu = menu::build_app_menu(app.handle())?;
             app.set_menu(menu)?;
+            // Install/refresh the "Open in Lyceum" Finder Quick Action so users
+            // can right-click a folder to open it. Best-effort, never fatal.
+            #[cfg(target_os = "macos")]
+            if let Err(err) = macos_service::ensure_installed() {
+                eprintln!("failed to install Finder Quick Action: {err}");
+            }
             // Route the cold-start folder (`lyceum .`) to the initial window by
             // its label, so its frontend — and no other window — opens it.
             if let Some(dir) = launch_dir_from_args() {
