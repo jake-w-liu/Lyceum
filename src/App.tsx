@@ -17,6 +17,11 @@ import { useWorkspaceLifecycle } from "./hooks/useWorkspaceLifecycle";
 import {
   BOTTOM_MAX_HEIGHT,
   BOTTOM_MIN_HEIGHT,
+  EDITOR_MIN_WIDTH,
+  PANEL_MAX_WIDTH,
+  PANEL_MIN_WIDTH,
+  SIDEBAR_MAX_WIDTH,
+  SIDEBAR_MIN_WIDTH,
   useLayoutStore,
 } from "./state/layoutStore";
 import { applyThemeAttribute, useThemeStore } from "./state/themeStore";
@@ -33,6 +38,36 @@ import "./commands/builtinCommands";
 function getElementHeight(el: Element | null): number {
   if (!(el instanceof HTMLElement)) return 0;
   return el.getBoundingClientRect().height || el.offsetHeight;
+}
+
+function getElementWidth(el: Element | null): number {
+  if (!(el instanceof HTMLElement)) return 0;
+  return el.getBoundingClientRect().width || el.offsetWidth;
+}
+
+// Widest the sidebar may be dragged: the window minus the activity bar (measured
+// so it tracks CSS) and a minimum editor area, capped by the hard ceiling. Falls
+// back gracefully before first paint when widths read as 0.
+function getSidebarMaxWidth(): number {
+  const activityBarWidth = getElementWidth(
+    document.querySelector(".activity-bar"),
+  );
+  const available = window.innerWidth - activityBarWidth - EDITOR_MIN_WIDTH;
+  return Math.max(
+    SIDEBAR_MIN_WIDTH,
+    Math.min(SIDEBAR_MAX_WIDTH, available),
+  );
+}
+
+// Widest the right-docked panel may be dragged: the full center minus the
+// resizer, so the editor can be squeezed to nothing (the user explicitly wants
+// to drop the editor and run the terminal full-width). Falls back to the store
+// value before first paint when the center width reads as 0.
+function getPanelMaxWidth(center: HTMLDivElement | null): number {
+  const centerWidth = getElementWidth(center);
+  if (centerWidth <= 0) return PANEL_MAX_WIDTH;
+  // .resizer-vertical occupies 4px between the editor and the panel.
+  return Math.max(PANEL_MIN_WIDTH, centerWidth - 4);
 }
 
 function getBottomPanelMaxHeight(center: HTMLDivElement | null): number {
@@ -102,6 +137,36 @@ export default function App() {
     return () => window.removeEventListener("resize", clampBottomPanelHeight);
   }, [bottomPanelVisible, getBottomPanelResizeMax, panelPosition]);
 
+  // Shrinking the window must not let an already-wide sidebar bury the editor.
+  useLayoutEffect(() => {
+    if (!sidebarVisible) return;
+
+    const clampSidebarWidth = () => {
+      const { sidebarWidth, setSidebarWidth } = useLayoutStore.getState();
+      const maxWidth = getSidebarMaxWidth();
+      if (sidebarWidth > maxWidth) setSidebarWidth(maxWidth);
+    };
+
+    clampSidebarWidth();
+    window.addEventListener("resize", clampSidebarWidth);
+    return () => window.removeEventListener("resize", clampSidebarWidth);
+  }, [sidebarVisible]);
+
+  // Keep the right-docked panel within the center when the window shrinks.
+  useLayoutEffect(() => {
+    if (!bottomPanelVisible || panelPosition !== "right") return;
+
+    const clampPanelWidth = () => {
+      const { panelWidth, setPanelWidth } = useLayoutStore.getState();
+      const maxWidth = getPanelMaxWidth(centerRef.current);
+      if (panelWidth > maxWidth) setPanelWidth(maxWidth);
+    };
+
+    clampPanelWidth();
+    window.addEventListener("resize", clampPanelWidth);
+    return () => window.removeEventListener("resize", clampPanelWidth);
+  }, [bottomPanelVisible, panelPosition]);
+
   return (
     <div className="app">
       <div className="workbench">
@@ -116,7 +181,9 @@ export default function App() {
               onDelta={(dx) => {
                 const { sidebarWidth, setSidebarWidth } =
                   useLayoutStore.getState();
-                setSidebarWidth(sidebarWidth + dx);
+                setSidebarWidth(
+                  Math.min(sidebarWidth + dx, getSidebarMaxWidth()),
+                );
               }}
             />
           </>
@@ -141,7 +208,12 @@ export default function App() {
                   const { panelWidth, setPanelWidth } = useLayoutStore.getState();
                   // The resizer sits on the panel's left edge; dragging left
                   // (dx < 0) widens it.
-                  setPanelWidth(panelWidth - dx);
+                  setPanelWidth(
+                    Math.min(
+                      panelWidth - dx,
+                      getPanelMaxWidth(centerRef.current),
+                    ),
+                  );
                 }}
               />
             ) : (

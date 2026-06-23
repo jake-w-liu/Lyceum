@@ -471,6 +471,9 @@ kbd {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  /* Allow the editor to shrink to nothing so a right-docked panel can fill the
+     center (default flex min-width:auto would floor it at its content width). */
+  min-width: 0;
   background: var(--bg);
 }
 

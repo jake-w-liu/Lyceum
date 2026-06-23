@@ -20,12 +20,21 @@ export type BottomTab = "terminal" | "problems" | "output";
 export type PanelPosition = "bottom" | "right";
 
 // Size clamps (px). Exported so components/resizers and tests share one source.
-export const SIDEBAR_MIN_WIDTH = 170;
-export const SIDEBAR_MAX_WIDTH = 600;
+export const SIDEBAR_MIN_WIDTH = 100;
+// Hard sanity ceiling. The real drag limit is dynamic (window width minus the
+// activity bar and a minimum editor — see getSidebarMaxWidth in App.tsx), so on
+// normal windows the editor-room cap binds first; this only guards absurd
+// persisted/edited values on very wide displays.
+export const SIDEBAR_MAX_WIDTH = 1600;
+// Smallest editor area to keep visible when the sidebar is dragged wide.
+export const EDITOR_MIN_WIDTH = 120;
 export const BOTTOM_MIN_HEIGHT = 80;
 export const BOTTOM_MAX_HEIGHT = 800;
 export const PANEL_MIN_WIDTH = 200;
-export const PANEL_MAX_WIDTH = 900;
+// Hard sanity ceiling. The real drag limit for the right-docked panel is dynamic
+// (the full center width, so the editor can be squeezed to nothing — see
+// getPanelMaxWidth in App.tsx); this only guards absurd persisted values.
+export const PANEL_MAX_WIDTH = 4000;
 export const PDF_MIN_WIDTH = 240;
 export const PDF_MAX_WIDTH = 1000;
 
