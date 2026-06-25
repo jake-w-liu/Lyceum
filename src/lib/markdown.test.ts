@@ -4,12 +4,16 @@ import { renderMarkdown } from "./markdown";
 describe("renderMarkdown", () => {
   it("renders headings", () => {
     const html = renderMarkdown("# Hi");
-    expect(html).toContain("<h1>");
+    expect(html).toContain("<h1");
+    expect(html).toContain('data-source-line="1"');
+    expect(html).toContain('data-source-index="2"');
     expect(html).toContain("Hi");
   });
 
   it("renders bold text", () => {
-    expect(renderMarkdown("**b**")).toContain("<strong>");
+    const html = renderMarkdown("**b**");
+    expect(html).toContain("<strong>");
+    expect(html).toContain('data-source-index="2"');
   });
 
   it("escapes raw HTML", () => {

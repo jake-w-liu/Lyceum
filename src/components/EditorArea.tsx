@@ -13,6 +13,7 @@ import { isTextDoc, useEditorStore } from "../state/editorStore";
 import { getActiveEditor } from "../lib/editorBridge";
 import { useLayoutStore } from "../state/layoutStore";
 import { TabBar } from "./TabBar";
+import type { MarkdownSourcePosition } from "./MarkdownView";
 
 // Lazy so the Monaco bundle + workers load only once a document is opened.
 const MonacoEditor = lazy(() => import("./MonacoEditor"));
@@ -77,7 +78,12 @@ export function EditorArea() {
   const previewLabel =
     activePath && isHtmlPath(activePath) ? "HTML preview" : "Markdown preview";
 
-  function switchPreviewToSource() {
+  function switchPreviewToSource(position?: MarkdownSourcePosition) {
+    if (activePath && position) {
+      useEditorStore
+        .getState()
+        .setPendingReveal(activePath, position.line, position.column);
+    }
     setEditorPreview(false);
     window.setTimeout(() => getActiveEditor()?.focus(), 0);
   }
