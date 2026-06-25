@@ -2,10 +2,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Explorer } from "./Explorer";
+import { ContextMenu } from "./ContextMenu";
 import type { DirEntry } from "../lib/ipc";
 import { initialTreeData, useTreeStore } from "../state/treeStore";
 import { initialEditorData, useEditorStore } from "../state/editorStore";
 import { initialGitData, useGitStore } from "../state/gitStore";
+import {
+  initialContextMenuData,
+  useContextMenuStore,
+} from "../state/contextMenuStore";
 
 // Native confirm/alert dialogs (Tauri plugin). `ask` defaults to confirming.
 vi.mock("@tauri-apps/plugin-dialog", () => ({
@@ -18,6 +23,7 @@ vi.mock("../lib/ipc", () => ({
   createFile: vi.fn(async () => {}),
   createDirectory: vi.fn(async () => {}),
   renamePath: vi.fn(async () => {}),
+  copyPaths: vi.fn(async () => []),
   movePaths: vi.fn(async () => []),
   movePathsToTrash: vi.fn(async () => ({
     id: "batch-1",
@@ -37,6 +43,7 @@ import {
   createDirectory,
   createFile,
   movePathsToTrash,
+  copyPaths,
   movePaths,
   readDirectory,
   redoTrashBatch,
@@ -74,6 +81,7 @@ beforeEach(() => {
   useTreeStore.setState(initialTreeData, false);
   useEditorStore.setState(initialEditorData, false);
   useGitStore.setState(initialGitData, false);
+  useContextMenuStore.setState(initialContextMenuData, false);
   useWorkspaceStore.setState(initialWorkspaceData, false);
   vi.mocked(readDirectory).mockReset();
   vi.mocked(readDirectory).mockImplementation(async (p: string) => {
@@ -84,6 +92,8 @@ beforeEach(() => {
   vi.mocked(createFile).mockClear();
   vi.mocked(createDirectory).mockClear();
   vi.mocked(renamePath).mockClear();
+  vi.mocked(copyPaths).mockReset();
+  vi.mocked(copyPaths).mockResolvedValue([]);
   vi.mocked(movePaths).mockReset();
   vi.mocked(movePaths).mockResolvedValue([]);
   vi.mocked(movePathsToTrash).mockReset();
@@ -427,6 +437,93 @@ describe("Explorer", () => {
     await waitFor(() => expect(movePaths).toHaveBeenCalled());
     expect(useEditorStore.getState().docs[0].path).toBe(
       "/canonical/src/README.md",
+    );
+  });
+
+  it("moves a nested file to the workspace root when dropped on empty explorer space", async () => {
+    vi.mocked(readDirectory).mockImplementation(async (p: string) => {
+      if (p === ROOT) return [dir("src")];
+      if (p === "/ws/src") return [file("main.tsx", "/ws/src")];
+      return [];
+    });
+    vi.mocked(movePaths).mockResolvedValue([
+      { from: "/ws/src/main.tsx", to: "/ws/main.tsx", isDir: false },
+    ]);
+    const { container } = render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await userEvent.click(await screen.findByText("src"));
+    await screen.findByText("main.tsx");
+    const mainRow = screen.getByText("main.tsx").closest(".tree-row")!;
+    const rootDropSpacer = container.querySelector(".tree-root-drop-spacer")!;
+    const dataTransfer = {
+      effectAllowed: "",
+      dropEffect: "",
+      setData: vi.fn(),
+      getData: vi.fn(),
+    };
+
+    fireEvent.dragStart(mainRow, { dataTransfer });
+    fireEvent.dragOver(rootDropSpacer, { dataTransfer });
+    fireEvent.drop(rootDropSpacer, { dataTransfer });
+
+    await waitFor(() =>
+      expect(movePaths).toHaveBeenCalledWith(ROOT, ["/ws/src/main.tsx"], ROOT),
+    );
+  });
+
+  it("copies a file from the explorer context menu and pastes it into a folder", async () => {
+    vi.mocked(movePaths).mockResolvedValue([]);
+    vi.mocked(readDirectory).mockImplementation(async (p: string) => {
+      if (p === ROOT) return [dir("src"), file("README.md")];
+      if (p === "/ws/src") return [];
+      return [];
+    });
+    vi.mocked(copyPaths).mockResolvedValue([
+      { from: "/ws/README.md", to: "/ws/src/README.md", isDir: false },
+    ]);
+    render(
+      <>
+        <Explorer rootPath={ROOT} onOpenFile={() => {}} />
+        <ContextMenu />
+      </>,
+    );
+    await screen.findByText("README.md");
+
+    fireEvent.contextMenu(screen.getByText("README.md").closest(".tree-row")!);
+    await userEvent.click(screen.getByRole("menuitem", { name: "Copy" }));
+    fireEvent.contextMenu(screen.getByText("src").closest(".tree-row")!);
+    await userEvent.click(screen.getByRole("menuitem", { name: "Paste" }));
+
+    await waitFor(() =>
+      expect(copyPaths).toHaveBeenCalledWith(ROOT, ["/ws/README.md"], "/ws/src"),
+    );
+    expect(movePaths).not.toHaveBeenCalled();
+  });
+
+  it("cuts a file from the explorer context menu and pastes it at the workspace root", async () => {
+    vi.mocked(readDirectory).mockImplementation(async (p: string) => {
+      if (p === ROOT) return [dir("src")];
+      if (p === "/ws/src") return [file("main.tsx", "/ws/src")];
+      return [];
+    });
+    vi.mocked(movePaths).mockResolvedValue([
+      { from: "/ws/src/main.tsx", to: "/ws/main.tsx", isDir: false },
+    ]);
+    const { container } = render(
+      <>
+        <Explorer rootPath={ROOT} onOpenFile={() => {}} />
+        <ContextMenu />
+      </>,
+    );
+    await userEvent.click(await screen.findByText("src"));
+    await screen.findByText("main.tsx");
+
+    fireEvent.contextMenu(screen.getByText("main.tsx").closest(".tree-row")!);
+    await userEvent.click(screen.getByRole("menuitem", { name: "Cut" }));
+    fireEvent.contextMenu(container.querySelector(".tree-root-drop-spacer")!);
+    await userEvent.click(screen.getByRole("menuitem", { name: "Paste" }));
+
+    await waitFor(() =>
+      expect(movePaths).toHaveBeenCalledWith(ROOT, ["/ws/src/main.tsx"], ROOT),
     );
   });
 

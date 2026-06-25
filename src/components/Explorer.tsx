@@ -145,7 +145,10 @@ function isRootDropSurface(
   currentTarget: HTMLElement,
 ): boolean {
   if (target === currentTarget) return true;
-  return target instanceof HTMLElement && Boolean(target.closest(".tree-empty"));
+  return (
+    target instanceof HTMLElement &&
+    Boolean(target.closest(".tree-empty, .tree-root-drop-spacer"))
+  );
 }
 
 interface VisibleEntry {
@@ -156,6 +159,11 @@ interface VisibleEntry {
 interface CreatingState {
   kind: "file" | "folder";
   parentPath: string;
+}
+
+interface ExplorerClipboard {
+  operation: "copy" | "cut";
+  entries: DirEntry[];
 }
 
 function flattenVisibleEntries(
@@ -191,6 +199,11 @@ interface NodeProps {
   selectedEntries: DirEntry[];
   draggingEntries: DirEntry[];
   setDraggingEntries: (entries: DirEntry[]) => void;
+  clipboard: ExplorerClipboard | null;
+  onCopyEntries: (entries: DirEntry[]) => void;
+  onCutEntries: (entries: DirEntry[]) => void;
+  onPasteInto: (destinationDir: string) => void;
+  canPasteInto: (destinationDir: string) => boolean;
   dropTargetPath: string | null;
   setDropTargetPath: (path: string | null) => void;
   /** Ask the Explorer to focus a row (once it exists after a refresh). */
@@ -211,6 +224,11 @@ function TreeNode({
   selectedEntries,
   draggingEntries,
   setDraggingEntries,
+  clipboard,
+  onCopyEntries,
+  onCutEntries,
+  onPasteInto,
+  canPasteInto,
   dropTargetPath,
   setDropTargetPath,
   onRequestFocus,
@@ -309,10 +327,29 @@ function TreeNode({
     const items: ContextMenuItem[] = [
       { label: "New File", run: run("explorer.newFile") },
       { label: "New Folder", run: run("explorer.newFolder") },
-      { label: "Rename", run: () => setRenaming(true), disabled: multi, separatorBefore: true },
+      {
+        label: multi ? `Copy ${selectedEntries.length} Items` : "Copy",
+        run: () => onCopyEntries(entriesForOperation()),
+        separatorBefore: true,
+      },
+      {
+        label: multi ? `Cut ${selectedEntries.length} Items` : "Cut",
+        run: () => onCutEntries(entriesForOperation()),
+      },
+      {
+        label: "Paste",
+        run: () => onPasteInto(pasteDestinationDir()),
+        disabled: !clipboard || !canPasteHere(),
+      },
+      {
+        label: "Rename",
+        run: () => setRenaming(true),
+        disabled: multi,
+        separatorBefore: true,
+      },
       {
         label: multi ? `Delete ${selectedEntries.length} Items` : "Delete",
-        run: () => onDeleteEntries(entriesForDelete()),
+        run: () => onDeleteEntries(entriesForOperation()),
       },
       { label: "Copy Path", run: run("file.copyPath"), separatorBefore: true },
       { label: "Copy Relative Path", run: run("file.copyRelativePath") },
@@ -320,17 +357,25 @@ function TreeNode({
     useContextMenuStore.getState().openMenu(e.clientX, e.clientY, items);
   }
 
-  function entriesForDelete(): DirEntry[] {
+  function entriesForOperation(): DirEntry[] {
     return selected && selectedEntries.length > 1 ? selectedEntries : [entry];
   }
 
   function entriesForDrag(): DirEntry[] {
-    return selected && selectedEntries.length > 1 ? selectedEntries : [entry];
+    return entriesForOperation();
+  }
+
+  function pasteDestinationDir(): string {
+    return entry.isDir ? entry.path : parentDir(entry.path);
+  }
+
+  function canPasteHere(): boolean {
+    return canPasteInto(pasteDestinationDir());
   }
 
   function onDelete(e: React.MouseEvent) {
     e.stopPropagation();
-    onDeleteEntries(entriesForDelete());
+    onDeleteEntries(entriesForOperation());
   }
 
   async function commitRename(name: string) {
@@ -525,6 +570,11 @@ function TreeNode({
               selectedEntries={selectedEntries}
               draggingEntries={draggingEntries}
               setDraggingEntries={setDraggingEntries}
+              clipboard={clipboard}
+              onCopyEntries={onCopyEntries}
+              onCutEntries={onCutEntries}
+              onPasteInto={onPasteInto}
+              canPasteInto={canPasteInto}
               dropTargetPath={dropTargetPath}
               setDropTargetPath={setDropTargetPath}
               onRequestFocus={onRequestFocus}
@@ -543,6 +593,16 @@ function canMoveEntriesTo(entries: DirEntry[], destinationDir: string): boolean 
     movable.every(
       (entry) =>
         entry.path !== destinationDir &&
+        !(entry.isDir && isSameOrDescendant(destinationDir, entry.path)),
+    )
+  );
+}
+
+function canCopyEntriesTo(entries: DirEntry[], destinationDir: string): boolean {
+  return (
+    entries.length > 0 &&
+    entries.every(
+      (entry) =>
         !(entry.isDir && isSameOrDescendant(destinationDir, entry.path)),
     )
   );
@@ -661,6 +721,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
   const createRequest = useTreeStore((s) => s.createRequest);
   const [creating, setCreating] = useState<CreatingState | null>(null);
   const [draggingEntries, setDraggingEntries] = useState<DirEntry[]>([]);
+  const [clipboard, setClipboard] = useState<ExplorerClipboard | null>(null);
   const [dropTargetPath, setDropTargetPath] = useState<string | null>(null);
   const [pendingFocusPath, setPendingFocusPath] = useState<string | null>(null);
   const createInputRef = useRef<HTMLInputElement>(null);
@@ -936,11 +997,14 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     }
   }
 
-  async function moveEntries(entries: DirEntry[], destinationDir: string) {
+  async function moveEntries(
+    entries: DirEntry[],
+    destinationDir: string,
+  ): Promise<boolean> {
     const movable = topLevelEntries(
       entries.filter((entry) => !isDirectChild(entry.path, destinationDir)),
     );
-    if (!canMoveEntriesTo(movable, destinationDir)) return;
+    if (!canMoveEntriesTo(movable, destinationDir)) return false;
     try {
       const moved = await movePaths(
         rootPath,
@@ -957,6 +1021,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
         useTreeStore.getState().setExpanded(destinationDir, true);
       }
       useTreeStore.getState().refresh();
+      return moved.length > 0;
     } catch (err) {
       console.error("move failed", err);
       // A move can fail partway (some entries already renamed on disk). Refresh
@@ -964,7 +1029,81 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
       // paths for items that did move.
       useTreeStore.getState().refresh();
       void message(`Move failed: ${String(err)}`);
+      return false;
     }
+  }
+
+  function copyEntriesToExplorerClipboard(entries: DirEntry[]) {
+    const copied = topLevelEntries(entries);
+    if (copied.length > 0) setClipboard({ operation: "copy", entries: copied });
+  }
+
+  function cutEntriesToExplorerClipboard(entries: DirEntry[]) {
+    const cut = topLevelEntries(entries);
+    if (cut.length > 0) setClipboard({ operation: "cut", entries: cut });
+  }
+
+  function canPasteInto(destinationDir: string): boolean {
+    if (!clipboard) return false;
+    return clipboard.operation === "copy"
+      ? canCopyEntriesTo(clipboard.entries, destinationDir)
+      : canMoveEntriesTo(clipboard.entries, destinationDir);
+  }
+
+  function selectedPasteDestination(): string {
+    if (resolvedSelectedEntries.length !== 1) return rootPath;
+    const selected = resolvedSelectedEntries[0];
+    return selected.isDir ? selected.path : parentDir(selected.path);
+  }
+
+  async function pasteInto(destinationDir: string) {
+    const pending = clipboard;
+    if (!pending) return;
+    if (pending.operation === "cut") {
+      const moved = await moveEntries(pending.entries, destinationDir);
+      if (moved) setClipboard(null);
+      return;
+    }
+    if (!canCopyEntriesTo(pending.entries, destinationDir)) return;
+    try {
+      const copied = await copyPaths(
+        rootPath,
+        pending.entries.map((entry) => entry.path),
+        destinationDir,
+      );
+      if (destinationDir !== rootPath) {
+        useTreeStore.getState().setExpanded(destinationDir, true);
+      }
+      if (copied.length > 0) {
+        useTreeStore.getState().setSelection(copied.map((item) => item.to));
+      }
+      useTreeStore.getState().refresh();
+    } catch (err) {
+      console.error("paste failed", err);
+      useTreeStore.getState().refresh();
+      void message(`Paste failed: ${String(err)}`);
+    }
+  }
+
+  function openRootContextMenu(e: React.MouseEvent) {
+    if (!isRootDropSurface(e.target, e.currentTarget as HTMLElement)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const startRootCreate = (kind: "file" | "folder") => {
+      useTreeStore.getState().clearSelection();
+      startCreate(kind);
+    };
+    const items: ContextMenuItem[] = [
+      { label: "New File", run: () => startRootCreate("file") },
+      { label: "New Folder", run: () => startRootCreate("folder") },
+      {
+        label: "Paste",
+        run: () => void pasteInto(rootPath),
+        disabled: !canPasteInto(rootPath),
+        separatorBefore: true,
+      },
+    ];
+    useContextMenuStore.getState().openMenu(e.clientX, e.clientY, items);
   }
 
   // Copy OS files dropped into the explorer (from Finder etc.) into the folder
@@ -1048,6 +1187,27 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && key === "y") {
       e.preventDefault();
       void redoDelete();
+      return;
+    }
+    if (mod && !e.altKey && !e.shiftKey && key === "c") {
+      if (resolvedSelectedEntries.length > 0) {
+        e.preventDefault();
+        copyEntriesToExplorerClipboard(resolvedSelectedEntries);
+      }
+      return;
+    }
+    if (mod && !e.altKey && !e.shiftKey && key === "x") {
+      if (resolvedSelectedEntries.length > 0) {
+        e.preventDefault();
+        cutEntriesToExplorerClipboard(resolvedSelectedEntries);
+      }
+      return;
+    }
+    if (mod && !e.altKey && !e.shiftKey && key === "v") {
+      if (clipboard) {
+        e.preventDefault();
+        void pasteInto(selectedPasteDestination());
+      }
       return;
     }
     if (!mod && !e.altKey && (e.key === "Delete" || e.key === "Backspace")) {
@@ -1227,6 +1387,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
         ref={treeRef}
         tabIndex={-1}
         onKeyDown={onTreeKeyDown}
+        onContextMenu={openRootContextMenu}
         onDragOver={(e) => {
           if (!isRootDropSurface(e.target, e.currentTarget)) return;
           if (!canMoveEntriesTo(draggingEntries, rootPath)) return;
@@ -1274,11 +1435,21 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
             selectedEntries={resolvedSelectedEntries}
             draggingEntries={draggingEntries}
             setDraggingEntries={setDraggingEntries}
+            clipboard={clipboard}
+            onCopyEntries={copyEntriesToExplorerClipboard}
+            onCutEntries={cutEntriesToExplorerClipboard}
+            onPasteInto={(destinationDir) => void pasteInto(destinationDir)}
+            canPasteInto={canPasteInto}
             dropTargetPath={dropTargetPath}
             setDropTargetPath={setDropTargetPath}
             onRequestFocus={requestRowFocus}
           />
         ))}
+        <li
+          className="tree-root-drop-spacer"
+          aria-hidden="true"
+          onContextMenu={openRootContextMenu}
+        />
       </ul>
     </div>
   );

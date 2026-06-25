@@ -31,7 +31,13 @@ function handlePreviewClick(e: React.MouseEvent): void {
   if (/^(https?:|mailto:)/i.test(href)) void openExternalHref(href);
 }
 
-export function MarkdownView({ path }: { path: string }) {
+export function MarkdownView({
+  path,
+  onEditRequest,
+}: {
+  path: string;
+  onEditRequest?: () => void;
+}) {
   const content = useEditorStore(
     (s) => s.docs.find((d) => d.path === path)?.content,
   );
@@ -47,7 +53,7 @@ export function MarkdownView({ path }: { path: string }) {
 
   if (content === undefined) {
     return (
-      <div className="markdown-preview">
+      <div className="markdown-preview" onDoubleClick={onEditRequest}>
         <p className="placeholder">Open the Markdown file to preview it.</p>
       </div>
     );
@@ -56,6 +62,7 @@ export function MarkdownView({ path }: { path: string }) {
     <div
       className="markdown-preview"
       onClickCapture={handlePreviewClick}
+      onDoubleClick={onEditRequest}
       dangerouslySetInnerHTML={{ __html: html }}
     />
   );

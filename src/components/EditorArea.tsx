@@ -10,6 +10,7 @@ import {
   isMarkdownPath,
 } from "../lib/fileTypes";
 import { isTextDoc, useEditorStore } from "../state/editorStore";
+import { getActiveEditor } from "../lib/editorBridge";
 import { useLayoutStore } from "../state/layoutStore";
 import { TabBar } from "./TabBar";
 
@@ -64,6 +65,7 @@ export function EditorArea() {
   );
   const hasTextDocs = useEditorStore((s) => s.docs.some(isTextDoc));
   const editorPreview = useLayoutStore((s) => s.editorPreview);
+  const setEditorPreview = useLayoutStore((s) => s.setEditorPreview);
   // Preview replaces the editor view in place for supported text preview types.
   const showPreview =
     editorPreview &&
@@ -74,6 +76,11 @@ export function EditorArea() {
   const showImage = activeKind === "image";
   const previewLabel =
     activePath && isHtmlPath(activePath) ? "HTML preview" : "Markdown preview";
+
+  function switchPreviewToSource() {
+    setEditorPreview(false);
+    window.setTimeout(() => getActiveEditor()?.focus(), 0);
+  }
 
   // Hide the welcome screen when the editor column is too narrow to show it
   // (e.g. a right-docked terminal dragged wide) so it never paints clipped
@@ -112,7 +119,11 @@ export function EditorArea() {
                   fallback={<div className="editor-loading">Loading preview…</div>}
                 >
                   {isMarkdownPath(activePath) ? (
-                    <MarkdownView key={activePath} path={activePath} />
+                    <MarkdownView
+                      key={activePath}
+                      path={activePath}
+                      onEditRequest={switchPreviewToSource}
+                    />
                   ) : (
                     <HtmlPreview key={activePath} path={activePath} />
                   )}

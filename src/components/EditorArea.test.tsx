@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { EditorArea } from "./EditorArea";
 import { initialEditorData, useEditorStore } from "../state/editorStore";
@@ -39,6 +39,24 @@ describe("EditorArea", () => {
     const frame = await screen.findByTitle("index.html preview");
     expect(frame).toHaveAttribute("sandbox", "allow-scripts allow-forms");
     expect(frame.getAttribute("sandbox")).not.toContain("allow-same-origin");
+  });
+
+  it("switches Markdown preview back to source editing on double-click", async () => {
+    useEditorStore.getState().openDoc({
+      path: "/w/notes.md",
+      content: "# Notes",
+      language: "markdown",
+    });
+    useLayoutStore.getState().setEditorPreview(true);
+
+    render(<EditorArea />);
+
+    expect(await screen.findByLabelText("Markdown preview")).toBeInTheDocument();
+    fireEvent.doubleClick(await screen.findByText("Notes"));
+
+    await waitFor(() =>
+      expect(useLayoutStore.getState().editorPreview).toBe(false),
+    );
   });
 
   it("renders PDF viewer tabs in the editor area", async () => {
