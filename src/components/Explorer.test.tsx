@@ -505,6 +505,31 @@ describe("Explorer", () => {
     );
   });
 
+  it("moves to root on drag end when the root target was highlighted", async () => {
+    vi.mocked(readDirectory).mockImplementation(async (p: string) => {
+      if (p === ROOT) return [dir("src")];
+      if (p === "/ws/src") return [file("main.tsx", "/ws/src")];
+      return [];
+    });
+    vi.mocked(movePaths).mockResolvedValue([
+      { from: "/ws/src/main.tsx", to: "/ws/main.tsx", isDir: false },
+    ]);
+    const { container } = render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await userEvent.click(await screen.findByText("src"));
+    await screen.findByText("main.tsx");
+    const mainRow = screen.getByText("main.tsx").closest(".tree-row")!;
+    const rootDropSpacer = container.querySelector(".tree-root-drop-spacer")!;
+    const dataTransfer = createDataTransfer();
+
+    fireEvent.dragStart(mainRow, { dataTransfer });
+    fireEvent.dragOver(rootDropSpacer, { dataTransfer });
+    fireEvent.dragEnd(mainRow, { dataTransfer });
+
+    await waitFor(() =>
+      expect(movePaths).toHaveBeenCalledWith(ROOT, ["/ws/src/main.tsx"], ROOT),
+    );
+  });
+
   it("copies a file from the explorer context menu and pastes it into a folder", async () => {
     vi.mocked(movePaths).mockResolvedValue([]);
     vi.mocked(readDirectory).mockImplementation(async (p: string) => {

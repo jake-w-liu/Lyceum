@@ -213,6 +213,7 @@ interface NodeProps {
   draggingEntries: DirEntry[];
   setDraggingEntries: (entries: DirEntry[]) => void;
   resolveDraggingEntries: (dataTransfer: DataTransfer) => DirEntry[];
+  onDragFinished: (dataTransfer: DataTransfer) => void;
   clipboard: ExplorerClipboard | null;
   onCopyEntries: (entries: DirEntry[]) => void;
   onCutEntries: (entries: DirEntry[]) => void;
@@ -239,6 +240,7 @@ function TreeNode({
   draggingEntries,
   setDraggingEntries,
   resolveDraggingEntries,
+  onDragFinished,
   clipboard,
   onCopyEntries,
   onCutEntries,
@@ -451,11 +453,8 @@ function TreeNode({
             JSON.stringify(entries.map((dragEntry) => dragEntry.path)),
           );
         }}
-        onDragEnd={() => {
-          window.setTimeout(() => {
-            setDraggingEntries([]);
-            setDropTargetPath(null);
-          }, 0);
+        onDragEnd={(e) => {
+          onDragFinished(e.dataTransfer);
         }}
         onDragOver={(e) => {
           if (!canDropHere()) return;
@@ -589,6 +588,7 @@ function TreeNode({
               draggingEntries={draggingEntries}
               setDraggingEntries={setDraggingEntries}
               resolveDraggingEntries={resolveDraggingEntries}
+              onDragFinished={onDragFinished}
               clipboard={clipboard}
               onCopyEntries={onCopyEntries}
               onCutEntries={onCutEntries}
@@ -742,6 +742,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
   const [draggingEntries, setDraggingEntries] = useState<DirEntry[]>([]);
   const [clipboard, setClipboard] = useState<ExplorerClipboard | null>(null);
   const [dropTargetPath, setDropTargetPath] = useState<string | null>(null);
+  const dragDropCommittedRef = useRef(false);
   const [pendingFocusPath, setPendingFocusPath] = useState<string | null>(null);
   const createInputRef = useRef<HTMLInputElement>(null);
   const createCommittedRef = useRef(false);
@@ -1069,6 +1070,27 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
         .map((path) => allEntryByPath.get(path))
         .filter((entry): entry is DirEntry => entry !== undefined),
     );
+  }
+
+  function commitDragMove(
+    dataTransfer: DataTransfer,
+    destinationDir: string | null,
+  ) {
+    if (!destinationDir || dragDropCommittedRef.current) return;
+    const entries = resolveDraggingEntries(dataTransfer);
+    if (!canMoveEntriesTo(entries, destinationDir)) return;
+    dragDropCommittedRef.current = true;
+    setDropTargetPath(null);
+    void moveEntries(entries, destinationDir);
+  }
+
+  function finishDrag(dataTransfer: DataTransfer) {
+    commitDragMove(dataTransfer, dropTargetPath);
+    window.setTimeout(() => {
+      dragDropCommittedRef.current = false;
+      setDraggingEntries([]);
+      setDropTargetPath(null);
+    }, 0);
   }
 
   function canPasteInto(destinationDir: string): boolean {
@@ -1432,6 +1454,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
           if (!isRootDropSurface(e.target, e.currentTarget)) return;
           if (!canMoveEntriesTo(entries, rootPath)) return;
           e.preventDefault();
+          dragDropCommittedRef.current = true;
           setDropTargetPath(null);
           void moveEntries(entries, rootPath);
         }}
@@ -1465,6 +1488,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
             draggingEntries={draggingEntries}
             setDraggingEntries={setDraggingEntries}
             resolveDraggingEntries={resolveDraggingEntries}
+            onDragFinished={finishDrag}
             clipboard={clipboard}
             onCopyEntries={copyEntriesToExplorerClipboard}
             onCutEntries={cutEntriesToExplorerClipboard}
