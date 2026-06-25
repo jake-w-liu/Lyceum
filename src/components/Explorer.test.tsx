@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Explorer } from "./Explorer";
 import { ContextMenu } from "./ContextMenu";
@@ -75,6 +75,18 @@ function deferred<T>() {
     resolve = res;
   });
   return { promise, resolve };
+}
+
+function createDataTransfer() {
+  const data = new Map<string, string>();
+  return {
+    effectAllowed: "",
+    dropEffect: "",
+    setData: vi.fn((type: string, value: string) => {
+      data.set(type, value);
+    }),
+    getData: vi.fn((type: string) => data.get(type) ?? ""),
+  };
 }
 
 beforeEach(() => {
@@ -454,15 +466,38 @@ describe("Explorer", () => {
     await screen.findByText("main.tsx");
     const mainRow = screen.getByText("main.tsx").closest(".tree-row")!;
     const rootDropSpacer = container.querySelector(".tree-root-drop-spacer")!;
-    const dataTransfer = {
-      effectAllowed: "",
-      dropEffect: "",
-      setData: vi.fn(),
-      getData: vi.fn(),
-    };
+    const dataTransfer = createDataTransfer();
 
     fireEvent.dragStart(mainRow, { dataTransfer });
     fireEvent.dragOver(rootDropSpacer, { dataTransfer });
+    fireEvent.drop(rootDropSpacer, { dataTransfer });
+
+    await waitFor(() =>
+      expect(movePaths).toHaveBeenCalledWith(ROOT, ["/ws/src/main.tsx"], ROOT),
+    );
+  });
+
+  it("moves on root drop even when drag state was cleared before drop", async () => {
+    vi.mocked(readDirectory).mockImplementation(async (p: string) => {
+      if (p === ROOT) return [dir("src")];
+      if (p === "/ws/src") return [file("main.tsx", "/ws/src")];
+      return [];
+    });
+    vi.mocked(movePaths).mockResolvedValue([
+      { from: "/ws/src/main.tsx", to: "/ws/main.tsx", isDir: false },
+    ]);
+    const { container } = render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await userEvent.click(await screen.findByText("src"));
+    await screen.findByText("main.tsx");
+    const mainRow = screen.getByText("main.tsx").closest(".tree-row")!;
+    const rootDropSpacer = container.querySelector(".tree-root-drop-spacer")!;
+    const dataTransfer = createDataTransfer();
+
+    fireEvent.dragStart(mainRow, { dataTransfer });
+    fireEvent.dragEnd(mainRow, { dataTransfer });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
     fireEvent.drop(rootDropSpacer, { dataTransfer });
 
     await waitFor(() =>

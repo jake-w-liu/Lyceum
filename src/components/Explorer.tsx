@@ -106,6 +106,19 @@ function isEditableEventTarget(target: EventTarget | null): boolean {
   );
 }
 
+function dragPathsFromDataTransfer(dataTransfer: DataTransfer): string[] {
+  try {
+    const raw = dataTransfer.getData("application/x-lyceum-paths");
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((path): path is string => typeof path === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Native yes/no confirmation via the dialog plugin (same pattern as
  * editorStore's askDiscard): `window.confirm` is unreliable in Tauri WebViews,
@@ -199,6 +212,7 @@ interface NodeProps {
   selectedEntries: DirEntry[];
   draggingEntries: DirEntry[];
   setDraggingEntries: (entries: DirEntry[]) => void;
+  resolveDraggingEntries: (dataTransfer: DataTransfer) => DirEntry[];
   clipboard: ExplorerClipboard | null;
   onCopyEntries: (entries: DirEntry[]) => void;
   onCutEntries: (entries: DirEntry[]) => void;
@@ -224,6 +238,7 @@ function TreeNode({
   selectedEntries,
   draggingEntries,
   setDraggingEntries,
+  resolveDraggingEntries,
   clipboard,
   onCopyEntries,
   onCutEntries,
@@ -437,8 +452,10 @@ function TreeNode({
           );
         }}
         onDragEnd={() => {
-          setDraggingEntries([]);
-          setDropTargetPath(null);
+          window.setTimeout(() => {
+            setDraggingEntries([]);
+            setDropTargetPath(null);
+          }, 0);
         }}
         onDragOver={(e) => {
           if (!canDropHere()) return;
@@ -452,11 +469,12 @@ function TreeNode({
           if (dropTargetPath === entry.path) setDropTargetPath(null);
         }}
         onDrop={(e) => {
-          if (!canDropHere()) return;
+          const entries = resolveDraggingEntries(e.dataTransfer);
+          if (!entry.isDir || !canMoveEntriesTo(entries, entry.path)) return;
           e.preventDefault();
           e.stopPropagation();
           setDropTargetPath(null);
-          onMoveEntries(draggingEntries, entry.path);
+          onMoveEntries(entries, entry.path);
         }}
       >
         <button
@@ -570,6 +588,7 @@ function TreeNode({
               selectedEntries={selectedEntries}
               draggingEntries={draggingEntries}
               setDraggingEntries={setDraggingEntries}
+              resolveDraggingEntries={resolveDraggingEntries}
               clipboard={clipboard}
               onCopyEntries={onCopyEntries}
               onCutEntries={onCutEntries}
@@ -1043,6 +1062,15 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     if (cut.length > 0) setClipboard({ operation: "cut", entries: cut });
   }
 
+  function resolveDraggingEntries(dataTransfer: DataTransfer): DirEntry[] {
+    if (draggingEntries.length > 0) return draggingEntries;
+    return topLevelEntries(
+      dragPathsFromDataTransfer(dataTransfer)
+        .map((path) => allEntryByPath.get(path))
+        .filter((entry): entry is DirEntry => entry !== undefined),
+    );
+  }
+
   function canPasteInto(destinationDir: string): boolean {
     if (!clipboard) return false;
     return clipboard.operation === "copy"
@@ -1400,11 +1428,12 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
           if (dropTargetPath === rootPath) setDropTargetPath(null);
         }}
         onDrop={(e) => {
+          const entries = resolveDraggingEntries(e.dataTransfer);
           if (!isRootDropSurface(e.target, e.currentTarget)) return;
-          if (!canMoveEntriesTo(draggingEntries, rootPath)) return;
+          if (!canMoveEntriesTo(entries, rootPath)) return;
           e.preventDefault();
           setDropTargetPath(null);
-          void moveEntries(draggingEntries, rootPath);
+          void moveEntries(entries, rootPath);
         }}
       >
         {creating?.parentPath === rootPath && (
@@ -1435,6 +1464,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
             selectedEntries={resolvedSelectedEntries}
             draggingEntries={draggingEntries}
             setDraggingEntries={setDraggingEntries}
+            resolveDraggingEntries={resolveDraggingEntries}
             clipboard={clipboard}
             onCopyEntries={copyEntriesToExplorerClipboard}
             onCutEntries={cutEntriesToExplorerClipboard}
