@@ -174,6 +174,48 @@ describe("builtinCommands", () => {
     expect(useLayoutStore.getState().activeBottomTab).toBe("terminal");
   });
 
+  it("python.repl uses PowerShell call syntax for a Windows path with spaces", async () => {
+    const current = useSettingsStore.getState().settings;
+    useSettingsStore.getState().replaceAll({
+      ...current,
+      shellPath: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+      runtimePaths: {
+        ...current.runtimePaths,
+        python: "C:\\Program Files\\Python312\\python.exe",
+      },
+    });
+
+    await commandRegistry.execute("python.repl");
+
+    expect(useTerminalStore.getState().terminals).toMatchObject([
+      {
+        title: "Python REPL",
+        startupCommand: "& 'C:\\Program Files\\Python312\\python.exe'\r",
+      },
+    ]);
+  });
+
+  it("python.repl keeps cmd-compatible quoting when the shell is cmd.exe", async () => {
+    const current = useSettingsStore.getState().settings;
+    useSettingsStore.getState().replaceAll({
+      ...current,
+      shellPath: "C:\\Windows\\System32\\cmd.exe",
+      runtimePaths: {
+        ...current.runtimePaths,
+        python: "C:\\Program Files\\Python312\\python.exe",
+      },
+    });
+
+    await commandRegistry.execute("python.repl");
+
+    expect(useTerminalStore.getState().terminals).toMatchObject([
+      {
+        title: "Python REPL",
+        startupCommand: "\"C:\\Program Files\\Python312\\python.exe\"\r",
+      },
+    ]);
+  });
+
   it("terminal.runSelection writes to the live backend PTY id", async () => {
     const id = useTerminalStore.getState().createTerminal();
     useTerminalStore.getState().setBackendPtyId(id, "term-1_9");

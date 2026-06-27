@@ -281,19 +281,14 @@ export async function searchWorkspace(
 }
 
 /**
- * Resolve a path to its canonical, symlink-free absolute form (best-effort: the
- * input is returned unchanged outside Tauri or if it cannot be resolved). The
- * workspace is canonicalized at open time so the tree listing, git decorations,
- * search, and watcher all key off ONE canonical root — otherwise a root reached
- * through a symlinked component (e.g. macOS `/tmp`) makes git's canonical paths
- * disagree with the tree's and every decoration silently drops.
+ * Canonicalize and authorize a workspace root (best-effort: the input is
+ * returned unchanged outside Tauri or if the backend is unavailable). The
+ * workspace is normalized at open time so the tree listing, git decorations,
+ * search, and watcher all key off ONE symlink-free root.
  */
 export async function canonicalizePath(path: string): Promise<string> {
   try {
-    const result = await invoke<string>("canonicalize_path", { path });
-    // Defensive: fall back to the input if the backend is unavailable (returns a
-    // non-string, e.g. outside Tauri) so callers always get a usable path.
-    return typeof result === "string" ? result : path;
+    return await authorizeWorkspaceRoot(path);
   } catch {
     return path;
   }
@@ -307,7 +302,7 @@ export async function pickFolder(): Promise<string | null> {
   try {
     const selected = await open({ directory: true, multiple: false });
     if (typeof selected !== "string") return null;
-    return await canonicalizePath(selected);
+    return await authorizeWorkspaceRoot(selected);
   } catch {
     return null;
   }

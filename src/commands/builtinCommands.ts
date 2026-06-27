@@ -45,9 +45,31 @@ import { isInlinePreviewPath, isTexSourcePath, relativePath } from "../lib/fileT
 
 let registered = false;
 
-function quoteStartupCommand(program: string): string {
-  if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(program)) return program;
-  return `"${program.replace(/(["\\$`])/g, "\\$1")}"`;
+const STARTUP_COMMAND_SAFE_RE = /^[A-Za-z0-9_./:@%+=,-]+$/;
+
+function isPowerShellShell(shellPath: string): boolean {
+  const normalized = shellPath.replace(/\\/g, "/").trim().toLowerCase();
+  return (
+    normalized.endsWith("/powershell.exe") ||
+    normalized.endsWith("/pwsh.exe") ||
+    normalized.endsWith("/pwsh") ||
+    normalized.endsWith("/powershell")
+  );
+}
+
+function looksLikeWindowsProgramPath(program: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(program) || program.includes("\\");
+}
+
+function quoteStartupCommand(program: string, shellPath: string): string {
+  if (STARTUP_COMMAND_SAFE_RE.test(program)) return program;
+  if (!shellPath && looksLikeWindowsProgramPath(program)) {
+    return `& '${program.replace(/'/g, "''")}'`;
+  }
+  if (isPowerShellShell(shellPath)) {
+    return `& '${program.replace(/'/g, "''")}'`;
+  }
+  return `"${program.replace(/(["$`])/g, "\\$1")}"`;
 }
 
 /** Idempotently register all built-in commands. */
@@ -454,12 +476,12 @@ export function registerBuiltinCommands(): void {
     title: "New Julia REPL",
     category: "Run",
     run: () => {
-      const juliaRuntimePath =
-        useSettingsStore.getState().settings.runtimePaths.julia || "julia";
+      const settings = useSettingsStore.getState().settings;
+      const juliaRuntimePath = settings.runtimePaths.julia || "julia";
       const root = useWorkspaceStore.getState().rootPath;
       useTerminalStore.getState().createTerminal(root, {
         title: "Julia REPL",
-        startupCommand: `${quoteStartupCommand(juliaRuntimePath)}\r`,
+        startupCommand: `${quoteStartupCommand(juliaRuntimePath, settings.shellPath)}\r`,
       });
       layout().showBottomTab("terminal");
     },
@@ -469,12 +491,12 @@ export function registerBuiltinCommands(): void {
     title: "New Python REPL",
     category: "Run",
     run: () => {
-      const pythonPath =
-        useSettingsStore.getState().settings.runtimePaths.python || "python3";
+      const settings = useSettingsStore.getState().settings;
+      const pythonPath = settings.runtimePaths.python || "python3";
       const root = useWorkspaceStore.getState().rootPath;
       useTerminalStore.getState().createTerminal(root, {
         title: "Python REPL",
-        startupCommand: `${quoteStartupCommand(pythonPath)}\r`,
+        startupCommand: `${quoteStartupCommand(pythonPath, settings.shellPath)}\r`,
       });
       layout().showBottomTab("terminal");
     },
@@ -484,12 +506,12 @@ export function registerBuiltinCommands(): void {
     title: "New Node REPL",
     category: "Run",
     run: () => {
-      const nodePath =
-        useSettingsStore.getState().settings.runtimePaths.node || "node";
+      const settings = useSettingsStore.getState().settings;
+      const nodePath = settings.runtimePaths.node || "node";
       const root = useWorkspaceStore.getState().rootPath;
       useTerminalStore.getState().createTerminal(root, {
         title: "Node REPL",
-        startupCommand: `${quoteStartupCommand(nodePath)}\r`,
+        startupCommand: `${quoteStartupCommand(nodePath, settings.shellPath)}\r`,
       });
       layout().showBottomTab("terminal");
     },

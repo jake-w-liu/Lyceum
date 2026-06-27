@@ -789,6 +789,71 @@ describe("Explorer", () => {
     expect(movePathsToTrash).not.toHaveBeenCalled();
   });
 
+  it("closes a clean open doc after delete without prompting to discard", async () => {
+    useEditorStore.getState().openDoc({
+      path: "/ws/README.md",
+      content: "# readme",
+      language: "markdown",
+    });
+    render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await screen.findByText("README.md");
+    fireEvent.click(screen.getByRole("treeitem", { name: "README.md" }), {
+      metaKey: true,
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "Delete Selected" }));
+
+    await waitFor(() =>
+      expect(movePathsToTrash).toHaveBeenCalledWith(ROOT, ["/ws/README.md"]),
+    );
+    await waitFor(() =>
+      expect(useEditorStore.getState().docs.map((doc) => doc.path)).toEqual([]),
+    );
+    expect(ask).toHaveBeenCalledTimes(1);
+    expect(ask).toHaveBeenCalledWith(expect.stringContaining("Lyceum Trash"), {
+      title: "Delete",
+      kind: "warning",
+    });
+  });
+
+  it("keeps a dirty open doc after delete when discard is declined", async () => {
+    const store = useEditorStore.getState();
+    store.openDoc({
+      path: "/ws/README.md",
+      content: "# readme",
+      language: "markdown",
+    });
+    store.updateContent("/ws/README.md", "# dirty");
+    vi.mocked(ask)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+
+    render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await screen.findByText("README.md");
+    fireEvent.click(screen.getByRole("treeitem", { name: "README.md" }), {
+      metaKey: true,
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "Delete Selected" }));
+
+    await waitFor(() =>
+      expect(movePathsToTrash).toHaveBeenCalledWith(ROOT, ["/ws/README.md"]),
+    );
+    await waitFor(() => expect(ask).toHaveBeenCalledTimes(2));
+    expect(useEditorStore.getState().docs.map((doc) => doc.path)).toEqual([
+      "/ws/README.md",
+    ]);
+    expect(useEditorStore.getState().activePath).toBe("/ws/README.md");
+    expect(ask).toHaveBeenNthCalledWith(
+      2,
+      "Discard unsaved changes to README.md?",
+      {
+        title: "Unsaved Changes",
+        kind: "warning",
+      },
+    );
+  });
+
   it("uses a selected batch when deleting from a selected row action", async () => {
     vi.mocked(movePathsToTrash).mockResolvedValue({
       id: "batch-2",
@@ -854,6 +919,59 @@ describe("Explorer", () => {
           isDir: false,
         },
       ]),
+    );
+  });
+
+  it("keeps a dirty open doc after redo delete when discard is declined", async () => {
+    useTreeStore.setState({
+      deleteRedoStack: [
+        {
+          id: "batch-1",
+          items: [
+            {
+              originalPath: "/ws/README.md",
+              trashedPath: "/ws/.lyceum-trash/batch-1/README.md",
+              isDir: false,
+            },
+          ],
+        },
+      ],
+    });
+    const store = useEditorStore.getState();
+    store.openDoc({
+      path: "/ws/README.md",
+      content: "# readme",
+      language: "markdown",
+    });
+    store.updateContent("/ws/README.md", "# dirty");
+    vi.mocked(ask).mockResolvedValue(false);
+
+    render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await screen.findByText("README.md");
+
+    await userEvent.click(screen.getByRole("button", { name: "Redo Delete" }));
+
+    await waitFor(() =>
+      expect(redoTrashBatch).toHaveBeenCalledWith(ROOT, [
+        {
+          originalPath: "/ws/README.md",
+          trashedPath: "/ws/.lyceum-trash/batch-1/README.md",
+          isDir: false,
+        },
+      ]),
+    );
+    await waitFor(() => expect(ask).toHaveBeenCalledTimes(1));
+    expect(useEditorStore.getState().docs.map((doc) => doc.path)).toEqual([
+      "/ws/README.md",
+    ]);
+    expect(useTreeStore.getState().deleteUndoStack).toHaveLength(1);
+    expect(useTreeStore.getState().deleteRedoStack).toHaveLength(0);
+    expect(ask).toHaveBeenCalledWith(
+      "Discard unsaved changes to README.md?",
+      {
+        title: "Unsaved Changes",
+        kind: "warning",
+      },
     );
   });
 

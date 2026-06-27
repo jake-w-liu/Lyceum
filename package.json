@@ -1,7 +1,7 @@
 {
   "name": "lyceum",
   "private": true,
-  "version": "0.5.24",
+  "version": "0.5.25",
   "type": "module",
   "description": "A lightweight, VS Code-inspired research IDE built with Tauri.",
   "license": "MIT",

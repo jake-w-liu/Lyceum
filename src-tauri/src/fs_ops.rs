@@ -476,13 +476,17 @@ fn copy_paths_impl(
     let mut planned: Vec<(PathBuf, PathBuf, bool)> = Vec::new();
     let mut destinations = HashSet::new();
     for raw in paths {
-        let source = Path::new(&raw)
-            .canonicalize()
-            .map_err(|e| format!("{raw}: {e}"))?;
-        let is_dir = std::fs::symlink_metadata(&source)
-            .map_err(|e| format!("{}: {e}", source.display()))?
-            .file_type()
-            .is_dir();
+        let source = absolute_lexical_path(Path::new(&raw));
+        let source_meta =
+            std::fs::symlink_metadata(&source).map_err(|e| format!("{}: {e}", source.display()))?;
+        let source_file_type = source_meta.file_type();
+        let is_dir = if source_file_type.is_symlink() {
+            std::fs::metadata(&source)
+                .map(|meta| meta.is_dir())
+                .unwrap_or(false)
+        } else {
+            source_file_type.is_dir()
+        };
         // Copying a folder into itself or its own descendant would recurse
         // forever as the copy keeps re-reading what it just wrote.
         if is_dir && destination.starts_with(&source) {
@@ -1065,6 +1069,29 @@ fn workspace_path_for_canonical_root(
     path.to_path_buf()
 }
 
+fn absolute_lexical_path(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("/"))
+            .join(path)
+    };
+    let mut out = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            Component::RootDir => out.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(part) => out.push(part),
+        }
+    }
+    out
+}
+
 fn unique_trash_batch_id() -> String {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1446,6 +1473,69 @@ mod tests {
         assert_eq!(copied[0].to, dst.join("note.txt").to_string_lossy());
         assert_eq!(fs::read(dst.join("note.txt")).unwrap(), b"note");
         assert!(src.exists(), "source must be left untouched");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_paths_preserves_workspace_symlink_entries() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let dst = root.join("folder");
+        let target = root.join("target.txt");
+        let link = root.join("shortcut.txt");
+        fs::create_dir(&dst).unwrap();
+        fs::write(&target, b"target").unwrap();
+        symlink(&target, &link).unwrap();
+
+        let copied = copy_paths_impl(root, vec![link.to_string_lossy().to_string()], &dst)
+            .expect("copy symlink entry");
+
+        assert_eq!(copied.len(), 1);
+        assert_eq!(copied[0].from, link.to_string_lossy().to_string());
+        assert_eq!(copied[0].to, dst.join("shortcut.txt").to_string_lossy());
+        assert!(std::fs::symlink_metadata(dst.join("shortcut.txt"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(&target).unwrap(), b"target");
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_paths_preserves_external_symlink_entries() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let dst = root.join("folder");
+        fs::create_dir(&dst).unwrap();
+        let outside = tempfile::tempdir().expect("create temp dir");
+        let target = outside.path().join("target.txt");
+        let link = outside.path().join("shortcut.txt");
+        fs::write(&target, b"target").unwrap();
+        symlink(&target, &link).unwrap();
+
+        let copied = copy_paths_impl(root, vec![link.to_string_lossy().to_string()], &dst)
+            .expect("copy external symlink entry");
+
+        assert_eq!(copied.len(), 1);
+        assert_eq!(copied[0].from, link.to_string_lossy().to_string());
+        assert_eq!(copied[0].to, dst.join("shortcut.txt").to_string_lossy());
+        assert!(std::fs::symlink_metadata(dst.join("shortcut.txt"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(&target).unwrap(), b"target");
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[test]

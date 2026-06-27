@@ -18,7 +18,7 @@ import {
   type DirEntry,
 } from "../lib/ipc";
 import { useTreeStore } from "../state/treeStore";
-import { useEditorStore } from "../state/editorStore";
+import { confirmDiscard, useEditorStore } from "../state/editorStore";
 import { useGitStore, type GitScope } from "../state/gitStore";
 import {
   useContextMenuStore,
@@ -918,11 +918,16 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     }
   }
 
-  function closeDeletedDocs(paths: string[]) {
-    const editor = useEditorStore.getState();
-    for (const doc of editor.docs) {
-      if (paths.some((path) => isSameOrDescendant(doc.path, path))) {
-        useEditorStore.getState().closeDoc(doc.path);
+  async function closeDeletedDocs(paths: string[]) {
+    const docsToClose = useEditorStore
+      .getState()
+      .docs.filter((doc) =>
+        paths.some((path) => isSameOrDescendant(doc.path, path)),
+      )
+      .map((doc) => doc.path);
+    for (const path of docsToClose) {
+      if (await confirmDiscard(path)) {
+        useEditorStore.getState().closeDoc(path);
       }
     }
   }
@@ -961,10 +966,12 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
       );
       if (batch.items.length > 0) {
         useTreeStore.getState().recordDeleteBatch(batch);
-        closeDeletedDocs(batch.items.map((item) => item.originalPath));
         useTreeStore
           .getState()
           .dropExpanded(batch.items.map((item) => item.originalPath));
+        // Deletion already completed; keep the tree refresh/focus path
+        // synchronous and let dirty-tab discard prompts resolve separately.
+        void closeDeletedDocs(batch.items.map((item) => item.originalPath));
       }
       // Keep keyboard flows alive after the rows vanish: select + focus the
       // nearest surviving sibling, or fall back to the tree container.
@@ -1007,9 +1014,11 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     try {
       await redoTrashBatch(rootPath, batch.items);
       tree.pushDeleteUndo(batch);
-      closeDeletedDocs(batch.items.map((item) => item.originalPath));
       tree.clearSelection();
       tree.refresh();
+      // Redo should refresh the tree immediately even if a dirty tab needs a
+      // discard confirmation before it can close.
+      void closeDeletedDocs(batch.items.map((item) => item.originalPath));
     } catch (err) {
       tree.pushDeleteRedo(batch);
       console.error("redo delete failed", err);

@@ -189,20 +189,6 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Resolve a path to its canonical, symlink-free absolute form. Best-effort: a
-/// path that cannot be canonicalized (does not exist, permission denied) is
-/// returned unchanged. The workspace-open flow uses this so the tree listing,
-/// git decorations, search, and the watcher all key off ONE canonical root —
-/// otherwise a root reached through a symlinked component (e.g. macOS `/tmp` ->
-/// `/private/tmp`) makes git's canonical paths disagree with the tree's paths
-/// and every decoration silently drops.
-#[tauri::command]
-pub fn canonicalize_path(path: String) -> String {
-    std::fs::canonicalize(&path)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or(path)
-}
-
 /// Resolve a file path inside the app config dir (settings/keybindings persistence, M10).
 #[tauri::command]
 pub fn app_config_path(app: tauri::AppHandle, name: String) -> Result<String, String> {
