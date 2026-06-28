@@ -2,7 +2,8 @@
 //
 // `git_status` shells out to `git` once per refresh and returns a map of
 // absolute path -> status string (modified / added / untracked / deleted /
-// renamed / conflict), plus the owning repository root for each changed file.
+// renamed / conflict / ignored), plus the owning repository root for each
+// decorated tree entry.
 // The frontend colors tree rows from this map and can distinguish the opened
 // workspace repository from nested repositories under it.
 //
@@ -35,7 +36,7 @@ pub struct GitStatusDto {
     /// Repository roots queried for this workspace.
     pub repo_roots: Vec<String>,
     /// Absolute path -> status ("modified" | "added" | "untracked" |
-    /// "deleted" | "renamed" | "conflict").
+    /// "deleted" | "renamed" | "conflict" | "ignored").
     pub files: HashMap<String, String>,
     /// Absolute path -> owning repository top-level path.
     pub file_repos: HashMap<String, String>,
@@ -72,7 +73,7 @@ fn classify(x: char, y: char) -> &'static str {
 /// pairs. Records are NUL-separated; each is `XY<space><path>`. For rename/copy
 /// entries git appends the *source* path as a second NUL field (with `-z` the
 /// field order is `to\0from`), which we consume and ignore — the destination
-/// path is the one shown in the tree. Ignored entries are dropped.
+/// path is the one shown in the tree.
 pub fn parse_porcelain_z(out: &str) -> Vec<(String, String)> {
     let mut result = Vec::new();
     let mut tokens = out.split('\0');
@@ -91,7 +92,7 @@ pub fn parse_porcelain_z(out: &str) -> Vec<(String, String)> {
             let _ = tokens.next();
         }
         let status = classify(x, y);
-        if status == "ignored" || path.is_empty() {
+        if path.is_empty() {
             continue;
         }
         result.push((path.to_string(), status.to_string()));
@@ -130,6 +131,15 @@ fn run_git(program: &OsString, cwd: &Path, args: &[&str]) -> Option<String> {
 
 fn path_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+fn normalize_status_rel_path(path: &str) -> &str {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        path
+    } else {
+        trimmed
+    }
 }
 
 fn repo_top_level(program: &OsString, cwd: &Path) -> Option<PathBuf> {
@@ -253,14 +263,20 @@ pub fn git_status(
         let out = match run_git(
             &program,
             top_path,
-            &["status", "--porcelain", "-z", "--untracked-files=all"],
+            &[
+                "status",
+                "--porcelain",
+                "-z",
+                "--untracked-files=all",
+                "--ignored=matching",
+            ],
         ) {
             Some(s) => s,
             None => continue,
         };
         let repo = path_string(top_path);
         for (rel, status) in parse_porcelain_z(&out) {
-            let abs = top_path.join(&rel);
+            let abs = top_path.join(normalize_status_rel_path(&rel));
             if !path_is_within(&abs, root_path) {
                 continue;
             }
@@ -328,10 +344,16 @@ mod tests {
     }
 
     #[test]
-    fn drops_ignored_and_trailing_empty_records() {
+    fn keeps_ignored_and_drops_trailing_empty_records() {
         let out = "!! target/\0 M keep.rs\0";
         let got = parse_porcelain_z(out);
-        assert_eq!(got, vec![("keep.rs".to_string(), "modified".to_string())]);
+        assert_eq!(
+            got,
+            vec![
+                ("target/".to_string(), "ignored".to_string()),
+                ("keep.rs".to_string(), "modified".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -345,6 +367,12 @@ mod tests {
                 "untracked".to_string()
             )]
         );
+    }
+
+    #[test]
+    fn normalizes_ignored_directory_suffixes() {
+        assert_eq!(normalize_status_rel_path("target/"), "target");
+        assert_eq!(normalize_status_rel_path("target/file.log"), "target/file.log");
     }
 
     #[test]

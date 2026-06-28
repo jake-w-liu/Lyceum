@@ -8,9 +8,9 @@
  *
  * Palette: the brand system follows Sanzo Wada / Haishoku Soukan combination
  * #343: Vandar Poel's Blue (#064f6e), Ivory Buff (#ebd3a2), Burnt Sienna
- * (#ae5224), and Deep Grayish Olive (#635a3a). Interaction and semantic tokens
- * use nearby Wada colors where needed. Greys remain tuned neutrals for dense
- * editor separation and accessibility.
+ * (#ae5224), and Deep Grayish Olive (#635a3a). Git decoration tokens use
+ * Nippon Colors values so repository status colors stay in the requested
+ * Japanese traditional color family.
  */
 
 :root,
@@ -47,20 +47,21 @@
   --pdf-highlight-active: rgba(174, 82, 36, 0.58);
   --pdf-highlight-active-border: rgba(174, 82, 36, 0.92);
 
-  /* Git decoration colors (Explorer): Wada semantic colors. */
-  --git-modified: #f99d1b;
-  --git-added: #00978d;
-  --git-untracked: #00978d;
-  --git-deleted: #da525d;
-  --git-conflict: #f68c50;
-  --git-renamed: #f99d1b;
-  --git-ignored: #828282;
-  --git-nested-modified: #f3a257;
-  --git-nested-added: #099197;
-  --git-nested-untracked: #099197;
-  --git-nested-deleted: #a62c37;
-  --git-nested-conflict: #ae5224;
-  --git-nested-renamed: #f3a257;
+  /* Git decoration colors (Explorer): Nippon Colors semantic set. */
+  --git-modified: #ffb11b;
+  --git-added: #24936e;
+  --git-untracked: #24936e;
+  --git-deleted: #cb4042;
+  --git-conflict: #f75c2f;
+  --git-renamed: #ffb11b;
+  --git-ignored: #91989f;
+  --git-ignored-opacity: 0.72;
+  --git-nested-modified: #c7802d;
+  --git-nested-added: #268785;
+  --git-nested-untracked: #268785;
+  --git-nested-deleted: #9f353a;
+  --git-nested-conflict: #a36336;
+  --git-nested-renamed: #c7802d;
 
   --ui-font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Helvetica Neue", sans-serif;
   --mono-font: "SF Mono", "JetBrains Mono", "Fira Code", "Cascadia Code", Menlo, Consolas, monospace;
@@ -99,20 +100,21 @@
   --pdf-highlight-active: rgba(174, 82, 36, 0.5);
   --pdf-highlight-active-border: rgba(174, 82, 36, 0.78);
 
-  /* Darker shades for contrast on a light background. */
-  --git-modified: #ae5224;
-  --git-added: #009465;
-  --git-untracked: #009465;
-  --git-deleted: #a62c37;
-  --git-conflict: #ae5224;
-  --git-renamed: #ae5224;
+  /* Darker Nippon shades for contrast on a light background. */
+  --git-modified: #a36336;
+  --git-added: #227d51;
+  --git-untracked: #227d51;
+  --git-deleted: #9f353a;
+  --git-conflict: #a36336;
+  --git-renamed: #a36336;
   --git-ignored: #828282;
-  --git-nested-modified: #005b8d;
-  --git-nested-added: #00978d;
-  --git-nested-untracked: #00978d;
-  --git-nested-deleted: #a62c37;
-  --git-nested-conflict: #ae5224;
-  --git-nested-renamed: #005b8d;
+  --git-ignored-opacity: 0.78;
+  --git-nested-modified: #006284;
+  --git-nested-added: #2d6d4b;
+  --git-nested-untracked: #2d6d4b;
+  --git-nested-deleted: #8e354a;
+  --git-nested-conflict: #9a5034;
+  --git-nested-renamed: #006284;
 }
 
 :root[data-theme="hc"] {
@@ -148,18 +150,19 @@
   --pdf-highlight-active: rgba(246, 140, 80, 0.66);
   --pdf-highlight-active-border: rgba(246, 140, 80, 0.95);
 
-  /* High-contrast: bright decoration colors against pure black. */
-  --git-modified: #f3a257;
-  --git-added: #00b49b;
-  --git-untracked: #00b49b;
-  --git-deleted: #f68c50;
-  --git-conflict: #f68c50;
-  --git-renamed: #f3a257;
+  /* High-contrast: bright Nippon decoration colors against pure black. */
+  --git-modified: #ffb11b;
+  --git-added: #24936e;
+  --git-untracked: #24936e;
+  --git-deleted: #f75c2f;
+  --git-conflict: #f75c2f;
+  --git-renamed: #ffb11b;
   --git-ignored: #91989f;
-  --git-nested-modified: #f99d1b;
-  --git-nested-added: #00978d;
-  --git-nested-untracked: #00978d;
-  --git-nested-deleted: #da525d;
-  --git-nested-conflict: #ae5224;
-  --git-nested-renamed: #f99d1b;
+  --git-ignored-opacity: 0.92;
+  --git-nested-modified: #c7802d;
+  --git-nested-added: #268785;
+  --git-nested-untracked: #268785;
+  --git-nested-deleted: #cb4042;
+  --git-nested-conflict: #a36336;
+  --git-nested-renamed: #c7802d;
 }

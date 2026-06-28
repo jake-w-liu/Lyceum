@@ -237,6 +237,15 @@ kbd {
 .tree-label.git-ignored {
   color: var(--git-ignored);
 }
+.tree-row.git-ignored .tree-row-main {
+  color: var(--git-ignored);
+  opacity: var(--git-ignored-opacity);
+}
+.tree-row.git-ignored .tree-twisty,
+.tree-row.git-ignored .tree-icon,
+.tree-row.git-ignored .tree-label {
+  color: var(--git-ignored);
+}
 .tree-label.git-scope-nested.git-modified,
 .tree-label.git-scope-nested.git-renamed {
   color: var(--git-nested-modified);

@@ -19,7 +19,12 @@ import {
 } from "../lib/ipc";
 import { useTreeStore } from "../state/treeStore";
 import { confirmDiscard, useEditorStore } from "../state/editorStore";
-import { useGitStore, type GitScope } from "../state/gitStore";
+import {
+  gitScopeForEntry,
+  gitStatusForEntry,
+  useGitStore,
+  type GitScope,
+} from "../state/gitStore";
 import {
   useContextMenuStore,
   type ContextMenuItem,
@@ -68,6 +73,8 @@ function gitStatusLabel(status: string, scope: GitScope = "workspace"): string {
       return `${prefix}Renamed`;
     case "conflict":
       return `${prefix}Conflict`;
+    case "ignored":
+      return `${prefix}Ignored`;
     default:
       return "";
   }
@@ -255,15 +262,14 @@ function TreeNode({
   const loadedAtNonce = useTreeStore((s) => s.loadedAtNonce[entry.path]);
   const refreshNonce = useTreeStore((s) => s.refreshNonce);
   const gitStatus = useGitStore((s) =>
-    entry.isDir ? s.folders[entry.path] ?? null : s.files[entry.path] ?? null,
+    gitStatusForEntry(s, entry.path, entry.isDir),
   );
   const gitScope = useGitStore((s) =>
-    entry.isDir
-      ? s.folderScopes[entry.path] ?? "workspace"
-      : s.fileScopes[entry.path] ?? "workspace",
+    gitScopeForEntry(s, entry.path, entry.isDir),
   );
   const [renaming, setRenaming] = useState(false);
   const selected = selectedPaths.includes(entry.path);
+  const gitClass = gitStatus ? ` git-${gitStatus} git-scope-${gitScope}` : "";
   // Pending VS Code-style "slow click" rename: a second click on an
   // already-selected file starts a timer; a double-click (open) cancels it.
   const renameClickTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -438,7 +444,8 @@ function TreeNode({
         className={
           "tree-row" +
           (selected ? " selected" : "") +
-          (dropTargetPath === entry.path ? " drop-target" : "")
+          (dropTargetPath === entry.path ? " drop-target" : "") +
+          gitClass
         }
         draggable={!renaming}
         style={{ paddingLeft: 8 + depth * 12 }}
@@ -518,18 +525,15 @@ function TreeNode({
             <RenameInput initial={entry.name} onCommit={commitRename} />
           ) : (
             <span
-              className={
-                "tree-label" +
-                (gitStatus ? ` git-${gitStatus} git-scope-${gitScope}` : "")
-              }
+              className={"tree-label" + gitClass}
             >
               {entry.name}
             </span>
           )}
         </button>
-        {!renaming && gitStatus && (
+        {!renaming && gitStatus && gitStatus !== "ignored" && (
           <span
-            className={`git-badge git-${gitStatus} git-scope-${gitScope}`}
+            className={`git-badge${gitClass}`}
             aria-hidden="true"
           >
             {gitBadgeChar(gitStatus, entry.isDir)}

@@ -158,6 +158,39 @@ describe("Explorer", () => {
     );
   });
 
+  it("renders ignored git entries as muted rows without badges", async () => {
+    useWorkspaceStore.getState().openWorkspace(ROOT);
+    vi.mocked(gitStatus).mockResolvedValue({
+      isRepo: true,
+      rootRepo: ROOT,
+      repoRoots: [ROOT],
+      files: {
+        "/ws/README.md": "ignored",
+        "/ws/src": "ignored",
+      },
+      fileRepos: {
+        "/ws/README.md": ROOT,
+        "/ws/src": ROOT,
+      },
+    });
+
+    const { container } = render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    const readmeLabel = await screen.findByText("README.md");
+    const srcLabel = await screen.findByText("src");
+
+    await waitFor(() => expect(readmeLabel).toHaveClass("git-ignored"));
+    expect(readmeLabel.closest(".tree-row")).toHaveClass("git-ignored");
+    expect(srcLabel).toHaveClass("git-ignored");
+    expect(screen.getByRole("treeitem", { name: "README.md" })).toHaveAttribute(
+      "title",
+      "README.md — Ignored",
+    );
+    await userEvent.click(screen.getByRole("treeitem", { name: "src" }));
+    const childLabel = await screen.findByText("main.tsx");
+    expect(childLabel).toHaveClass("git-ignored");
+    expect(container.querySelector(".git-badge")).toBeNull();
+  });
+
   it("lazily loads children when a directory is expanded", async () => {
     render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
     await userEvent.click(await screen.findByText("src"));

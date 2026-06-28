@@ -2,9 +2,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   computeFolderDecorations,
   computeFolders,
+  gitScopeForEntry,
+  gitStatusForEntry,
   initialGitData,
   parentOf,
   useGitStore,
+  type GitData,
 } from "./gitStore";
 import type { GitFileStatus, GitStatus } from "../lib/ipc";
 import {
@@ -78,9 +81,23 @@ describe("computeFolders", () => {
     expect(folders["/repo/c"]).toBe("modified");
   });
 
-  it("ignores 'ignored' entries entirely", () => {
+  it("marks ancestors of ignored-only files as ignored", () => {
     const files: Record<string, GitFileStatus> = { "/repo/build/out.js": "ignored" };
-    expect(computeFolders(files)).toEqual({});
+    const folders = computeFolders(files);
+    expect(folders["/repo/build"]).toBe("ignored");
+    expect(folders["/repo"]).toBe("ignored");
+  });
+
+  it("lets untracked and modified statuses win over ignored files", () => {
+    const files: Record<string, GitFileStatus> = {
+      "/repo/build/cache.tmp": "ignored",
+      "/repo/build/new.ts": "untracked",
+      "/repo/src/cache.tmp": "ignored",
+      "/repo/src/changed.ts": "modified",
+    };
+    const folders = computeFolders(files);
+    expect(folders["/repo/build"]).toBe("untracked");
+    expect(folders["/repo/src"]).toBe("modified");
   });
 
   it("rolls nested repository scope up to ancestor folders", () => {
@@ -108,6 +125,75 @@ describe("computeFolders", () => {
 
     expect(folders.scopes["/repo/pkg"]).toBe("nested");
     expect(folders.scopes["/repo"]).toBe("workspace");
+  });
+
+  it("rolls nested repository ignored files up with nested scope", () => {
+    const files: Record<string, GitFileStatus> = {
+      "/repo/pkg/dist/out.js": "ignored",
+    };
+    const folders = computeFolderDecorations(files, {
+      "/repo/pkg/dist/out.js": "nested",
+    });
+
+    expect(folders.statuses["/repo/pkg/dist"]).toBe("ignored");
+    expect(folders.scopes["/repo/pkg/dist"]).toBe("nested");
+    expect(folders.scopes["/repo/pkg"]).toBe("nested");
+  });
+
+  it("decorates ignored directories and their visible children from the direct ignored folder", () => {
+    const data: GitData = {
+      ...initialGitData,
+      files: {
+        "/repo/pkg/dist": "ignored",
+      },
+      fileScopes: {
+        "/repo/pkg/dist": "nested",
+      },
+      folders: {
+        "/repo/pkg": "ignored",
+        "/repo": "ignored",
+      },
+      folderScopes: {
+        "/repo/pkg": "nested",
+        "/repo": "nested",
+      },
+    };
+
+    expect(gitStatusForEntry(data, "/repo/pkg/dist", true)).toBe("ignored");
+    expect(gitScopeForEntry(data, "/repo/pkg/dist", true)).toBe("nested");
+    expect(gitStatusForEntry(data, "/repo/pkg/dist/out.js", false)).toBe(
+      "ignored",
+    );
+    expect(gitScopeForEntry(data, "/repo/pkg/dist/out.js", false)).toBe(
+      "nested",
+    );
+  });
+
+  it("lets nested folder changes beat a direct ignored folder decoration", () => {
+    const data: GitData = {
+      ...initialGitData,
+      files: {
+        "/repo/pkg": "ignored",
+        "/repo/pkg/src/a.ts": "modified",
+      },
+      fileScopes: {
+        "/repo/pkg": "workspace",
+        "/repo/pkg/src/a.ts": "nested",
+      },
+      folders: {
+        "/repo/pkg/src": "modified",
+        "/repo/pkg": "modified",
+        "/repo": "modified",
+      },
+      folderScopes: {
+        "/repo/pkg/src": "nested",
+        "/repo/pkg": "nested",
+        "/repo": "nested",
+      },
+    };
+
+    expect(gitStatusForEntry(data, "/repo/pkg", true)).toBe("modified");
+    expect(gitScopeForEntry(data, "/repo/pkg", true)).toBe("nested");
   });
 });
 
@@ -213,5 +299,31 @@ describe("gitStore", () => {
     });
     expect(useGitStore.getState().folderScopes["/repo/pkg"]).toBe("nested");
     expect(useGitStore.getState().folderScopes["/repo"]).toBe("workspace");
+  });
+
+  it("keeps ignored files and marks their nested repository scope", async () => {
+    gitStatusMock.mockResolvedValue({
+      isRepo: true,
+      rootRepo: "/repo",
+      repoRoots: ["/repo", "/repo/pkg"],
+      files: {
+        "/repo/pkg/dist/out.js": "ignored",
+      },
+      fileRepos: {
+        "/repo/pkg/dist/out.js": "/repo/pkg",
+      },
+    });
+
+    useWorkspaceStore.getState().openWorkspace("/repo");
+    await useGitStore.getState().refresh();
+
+    expect(useGitStore.getState().files).toEqual({
+      "/repo/pkg/dist/out.js": "ignored",
+    });
+    expect(useGitStore.getState().fileScopes).toEqual({
+      "/repo/pkg/dist/out.js": "nested",
+    });
+    expect(useGitStore.getState().folders["/repo/pkg/dist"]).toBe("ignored");
+    expect(useGitStore.getState().folderScopes["/repo/pkg/dist"]).toBe("nested");
   });
 });
