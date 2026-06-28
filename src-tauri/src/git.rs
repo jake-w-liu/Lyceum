@@ -372,7 +372,10 @@ mod tests {
     #[test]
     fn normalizes_ignored_directory_suffixes() {
         assert_eq!(normalize_status_rel_path("target/"), "target");
-        assert_eq!(normalize_status_rel_path("target/file.log"), "target/file.log");
+        assert_eq!(
+            normalize_status_rel_path("target/file.log"),
+            "target/file.log"
+        );
     }
 
     #[test]
