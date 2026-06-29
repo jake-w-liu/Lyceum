@@ -11,9 +11,9 @@ import { gitStatus, type GitFileStatus } from "../lib/ipc";
 import { useWorkspaceStore } from "./workspaceStore";
 
 /** A folder rollup preserves the strongest visible child decoration:
- * tracked changes beat untracked files, and untracked files beat ignored-only
- * contents. */
-export type FolderGitStatus = "modified" | "untracked" | "ignored";
+ * tracked changes beat untracked files. Ignored entries do not roll up because
+ * a grey folder means the folder itself is ignored. */
+export type FolderGitStatus = "modified" | "untracked";
 export type GitScope = "workspace" | "nested";
 export type GitDecorationStatus = GitFileStatus | FolderGitStatus;
 
@@ -40,8 +40,8 @@ export function parentOf(path: string): string {
   return path.slice(0, idx);
 }
 
-/** Roll file statuses up to every ancestor directory. Modified beats untracked,
- * and both beat ignored-only contents. */
+/** Roll file statuses up to every ancestor directory. Modified beats untracked;
+ * ignored entries intentionally stay direct-only. */
 export function computeFolders(
   files: Record<string, GitFileStatus>,
 ): Record<string, FolderGitStatus> {
@@ -59,8 +59,9 @@ function dominantScope(previous: GitScope | undefined, next: GitScope): GitScope
 }
 
 /** Roll file statuses and repo ownership up to every ancestor directory.
- * Modified beats untracked, and both beat ignored-only contents. Workspace-repo
- * changes beat nested-repo changes only when the same folder contains both. */
+ * Modified beats untracked. Workspace-repo changes beat nested-repo changes
+ * only when the same folder contains both. Ignored entries are direct-only:
+ * ignored folders/files are grey, but their non-ignored ancestors are not. */
 export function computeFolderDecorations(
   files: Record<string, GitFileStatus>,
   fileScopes: Record<string, GitScope>,
@@ -71,17 +72,13 @@ export function computeFolderDecorations(
   const folders: Record<string, FolderGitStatus> = {};
   const folderScopes: Record<string, GitScope> = {};
   for (const [path, status] of Object.entries(files)) {
+    if (status === "ignored") continue;
     const tracked = TRACKED_CHANGE.has(status);
     const scope = fileScopes[path] ?? "workspace";
     let p = parentOf(path);
     while (p) {
       if (tracked) {
         folders[p] = "modified";
-        folderScopes[p] = dominantScope(folderScopes[p], scope);
-      } else if (status === "ignored") {
-        if (!folders[p]) {
-          folders[p] = "ignored";
-        }
         folderScopes[p] = dominantScope(folderScopes[p], scope);
       } else if (folders[p] !== "modified") {
         folders[p] = "untracked";
@@ -121,9 +118,8 @@ export function gitStatusForEntry(
 ): GitDecorationStatus | null {
   const directStatus = data.files[path] ?? null;
   const folderStatus = isDir ? data.folders[path] ?? null : null;
-  if (isDir && folderStatus && folderStatus !== "ignored") return folderStatus;
+  if (isDir && folderStatus) return folderStatus;
   if (directStatus) return directStatus;
-  if (folderStatus) return folderStatus;
   return ignoredAncestorScope(path, data.files, data.fileScopes) ? "ignored" : null;
 }
 
@@ -134,11 +130,10 @@ export function gitScopeForEntry(
 ): GitScope {
   const directStatus = data.files[path] ?? null;
   const folderStatus = isDir ? data.folders[path] ?? null : null;
-  if (isDir && folderStatus && folderStatus !== "ignored") {
+  if (isDir && folderStatus) {
     return data.folderScopes[path] ?? "workspace";
   }
   if (directStatus) return data.fileScopes[path] ?? "workspace";
-  if (folderStatus) return data.folderScopes[path] ?? "workspace";
   return ignoredAncestorScope(path, data.files, data.fileScopes) ?? "workspace";
 }
 

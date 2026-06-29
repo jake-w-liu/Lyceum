@@ -191,6 +191,31 @@ describe("Explorer", () => {
     expect(container.querySelector(".git-badge")).toBeNull();
   });
 
+  it("does not mute parent folders that only contain ignored entries", async () => {
+    useWorkspaceStore.getState().openWorkspace(ROOT);
+    vi.mocked(gitStatus).mockResolvedValue({
+      isRepo: true,
+      rootRepo: ROOT,
+      repoRoots: [ROOT],
+      files: {
+        "/ws/src/main.tsx": "ignored",
+      },
+      fileRepos: {
+        "/ws/src/main.tsx": ROOT,
+      },
+    });
+
+    render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    const srcLabel = await screen.findByText("src");
+
+    await waitFor(() => expect(srcLabel).not.toHaveClass("git-ignored"));
+    expect(srcLabel.closest(".tree-row")).not.toHaveClass("git-ignored");
+
+    await userEvent.click(screen.getByRole("treeitem", { name: "src" }));
+    const childLabel = await screen.findByText("main.tsx");
+    await waitFor(() => expect(childLabel).toHaveClass("git-ignored"));
+  });
+
   it("lazily loads children when a directory is expanded", async () => {
     render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
     await userEvent.click(await screen.findByText("src"));

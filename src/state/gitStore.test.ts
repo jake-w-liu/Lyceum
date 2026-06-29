@@ -81,11 +81,11 @@ describe("computeFolders", () => {
     expect(folders["/repo/c"]).toBe("modified");
   });
 
-  it("marks ancestors of ignored-only files as ignored", () => {
+  it("does not roll ignored-only files up to ancestor directories", () => {
     const files: Record<string, GitFileStatus> = { "/repo/build/out.js": "ignored" };
     const folders = computeFolders(files);
-    expect(folders["/repo/build"]).toBe("ignored");
-    expect(folders["/repo"]).toBe("ignored");
+    expect(folders["/repo/build"]).toBeUndefined();
+    expect(folders["/repo"]).toBeUndefined();
   });
 
   it("lets untracked and modified statuses win over ignored files", () => {
@@ -127,7 +127,7 @@ describe("computeFolders", () => {
     expect(folders.scopes["/repo"]).toBe("workspace");
   });
 
-  it("rolls nested repository ignored files up with nested scope", () => {
+  it("does not roll nested repository ignored files up with nested scope", () => {
     const files: Record<string, GitFileStatus> = {
       "/repo/pkg/dist/out.js": "ignored",
     };
@@ -135,9 +135,9 @@ describe("computeFolders", () => {
       "/repo/pkg/dist/out.js": "nested",
     });
 
-    expect(folders.statuses["/repo/pkg/dist"]).toBe("ignored");
-    expect(folders.scopes["/repo/pkg/dist"]).toBe("nested");
-    expect(folders.scopes["/repo/pkg"]).toBe("nested");
+    expect(folders.statuses["/repo/pkg/dist"]).toBeUndefined();
+    expect(folders.scopes["/repo/pkg/dist"]).toBeUndefined();
+    expect(folders.scopes["/repo/pkg"]).toBeUndefined();
   });
 
   it("decorates ignored directories and their visible children from the direct ignored folder", () => {
@@ -149,16 +149,9 @@ describe("computeFolders", () => {
       fileScopes: {
         "/repo/pkg/dist": "nested",
       },
-      folders: {
-        "/repo/pkg": "ignored",
-        "/repo": "ignored",
-      },
-      folderScopes: {
-        "/repo/pkg": "nested",
-        "/repo": "nested",
-      },
     };
 
+    expect(gitStatusForEntry(data, "/repo/pkg", true)).toBeNull();
     expect(gitStatusForEntry(data, "/repo/pkg/dist", true)).toBe("ignored");
     expect(gitScopeForEntry(data, "/repo/pkg/dist", true)).toBe("nested");
     expect(gitStatusForEntry(data, "/repo/pkg/dist/out.js", false)).toBe(
@@ -323,7 +316,7 @@ describe("gitStore", () => {
     expect(useGitStore.getState().fileScopes).toEqual({
       "/repo/pkg/dist/out.js": "nested",
     });
-    expect(useGitStore.getState().folders["/repo/pkg/dist"]).toBe("ignored");
-    expect(useGitStore.getState().folderScopes["/repo/pkg/dist"]).toBe("nested");
+    expect(useGitStore.getState().folders["/repo/pkg/dist"]).toBeUndefined();
+    expect(useGitStore.getState().folderScopes["/repo/pkg/dist"]).toBeUndefined();
   });
 });
