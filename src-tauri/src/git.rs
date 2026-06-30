@@ -166,7 +166,31 @@ fn is_skipped_walk_dir(path: &Path) -> bool {
     )
 }
 
-fn discover_git_markers(root: &Path) -> Vec<PathBuf> {
+/// Absolute paths the repository ignores (git collapses fully-ignored directories to
+/// the directory). Used to prune nested-repo discovery so a clone inside an ignored
+/// folder is not registered as a repo and its files are not decorated.
+fn repo_ignored_paths(program: &OsString, repo_top: &Path) -> Vec<PathBuf> {
+    let Some(out) = run_git(
+        program,
+        repo_top,
+        &[
+            "status",
+            "--porcelain",
+            "-z",
+            "--untracked-files=all",
+            "--ignored=matching",
+        ],
+    ) else {
+        return Vec::new();
+    };
+    parse_porcelain_z(&out)
+        .into_iter()
+        .filter(|(_, status)| status == "ignored")
+        .map(|(rel, _)| repo_top.join(normalize_status_rel_path(&rel)))
+        .collect()
+}
+
+fn discover_git_markers(root: &Path, ignored: &[PathBuf]) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     let mut stack = vec![root.to_path_buf()];
 
@@ -181,6 +205,13 @@ fn discover_git_markers(root: &Path) -> Vec<PathBuf> {
         for entry in entries.flatten() {
             let path = entry.path();
             if is_skipped_walk_dir(&path) {
+                continue;
+            }
+            // Don't descend into directories the workspace repo ignores: a clone
+            // inside an ignored folder (e.g. a vendored build dir) is not part of this
+            // project, so it must not be discovered as a nested repo — otherwise its
+            // own untracked/generated files get decorated in the explorer.
+            if ignored.iter().any(|ig| path_is_within(&path, ig)) {
                 continue;
             }
             let Ok(file_type) = entry.file_type() else {
@@ -236,6 +267,13 @@ pub fn git_status(
     let program = git_program();
     let root_repo = repo_top_level(&program, root_path);
 
+    // Directories the workspace repo ignores — used to prune nested-repo discovery so
+    // a clone inside an ignored folder is not registered (and decorated) as a repo.
+    let ignored_dirs = match &root_repo {
+        Some(top) => repo_ignored_paths(&program, top),
+        None => Vec::new(),
+    };
+
     // Query the repository containing the opened root, plus any nested
     // repositories that have their own .git marker under the workspace.
     let mut seen = HashSet::new();
@@ -244,7 +282,7 @@ pub fn git_status(
         seen.insert(path_string(top));
         repo_roots.push(top.clone());
     }
-    for marker_root in discover_git_markers(root_path) {
+    for marker_root in discover_git_markers(root_path, &ignored_dirs) {
         if let Some(top) = repo_top_level(&program, &marker_root) {
             let key = path_string(&top);
             if seen.insert(key) {
@@ -393,12 +431,34 @@ mod tests {
         fs::create_dir(root.join("node_modules").join("dep")).unwrap();
         fs::create_dir(root.join("node_modules").join("dep").join(".git")).unwrap();
 
-        let roots = discover_git_markers(root);
+        let roots = discover_git_markers(root, &[]);
 
         assert!(roots.iter().any(|p| p == root));
         assert!(roots.iter().any(|p| p == &root.join("pkg")));
         assert!(!roots
             .iter()
             .any(|p| p == &root.join("node_modules").join("dep")));
+    }
+
+    #[test]
+    fn skips_nested_repos_in_gitignored_dirs() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        fs::create_dir(root.join(".git")).unwrap();
+        // a vendored build dir the workspace repo ignores, holding a cloned repo
+        fs::create_dir(root.join("build")).unwrap();
+        fs::create_dir(root.join("build").join("dep")).unwrap();
+        fs::create_dir(root.join("build").join("dep").join(".git")).unwrap();
+
+        // without pruning, the nested clone is discovered (the old behaviour)
+        let all = discover_git_markers(root, &[]);
+        assert!(all.iter().any(|p| p == &root.join("build").join("dep")));
+
+        // with the ignored dir pruned, the nested clone under it is skipped
+        let pruned = discover_git_markers(root, &[root.join("build")]);
+        assert!(pruned.iter().any(|p| p == root));
+        assert!(!pruned
+            .iter()
+            .any(|p| p == &root.join("build").join("dep")));
     }
 }
