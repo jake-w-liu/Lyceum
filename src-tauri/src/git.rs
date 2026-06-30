@@ -457,8 +457,6 @@ mod tests {
         // with the ignored dir pruned, the nested clone under it is skipped
         let pruned = discover_git_markers(root, &[root.join("build")]);
         assert!(pruned.iter().any(|p| p == root));
-        assert!(!pruned
-            .iter()
-            .any(|p| p == &root.join("build").join("dep")));
+        assert!(!pruned.iter().any(|p| p == &root.join("build").join("dep")));
     }
 }
