@@ -12,10 +12,22 @@ import {
   useContextMenuStore,
 } from "../state/contextMenuStore";
 
+const webviewMocks = vi.hoisted(() => {
+  const onDragDropEvent = vi.fn(async () => vi.fn());
+  return {
+    getCurrentWebview: vi.fn(() => ({ onDragDropEvent })),
+    onDragDropEvent,
+  };
+});
+
 // Native confirm/alert dialogs (Tauri plugin). `ask` defaults to confirming.
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   ask: vi.fn(async () => true),
   message: vi.fn(async () => {}),
+}));
+
+vi.mock("@tauri-apps/api/webview", () => ({
+  getCurrentWebview: webviewMocks.getCurrentWebview,
 }));
 
 vi.mock("../lib/ipc", () => ({
@@ -89,12 +101,49 @@ function createDataTransfer() {
   };
 }
 
+type NativeDropPayload =
+  | { type: "enter"; paths: string[]; position: { x: number; y: number } }
+  | { type: "over"; position: { x: number; y: number } }
+  | { type: "drop"; paths: string[]; position: { x: number; y: number } }
+  | { type: "leave" };
+
+type NativeDropHandler = (event: { payload: NativeDropPayload }) => void;
+
+function mockElementFromPoint(element: Element | null) {
+  const original = document.elementFromPoint;
+  const elementFromPoint = vi.fn(() => element);
+  Object.defineProperty(document, "elementFromPoint", {
+    configurable: true,
+    value: elementFromPoint,
+  });
+  return {
+    elementFromPoint,
+    restore: () => {
+      if (original) {
+        Object.defineProperty(document, "elementFromPoint", {
+          configurable: true,
+          value: original,
+        });
+      } else {
+        delete (document as unknown as { elementFromPoint?: unknown })
+          .elementFromPoint;
+      }
+    },
+  };
+}
+
 beforeEach(() => {
   useTreeStore.setState(initialTreeData, false);
   useEditorStore.setState(initialEditorData, false);
   useGitStore.setState(initialGitData, false);
   useContextMenuStore.setState(initialContextMenuData, false);
   useWorkspaceStore.setState(initialWorkspaceData, false);
+  webviewMocks.onDragDropEvent.mockReset();
+  webviewMocks.onDragDropEvent.mockResolvedValue(vi.fn());
+  webviewMocks.getCurrentWebview.mockReset();
+  webviewMocks.getCurrentWebview.mockReturnValue({
+    onDragDropEvent: webviewMocks.onDragDropEvent,
+  });
   vi.mocked(readDirectory).mockReset();
   vi.mocked(readDirectory).mockImplementation(async (p: string) => {
     if (p === ROOT) return [dir("src"), file("README.md")];
@@ -480,6 +529,24 @@ describe("Explorer", () => {
     expect(useEditorStore.getState().docs[0].path).toBe("/ws/src/README.md");
   });
 
+  it("clears a stale folder drop target when dragging over a non-droppable row", async () => {
+    render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await screen.findByText("README.md");
+    const readmeRow = screen.getByText("README.md").closest(".tree-row")!;
+    const srcRow = screen.getByText("src").closest(".tree-row")!;
+    const dataTransfer = createDataTransfer();
+
+    fireEvent.dragStart(readmeRow, { dataTransfer });
+    fireEvent.dragOver(srcRow, { dataTransfer });
+    expect(srcRow).toHaveClass("drop-target");
+
+    fireEvent.dragOver(readmeRow, { dataTransfer });
+    expect(srcRow).not.toHaveClass("drop-target");
+    fireEvent.dragEnd(readmeRow, { dataTransfer });
+
+    expect(movePaths).not.toHaveBeenCalled();
+  });
+
   it("uses backend-reported move paths to remap open editor tabs", async () => {
     vi.mocked(movePaths).mockResolvedValue([
       { from: "/ws/README.md", to: "/canonical/src/README.md", isDir: false },
@@ -533,6 +600,49 @@ describe("Explorer", () => {
     await waitFor(() =>
       expect(movePaths).toHaveBeenCalledWith(ROOT, ["/ws/src/main.tsx"], ROOT),
     );
+  });
+
+  it("imports native file drops into a folder when hit-testing finds the visual row", async () => {
+    render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await screen.findByText("src");
+    await waitFor(() => expect(webviewMocks.onDragDropEvent).toHaveBeenCalled());
+    const srcRow = screen.getByText("src").closest(".tree-row")!;
+    const hitTest = mockElementFromPoint(srcRow);
+    const originalDpr = Object.getOwnPropertyDescriptor(window, "devicePixelRatio");
+    Object.defineProperty(window, "devicePixelRatio", {
+      configurable: true,
+      value: 2,
+    });
+
+    try {
+      const calls = webviewMocks.onDragDropEvent.mock
+        .calls as unknown as Array<[NativeDropHandler]>;
+      const handler = calls[0][0];
+      handler({
+        payload: {
+          type: "drop",
+          paths: ["/tmp/from-finder.txt"],
+          position: { x: 240, y: 80 },
+        },
+      });
+
+      await waitFor(() =>
+        expect(copyPaths).toHaveBeenCalledWith(
+          ROOT,
+          ["/tmp/from-finder.txt"],
+          "/ws/src",
+        ),
+      );
+      expect(hitTest.elementFromPoint).toHaveBeenCalledWith(120, 40);
+    } finally {
+      hitTest.restore();
+      if (originalDpr) {
+        Object.defineProperty(window, "devicePixelRatio", originalDpr);
+      } else {
+        delete (window as unknown as { devicePixelRatio?: unknown })
+          .devicePixelRatio;
+      }
+    }
   });
 
   it("moves on root drop even when drag state was cleared before drop", async () => {
@@ -723,6 +833,23 @@ describe("Explorer", () => {
     fireEvent.drop(rootFileRow, { dataTransfer });
 
     expect(movePaths).not.toHaveBeenCalled();
+  });
+
+  it("clears Explorer selection when the empty tree space is clicked", async () => {
+    const { container } = render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await userEvent.click(await screen.findByText("README.md"));
+    expect(screen.getByRole("treeitem", { name: "README.md" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+
+    await userEvent.click(container.querySelector(".tree-root-drop-spacer")!);
+
+    expect(screen.getByRole("treeitem", { name: "README.md" })).toHaveAttribute(
+      "aria-selected",
+      "false",
+    );
+    expect(useTreeStore.getState().selectedPaths).toEqual([]);
   });
 
   it("supports Cmd/Ctrl-click multi-select", async () => {

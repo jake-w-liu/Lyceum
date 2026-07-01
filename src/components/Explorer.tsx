@@ -447,6 +447,8 @@ function TreeNode({
           (dropTargetPath === entry.path ? " drop-target" : "") +
           gitClass
         }
+        data-row-path={entry.path}
+        data-row-isdir={entry.isDir ? "1" : ""}
         draggable={!renaming}
         style={{ paddingLeft: 8 + depth * 12 }}
         onContextMenu={onContextMenu}
@@ -1195,10 +1197,12 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     const dpr = window.devicePixelRatio || 1;
     const el = document.elementFromPoint(position.x / dpr, position.y / dpr);
     if (!el || !explorerRef.current?.contains(el)) return null;
-    const row = el.closest<HTMLElement>("[data-path]");
+    const row = el.closest<HTMLElement>("[data-row-path], [data-path]");
     if (!row) return rootPath; // inside the explorer but not on a row → root
-    const path = row.dataset.path!;
-    return row.dataset.isdir === "1" ? path : parentDir(path);
+    const path = row.dataset.rowPath ?? row.dataset.path;
+    if (!path) return rootPath;
+    const isDir = row.dataset.rowIsdir === "1" || row.dataset.isdir === "1";
+    return isDir ? path : parentDir(path);
   }
 
   useEffect(() => {
@@ -1368,6 +1372,13 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     }
   }
 
+  function onTreeMouseDown(e: React.MouseEvent<HTMLUListElement>) {
+    if (e.button !== 0) return;
+    if (!isRootDropSurface(e.target, e.currentTarget)) return;
+    useTreeStore.getState().clearSelection();
+    treeRef.current?.focus();
+  }
+
   return (
     <div
       className="explorer"
@@ -1450,10 +1461,19 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
         ref={treeRef}
         tabIndex={-1}
         onKeyDown={onTreeKeyDown}
+        onMouseDown={onTreeMouseDown}
         onContextMenu={openRootContextMenu}
         onDragOver={(e) => {
-          if (!isRootDropSurface(e.target, e.currentTarget)) return;
-          if (!canMoveEntriesTo(draggingEntries, rootPath)) return;
+          const entries = resolveDraggingEntries(e.dataTransfer);
+          if (entries.length === 0) return;
+          if (!isRootDropSurface(e.target, e.currentTarget)) {
+            setDropTargetPath(null);
+            return;
+          }
+          if (!canMoveEntriesTo(entries, rootPath)) {
+            setDropTargetPath(null);
+            return;
+          }
           e.preventDefault();
           e.dataTransfer.dropEffect = "move";
           setDropTargetPath(rootPath);
