@@ -45,6 +45,7 @@ import type { LspSession } from "../lsp/lspClient";
 import { serverForLanguage } from "../lsp/servers";
 import { setActiveEditor } from "../lib/editorBridge";
 import { commandRegistry } from "../commands/commandRegistry";
+import { reconcileMapMove } from "../lib/rekeyMapEntry";
 
 // Monotonic LSP document version (incremented on every edit across models).
 let lspChangeVersion = 1;
@@ -361,25 +362,51 @@ export default function MonacoEditor() {
   // effects below react to the changed paths (effects run in declaration
   // order). Keeping the same model object preserves undo history + view state;
   // the LSP is told didClose(old)/didOpen(new) and the model's traffic is
-  // routed through the new URI from now on (model URIs are immutable).
+  // routed through the new URI from now on (model URIs are immutable). When the
+  // source has no preservable model, evict a stale destination model so the bind
+  // effect recreates it from the authoritative moved document in the store.
   useEffect(() => {
     if (!lastDocMoves) return;
     for (const move of lastDocMoves.moves) {
-      const model = modelsRef.current.get(move.from);
-      if (!model || model.isDisposed()) continue;
       const doc = useEditorStore.getState().docs.find((d) => d.path === move.to);
+      const model = reconcileMapMove(
+        modelsRef.current,
+        move.from,
+        move.to,
+        (candidate) =>
+          !candidate.isDisposed() &&
+          doc !== undefined &&
+          isTextDoc(doc) &&
+          doc.language === candidate.getLanguageId(),
+        (displaced) => {
+          const displacedUri = lspUriForModel(displaced);
+          flushLspChange(displacedUri);
+          const timer = lspChangeTimers.current.get(displacedUri);
+          if (timer) {
+            clearTimeout(timer);
+            lspChangeTimers.current.delete(displacedUri);
+          }
+          pendingLspChanges.current.delete(displacedUri);
+          if (pendingStoreWrite?.path === move.to) pendingStoreWrite = null;
+          if (editorRef.current?.getModel() === displaced) {
+            editorRef.current.setModel(null);
+          }
+          const displacedSession = getSession(displaced.getLanguageId());
+          if (displacedSession) void didClose(displacedSession, displacedUri);
+          clearLspUriOverride(displaced);
+          displaced.dispose();
+          viewStatesRef.current.delete(move.to);
+          if (currentPathRef.current === move.to) currentPathRef.current = null;
+        },
+      );
       // A rename that changes the language (e.g. notes.txt -> notes.md) keeps
       // the old dispose/recreate path so the model is rebuilt with the right
       // grammar (undo history is lost in that case — known limitation).
-      if (!doc || !isTextDoc(doc) || doc.language !== model.getLanguageId()) {
-        continue;
-      }
+      if (!model) continue;
       const oldUri = lspUriForModel(model);
       const newUri = monaco.Uri.file(move.to).toString();
       // Deliver the outgoing URI's pending edit before the server forgets it.
       flushLspChange(oldUri);
-      modelsRef.current.delete(move.from);
-      modelsRef.current.set(move.to, model);
       // The model (and thus its view state) survives the rename — re-key it too.
       const movedView = viewStatesRef.current.get(move.from);
       if (movedView !== undefined) {

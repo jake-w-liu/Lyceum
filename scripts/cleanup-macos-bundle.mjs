@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isPathInside } from "./path-boundary.mjs";
 
 if (process.platform !== "darwin") {
   process.exit(0);
@@ -60,7 +61,7 @@ function mountedStaleImages() {
     if (!currentImage) return;
     const name = path.basename(currentImage);
     if (
-      currentImage.startsWith(bundleRoot) &&
+      isPathInside(bundleRoot, currentImage) &&
       bundleImagePattern.test(name) &&
       currentDevices.length > 0
     ) {

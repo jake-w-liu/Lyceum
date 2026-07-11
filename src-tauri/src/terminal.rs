@@ -19,6 +19,18 @@ use tauri::{AppHandle, Emitter, Manager, State};
 /// session that reused the same id is never torn down by a stale reader.
 static SESSION_GEN: AtomicU64 = AtomicU64::new(0);
 
+/// At most this many raw PTY chunks may wait for the event-emitter thread.
+/// Reader chunks are 4 KiB, so the queue retains at most roughly 256 KiB per
+/// terminal before applying backpressure to the PTY (plus one in-flight batch).
+const OUTPUT_QUEUE_CAPACITY: usize = 64;
+
+fn terminal_output_channel() -> (
+    std::sync::mpsc::SyncSender<Vec<u8>>,
+    std::sync::mpsc::Receiver<Vec<u8>>,
+) {
+    std::sync::mpsc::sync_channel(OUTPUT_QUEUE_CAPACITY)
+}
+
 struct Session {
     master: Box<dyn MasterPty + Send>,
     // The writer lives behind its own lock so terminal_write never holds the
@@ -43,20 +55,22 @@ fn session_key(window: &tauri::Window, id: &str) -> String {
 #[derive(Default)]
 pub struct TerminalManager {
     sessions: Mutex<HashMap<String, Session>>,
+    teardowns: crate::julia::TeardownTracker,
 }
 
 impl TerminalManager {
     /// Kill every running terminal session. Called on app exit so no shell
     /// subprocess is orphaned when Lyceum quits.
     pub fn shutdown_all(&self) {
-        if let Ok(mut sessions) = self.sessions.lock() {
-            for (_id, mut session) in sessions.drain() {
-                // child.kill() escalates SIGHUP -> grace -> SIGKILL so a shell
-                // that traps/ignores SIGHUP is terminated, not left orphaned.
-                let _ = session.child.kill();
-                let _ = session.child.wait();
-            }
-        }
+        let sessions = {
+            let mut sessions = self
+                .sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            sessions.drain().map(|(_, session)| session).collect()
+        };
+        kill_and_reap(sessions);
+        self.teardowns.shutdown_and_join();
     }
 
     /// Kill every session belonging to one window (called when it is
@@ -69,9 +83,10 @@ impl TerminalManager {
     pub fn close_sessions_for_window(&self, label: &str) {
         let prefix = format!("{label}:");
         let removed: Vec<Session> = {
-            let Ok(mut sessions) = self.sessions.lock() else {
-                return;
-            };
+            let mut sessions = self
+                .sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let keys: Vec<String> = sessions
                 .keys()
                 .filter(|key| key.starts_with(&prefix))
@@ -79,31 +94,23 @@ impl TerminalManager {
                 .collect();
             keys.iter().filter_map(|key| sessions.remove(key)).collect()
         };
-        kill_and_reap_detached(removed);
+        if !removed.is_empty() {
+            self.teardowns.spawn(move || kill_and_reap(removed));
+        }
     }
 }
 
-/// Kill and reap the given sessions on a DETACHED thread. The window-close and
-/// tab-close paths use this so their caller — the window `Destroyed` handler on
-/// the main event-loop thread, or a Tauri command thread — never blocks on a
-/// shell slow to exit on SIGHUP. The sessions are already removed from the map,
-/// and the child lives in the Session, so the reader threads won't double-reap
-/// and the reap/kill can't race a reader's wait on the same pid. (App-exit
-/// shutdown_all does the same kill+reap inline — the app is quitting, so there's
-/// nothing left for it to block.)
-fn kill_and_reap_detached(sessions: Vec<Session>) {
-    if sessions.is_empty() {
-        return;
+/// Kill and reap sessions after their map entries have been removed. Callers
+/// either run this synchronously during app exit or register it with the
+/// manager's teardown tracker for window/tab close.
+fn kill_and_reap(sessions: Vec<Session>) {
+    for mut session in sessions {
+        // child.kill() escalates SIGHUP -> grace -> SIGKILL (portable_pty),
+        // so a shell that traps/ignores SIGHUP can't block child.wait()
+        // forever and leak this thread, the process, and the PTY fds.
+        let _ = session.child.kill();
+        let _ = session.child.wait();
     }
-    std::thread::spawn(move || {
-        for mut session in sessions {
-            // child.kill() escalates SIGHUP -> grace -> SIGKILL (portable_pty),
-            // so a shell that traps/ignores SIGHUP can't block child.wait()
-            // forever and leak this thread, the process, and the PTY fds.
-            let _ = session.child.kill();
-            let _ = session.child.wait();
-        }
-    });
 }
 
 /// Resolve the shell to spawn: an explicit override, else `$SHELL`, else a
@@ -165,7 +172,12 @@ pub fn terminal_create(
     let key = session_key(&window, &id);
     // Reject a duplicate id outright rather than silently killing the existing
     // session (which would orphan the old tab and leak its reader thread).
-    if state.sessions.lock().unwrap().contains_key(&key) {
+    if state
+        .sessions
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains_key(&key)
+    {
         return Err(format!("terminal already exists: {id}"));
     }
 
@@ -217,7 +229,10 @@ pub fn terminal_create(
     let exit_event = format!("terminal:exit:{id}");
 
     {
-        let mut sessions = state.sessions.lock().unwrap();
+        let mut sessions = state
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if sessions.contains_key(&key) {
             drop(sessions);
             let _ = killer.kill();
@@ -239,7 +254,12 @@ pub fn terminal_create(
     // thread through a channel. Splitting read from emit lets the emitter
     // coalesce a backlog without ever issuing a blocking read that would sit on
     // already-buffered output.
-    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    // A bounded queue is essential here: a child can write PTY output much
+    // faster than Tauri can serialize/emit it. An unbounded mpsc::channel would
+    // retain every 4 KiB chunk until the process exhausts memory. Backpressure
+    // is correct terminal behavior; once this small queue fills, the reader
+    // pauses and the kernel PTY buffer eventually throttles the child.
+    let (tx, rx) = terminal_output_channel();
     let app_for_reader = app.clone();
     let key_for_reader = key.clone();
     std::thread::spawn(move || {
@@ -264,19 +284,30 @@ pub fn terminal_create(
         // the pid, which by then may be reaped and reused — that is exactly the
         // bare-pid SIGHUP-to-an-unrelated-process hazard. Only our own generation
         // matches, so a new session that reused the id is never reclaimed here.
-        let mut reclaimed: Option<Session> = None;
         if let Some(manager) = app_for_reader.try_state::<TerminalManager>() {
-            let mut sessions = manager.sessions.lock().unwrap();
-            if sessions
-                .get(&key_for_reader)
-                .is_some_and(|session| session.gen == gen)
-            {
-                reclaimed = sessions.remove(&key_for_reader);
+            let reclaimed = {
+                let mut sessions = manager
+                    .sessions
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if sessions
+                    .get(&key_for_reader)
+                    .is_some_and(|session| session.gen == gen)
+                {
+                    sessions.remove(&key_for_reader)
+                } else {
+                    None
+                }
+            };
+            // EOF does not prove the child itself exited: a shell can close its
+            // PTY fds and continue running. Once its map ownership is removed,
+            // route kill/reap through the manager tracker so ExitRequested can
+            // join it instead of exiting around a blocked reader thread.
+            if let Some(session) = reclaimed {
+                manager
+                    .teardowns
+                    .spawn(move || kill_and_reap(vec![session]));
             }
-        }
-        // Reap outside the lock, and only when WE won the removal.
-        if let Some(mut session) = reclaimed {
-            let _ = session.child.wait();
         }
     });
 
@@ -318,13 +349,18 @@ pub fn terminal_write(
     // lock BEFORE the (potentially blocking) write/flush so a full PTY buffer
     // on one terminal can't wedge every other terminal command.
     let writer = {
-        let sessions = state.sessions.lock().unwrap();
+        let sessions = state
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let session = sessions
             .get(&session_key(&window, &id))
             .ok_or("no such terminal")?;
         session.writer.clone()
     };
-    let mut writer = writer.lock().unwrap();
+    let mut writer = writer
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     writer
         .write_all(&normalize_terminal_input(&data))
         .map_err(|e| e.to_string())?;
@@ -341,7 +377,10 @@ pub fn terminal_resize(
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
-    let sessions = state.sessions.lock().unwrap();
+    let sessions = state
+        .sessions
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let session = sessions
         .get(&session_key(&window, &id))
         .ok_or("no such terminal")?;
@@ -367,13 +406,13 @@ pub fn terminal_close(
     let removed = state
         .sessions
         .lock()
-        .unwrap()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(&session_key(&window, &id));
     if let Some(session) = removed {
-        // Reap on a detached thread (see kill_and_reap_detached): the reader
-        // thread no longer reaps a session a closer removed, and this command
-        // must not block on a shell slow to exit on SIGHUP.
-        kill_and_reap_detached(vec![session]);
+        // The reader thread no longer reaps a session a closer removed. Track
+        // the detached kill/reap so app exit can join it before the runtime
+        // tears down the process.
+        state.teardowns.spawn(move || kill_and_reap(vec![session]));
     }
     Ok(())
 }
@@ -381,6 +420,32 @@ pub fn terminal_close(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_output_queue_is_strictly_bounded() {
+        let (sender, _receiver) = terminal_output_channel();
+        for _ in 0..OUTPUT_QUEUE_CAPACITY {
+            sender.try_send(vec![0; 4096]).expect("queue capacity");
+        }
+        assert!(matches!(
+            sender.try_send(vec![0; 4096]),
+            Err(std::sync::mpsc::TrySendError::Full(_))
+        ));
+    }
+
+    #[test]
+    fn terminal_reader_reap_is_manager_tracked() {
+        let source = include_str!("terminal.rs");
+        let reader = source
+            .split_once("// Reader thread: pull raw bytes")
+            .expect("reader source")
+            .1
+            .split_once("// Emitter thread: coalesce bursts")
+            .expect("reader end")
+            .0;
+        assert!(reader.contains(".teardowns"));
+        assert!(reader.contains(".spawn(move || kill_and_reap(vec![session]))"));
+    }
 
     #[test]
     fn resolve_shell_prefers_explicit() {

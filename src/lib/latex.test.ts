@@ -39,4 +39,9 @@ describe("LaTeX output path helpers", () => {
       "/w/chapters/intro.pdf",
     );
   });
+
+  it("derives output beside files at either form of a Windows drive root", () => {
+    expect(pdfPathForTexPath("C:\\paper.tex")).toBe("C:\\paper.pdf");
+    expect(pdfPathForTexPath("C:/paper.tex")).toBe("C:/paper.pdf");
+  });
 });

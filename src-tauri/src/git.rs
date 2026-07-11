@@ -23,6 +23,9 @@ use serde::Serialize;
 use tauri::{AppHandle, State};
 
 use crate::path_access::{self, PathAccessManager};
+use crate::workspace_paths::{
+    path_resolves_into_workspace_trash, path_resolves_through_workspace_names,
+};
 
 /// Result of a workspace git-status query. `files` maps absolute paths to a
 /// status string the frontend understands.
@@ -159,11 +162,14 @@ fn has_git_marker(dir: &Path) -> bool {
     dir.join(".git").exists()
 }
 
-fn is_skipped_walk_dir(path: &Path) -> bool {
-    matches!(
-        path.file_name().and_then(|s| s.to_str()),
-        Some(".git" | ".lyceum-trash" | "node_modules" | "target" | "dist" | ".vite")
-    )
+fn is_skipped_walk_dir(root: &Path, path: &Path) -> bool {
+    path_resolves_into_workspace_trash(root, path)
+        || path_resolves_through_workspace_names(
+            root,
+            path,
+            &[],
+            &[".git", "node_modules", "target", "dist", ".vite"],
+        )
 }
 
 /// Absolute paths the repository ignores (git collapses fully-ignored directories to
@@ -204,7 +210,7 @@ fn discover_git_markers(root: &Path, ignored: &[PathBuf]) -> Vec<PathBuf> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if is_skipped_walk_dir(&path) {
+            if is_skipped_walk_dir(root, &path) {
                 continue;
             }
             // Don't descend into directories the workspace repo ignores: a clone
@@ -438,6 +444,51 @@ mod tests {
         assert!(!roots
             .iter()
             .any(|p| p == &root.join("node_modules").join("dep")));
+    }
+
+    #[test]
+    fn discovers_a_repo_inside_a_nested_trash_named_directory() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let nested_repo = root.join("docs").join(".lyceum-trash");
+        fs::create_dir_all(nested_repo.join(".git")).unwrap();
+
+        let roots = discover_git_markers(root, &[]);
+
+        assert_eq!(roots, [nested_repo]);
+    }
+
+    #[test]
+    fn skips_a_case_aliased_root_trash_entry_when_the_filesystem_aliases_it() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let upper = root.join(".LYCEUM-TRASH");
+        fs::create_dir_all(upper.join(".git")).unwrap();
+        if !root.join(".lyceum-trash").exists() {
+            return;
+        }
+
+        let roots = discover_git_markers(root, &[]);
+
+        assert!(roots.is_empty());
+    }
+
+    #[test]
+    fn case_aliased_git_metadata_is_not_descended_on_insensitive_filesystems() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let upper_git = root.join(".GIT");
+        let fake_nested_repo = upper_git.join("nested");
+        fs::create_dir_all(fake_nested_repo.join(".git")).unwrap();
+        let aliases = root.join(".git").exists();
+
+        let roots = discover_git_markers(root, &[]);
+
+        if aliases {
+            assert_eq!(roots, [root]);
+        } else {
+            assert_eq!(roots, [fake_nested_repo]);
+        }
     }
 
     #[test]

@@ -1,5 +1,7 @@
 // Derive and select LaTeX build commands for the active .tex path.
 
+import { parentDirectory } from "./pathParent";
+
 export const STOCK_LATEX_BUILD_COMMAND = "latexmk -pdf main.tex";
 
 export function deriveOutputPdf(
@@ -24,7 +26,7 @@ export function deriveOutputPdf(
 }
 
 export function pdfPathForTexPath(texPath: string): string {
-  const dir = parentDir(texPath);
+  const dir = parentDirectory(texPath);
   const pdfName = toPdfBasename(texPath);
   return dir ? joinPath(dir, pdfName, texPath) : pdfName;
 }
@@ -36,13 +38,6 @@ function toPdfBasename(path: string): string {
 
 function baseName(path: string): string {
   return path.split(/[/\\]/).pop() ?? path;
-}
-
-function parentDir(path: string): string {
-  const idx = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-  if (idx < 0) return "";
-  if (idx === 0) return path.slice(0, 1);
-  return path.slice(0, idx);
 }
 
 function pathSeparator(path: string): string {

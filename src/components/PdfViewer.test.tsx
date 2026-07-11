@@ -33,6 +33,7 @@ vi.mock("pdfjs-dist/build/pdf.worker.min.mjs?url", () => ({
 vi.mock("pdfjs-dist", () => ({
   GlobalWorkerOptions: {},
   getDocument: pdfMocks.getDocument,
+  normalizeUnicode: (text: string) => text.replace(/ﬃ/g, "ffi"),
   AnnotationLayer: vi.fn().mockImplementation(function AnnotationLayerMock({
     div,
   }: {
@@ -144,6 +145,29 @@ describe("PdfViewer", () => {
       zoom: 1,
     });
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("registers and cleans up text-layer selection geometry", async () => {
+    mockPdfDocument(1);
+
+    const { container, unmount } = render(
+      <PdfViewer path="/w/selectable.pdf" />,
+    );
+    await waitFor(() => {
+      expect(
+        container.querySelector(".pdf-text-layer .endOfContent"),
+      ).not.toBeNull();
+    });
+    const textLayer = container.querySelector(
+      ".pdf-text-layer",
+    ) as HTMLDivElement;
+
+    fireEvent.mouseDown(textLayer);
+    expect(textLayer).toHaveClass("selecting");
+
+    unmount();
+    expect(textLayer).not.toHaveClass("selecting");
+    expect(textLayer.querySelector(".endOfContent")).toBeNull();
   });
 
   it("keeps the restored page instead of deriving current page from the render cache", async () => {

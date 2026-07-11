@@ -8,6 +8,7 @@
 
 import { create } from "zustand";
 import { gitStatus, type GitFileStatus } from "../lib/ipc";
+import { parentDirectoryForTraversal } from "../lib/pathParent";
 import { useWorkspaceStore } from "./workspaceStore";
 
 /** A folder rollup preserves the strongest visible child decoration:
@@ -34,10 +35,7 @@ const TRACKED_CHANGE: ReadonlySet<GitFileStatus> = new Set<GitFileStatus>([
 /** Parent directory of an absolute path, or "" once the filesystem root is
  * passed. Handles both separators and avoids looping at "/". */
 export function parentOf(path: string): string {
-  const idx = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-  if (idx < 0) return "";
-  if (idx === 0) return path.length === 1 ? "" : "/";
-  return path.slice(0, idx);
+  return parentDirectoryForTraversal(path);
 }
 
 /** Roll file statuses up to every ancestor directory. Modified beats untracked;

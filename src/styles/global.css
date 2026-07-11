@@ -1174,8 +1174,21 @@ kbd {
   cursor: default;
 }
 
+.pdf-text-layer ::-moz-selection {
+  background: color-mix(in srgb, var(--accent) 34%, transparent);
+}
+
 .pdf-text-layer ::selection {
   background: color-mix(in srgb, var(--accent) 34%, transparent);
+}
+
+/* A selected line break must not paint a second, misleading rectangle. */
+.pdf-text-layer br::-moz-selection {
+  background: transparent;
+}
+
+.pdf-text-layer br::selection {
+  background: transparent;
 }
 
 .pdf-text-layer .endOfContent {
@@ -1185,6 +1198,19 @@ kbd {
   z-index: 0;
   user-select: none;
   cursor: default;
+}
+
+/* While dragging, the sentinel covers the layer and is moved beside the range
+   edge by pdfTextSelection. This keeps selection geometry continuous across
+   PDF.js's absolutely positioned text spans. */
+.pdf-text-layer.selecting .endOfContent {
+  top: 0;
+}
+
+/* Links and widgets sit above the text layer. Let an in-progress text drag
+   cross them without the annotation layer stealing pointer events. */
+.pdf-text-layer.selecting ~ .pdf-annotation-layer section {
+  pointer-events: none;
 }
 
 .pdf-annotation-layer {
@@ -1199,10 +1225,6 @@ kbd {
   box-sizing: border-box;
   pointer-events: auto;
   transform-origin: 0 0;
-}
-
-.pdf-text-layer.selecting ~ .pdf-annotation-layer section {
-  pointer-events: none;
 }
 
 .pdf-annotation-layer :is(.linkAnnotation, .buttonWidgetAnnotation.pushButton) > a {

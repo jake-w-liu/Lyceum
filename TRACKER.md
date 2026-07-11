@@ -239,10 +239,10 @@ Primary progress tracker for the lightweight, VS Code-inspired research IDE buil
 
 ### M12 — Performance pass + packaging
 
-- [x] Verify lazy-loading of Monaco, PDF.js, terminal, markdown (separate chunks; initial JS bundle ~89 kB gzip)
+- [x] Verify lazy-loading of Monaco, PDF.js, terminal, markdown (separate chunks; initial JS bundle ~94 KiB gzip)
 - [x] No background indexing, no extension marketplace, no Electron (native WebView via Tauri) — by design
 - [x] Measure bundle size; `chunkSizeWarningLimit` raised to acknowledge the intentional lazy editor chunks
-- [x] Produce a packaged Tauri release build (`npm run tauri build` → unsigned `.app`/`.dmg`; signing/notarization documented as post-v1)
+- [x] Produce a packaged Tauri release build (`npm run tauri build` → ad-hoc-signed, unnotarized `.app`/`.dmg`; Developer ID signing/notarization documented as post-v1)
 - [x] Docs/tracker finalized across M0–M12
 - [x] **Tests**
   - [x] `src/perf.test.ts` asserts Monaco/terminal/PDF/Markdown stay behind `React.lazy(() => import(...))`

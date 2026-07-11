@@ -5,7 +5,7 @@
 // leave the user's document truncated or half-written. Errors are mapped to
 // strings that include the offending path so the frontend can surface a message.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -40,6 +40,25 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
+/// Read at most `limit + 1` bytes so a regular file that grows after its
+/// metadata check cannot turn a bounded editor/search/PDF read into an
+/// unbounded allocation. The extra byte distinguishes an exact-limit file from
+/// an over-limit one without reading the remainder.
+pub(crate) fn read_bytes_capped(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
+    let mut file = std::fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut file)
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::FileTooLarge,
+            format!("file grew beyond the {limit}-byte read limit"),
+        ));
+    }
+    Ok(bytes)
+}
+
 /// Read a file to a string. Valid UTF-8 is returned as-is; a file that is not
 /// valid UTF-8 (e.g. Latin-1 / legacy encoding) is decoded lossily so it can
 /// still be opened and viewed rather than failing the open outright. Files
@@ -72,7 +91,8 @@ fn read_file_impl(path: &Path) -> Result<String, String> {
     }
     // Read the bytes once and decode in place: the lossy fallback reuses the
     // already-read buffer instead of reading the file a second time.
-    let bytes = std::fs::read(path).map_err(|e| format!("{display}: {e}"))?;
+    let bytes =
+        read_bytes_capped(path, MAX_TEXT_FILE_SIZE).map_err(|e| format!("{display}: {e}"))?;
     match String::from_utf8(bytes) {
         Ok(s) => Ok(s),
         Err(e) => Ok(String::from_utf8_lossy(e.as_bytes()).into_owned()),
@@ -101,21 +121,35 @@ fn write_file_impl(path_ref: &Path, content: &str) -> Result<(), String> {
     // `read_file` decodes such a file lossily (every invalid byte became U+FFFD)
     // so it can be viewed, but writing the editor's UTF-8 buffer back would
     // silently and irreversibly corrupt the original encoding / binary content.
-    // A brand-new file (read errors) and an already-UTF-8 file are unaffected, so
-    // normal editing and the first save of a UTF-8 file proceed as before.
+    // A genuinely absent file and an already-UTF-8 file are unaffected, so normal
+    // editing and the first save of a UTF-8 file proceed as before. Other read
+    // failures are surfaced: treating "permission denied" as absence would replace
+    // an unreadable existing file and destroy bytes the editor never loaded.
     // `std::fs::read` follows symlinks, matching `read_file`.
-    if let Ok(meta) = std::fs::metadata(path_ref) {
-        if !meta.is_file() {
-            return Err(format!("not a regular file: {}", path_ref.display()));
+    match std::fs::metadata(path_ref) {
+        Ok(meta) => {
+            if !meta.is_file() {
+                return Err(format!("not a regular file: {}", path_ref.display()));
+            }
+            if meta.len() > MAX_TEXT_FILE_SIZE {
+                return Err(format!(
+                    "{}: existing file is too large to validate safely ({}, limit {})",
+                    path_ref.display(),
+                    human_size(meta.len()),
+                    human_size(MAX_TEXT_FILE_SIZE)
+                ));
+            }
+            let existing = read_bytes_capped(path_ref, MAX_TEXT_FILE_SIZE)
+                .map_err(|e| format!("cannot read existing file {}: {e}", path_ref.display()))?;
+            if std::str::from_utf8(&existing).is_err() {
+                return Err(format!(
+                    "{}: refusing to save — the file is not valid UTF-8, and saving would corrupt its contents",
+                    path_ref.display()
+                ));
+            }
         }
-    }
-    if let Ok(existing) = std::fs::read(path_ref) {
-        if std::str::from_utf8(&existing).is_err() {
-            return Err(format!(
-                "{}: refusing to save — the file is not valid UTF-8, and saving would corrupt its contents",
-                path_ref.display()
-            ));
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("{}: {error}", path_ref.display())),
     }
     if let Some(parent) = path_ref.parent() {
         if !parent.as_os_str().is_empty() {
@@ -128,14 +162,33 @@ fn write_file_impl(path_ref: &Path, content: &str) -> Result<(), String> {
 /// Atomically replace `path` with `bytes` via a same-directory temp file + fsync
 /// + rename. The temp file is removed on any failure so no partial files leak.
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    write_atomic_with_sequence(path, bytes, &TMP_SEQ)
+}
+
+fn write_atomic_with_sequence(
+    path: &Path,
+    bytes: &[u8],
+    sequence: &AtomicU64,
+) -> std::io::Result<()> {
     // If `path` is a symlink, write through to its real target. `std::fs::rename`
     // does NOT follow a final-component symlink — renaming over the link would
     // replace (destroy) the link entry with a fresh regular file and leave the
     // real target's old content stale. Resolving first means we rename over the
     // resolved file in its own directory, preserving the link. A broken link
-    // (canonicalize fails) falls back to the path as-is.
+    // must fail closed: falling back to its pathname would rename over and
+    // destroy the link entry instead of saving through it.
     let resolved = match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => std::fs::canonicalize(path).ok(),
+        Ok(meta) if meta.file_type().is_symlink() => {
+            Some(std::fs::canonicalize(path).map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!(
+                        "cannot resolve save-target symlink {}: {error}",
+                        path.display()
+                    ),
+                )
+            })?)
+        }
         _ => None,
     };
     let path = resolved.as_deref().unwrap_or(path);
@@ -147,7 +200,6 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("lyceum-file");
-    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     // The temp component is `.{file_name}{suffix}`. Clamp the embedded name so the
     // whole component stays within the 255-byte per-component limit used by
     // APFS/ext4/NTFS — otherwise a legal but near-max-length filename overflows
@@ -156,22 +208,52 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     // ponytail: 255 is the standard component limit; a filesystem with a smaller
     // one would already constrain the original name too.
     const NAME_MAX: usize = 255;
-    let suffix = format!(".lyceum-tmp.{}.{seq}", std::process::id());
-    let budget = NAME_MAX.saturating_sub(1 + suffix.len()); // 1 for the leading '.'
-    let mut keep = file_name.len().min(budget);
-    while keep > 0 && !file_name.is_char_boundary(keep) {
-        keep -= 1; // don't split a UTF-8 codepoint
+    // `create_new` is the security boundary here. A predictable name may already
+    // exist as a symlink inside an untrusted workspace; `File::create` would
+    // follow it and truncate its target before the final rename. Claim a fresh
+    // directory entry atomically, retrying only ordinary name collisions.
+    const MAX_TEMP_ATTEMPTS: usize = 128;
+    let mut claimed = None;
+    for _ in 0..MAX_TEMP_ATTEMPTS {
+        let seq = sequence.fetch_add(1, Ordering::Relaxed);
+        let suffix = format!(".lyceum-tmp.{}.{seq}", std::process::id());
+        let budget = NAME_MAX.saturating_sub(1 + suffix.len()); // 1 for the leading '.'
+        let mut keep = file_name.len().min(budget);
+        while keep > 0 && !file_name.is_char_boundary(keep) {
+            keep -= 1; // don't split a UTF-8 codepoint
+        }
+        let tmp = parent.join(format!(".{}{suffix}", &file_name[..keep]));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(file) => {
+                claimed = Some((tmp, file));
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
     }
-    let tmp = parent.join(format!(".{}{suffix}", &file_name[..keep]));
+    let (tmp, mut file) = claimed.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not claim a unique atomic-save temp file",
+        )
+    })?;
 
     // Write fully, flush, and fsync the temp file before swapping it in.
     let write_result = (|| -> std::io::Result<()> {
-        let mut f = std::fs::File::create(&tmp)?;
+        let f = &mut file;
         f.write_all(bytes)?;
         f.flush()?;
         f.sync_all()?;
         Ok(())
     })();
+    // Close the claimed temp handle before any cleanup or rename. Windows denies
+    // removing/renaming an entry while an incompatible handle is still open.
+    drop(file);
     if let Err(e) = write_result {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
@@ -179,7 +261,10 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
     // Preserve the existing file's permissions across the replace.
     if let Ok(meta) = std::fs::metadata(path) {
-        let _ = std::fs::set_permissions(&tmp, meta.permissions());
+        if let Err(error) = std::fs::set_permissions(&tmp, meta.permissions()) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(error);
+        }
     }
 
     if let Err(e) = std::fs::rename(&tmp, path) {
@@ -224,7 +309,7 @@ fn read_file_bytes_impl(path: &Path) -> Result<Vec<u8>, String> {
             human_size(MAX_BINARY_FILE_SIZE)
         ));
     }
-    std::fs::read(path).map_err(|e| format!("{display}: {e}"))
+    read_bytes_capped(path, MAX_BINARY_FILE_SIZE).map_err(|e| format!("{display}: {e}"))
 }
 
 /// Read a file's raw bytes as a binary IPC `Response` (`InvokeResponseBody::Raw`)
@@ -245,6 +330,62 @@ pub fn read_file_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_does_not_follow_a_preexisting_temp_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let target = tmp.path().join("note.txt");
+        let outside = tmp.path().join("outside.txt");
+        std::fs::write(&target, b"old").unwrap();
+        std::fs::write(&outside, b"outside must survive").unwrap();
+
+        let sequence = AtomicU64::new(0);
+        let temp_name = format!(".note.txt.lyceum-tmp.{}.0", std::process::id());
+        symlink(&outside, tmp.path().join(temp_name)).unwrap();
+
+        write_atomic_with_sequence(&target, b"new", &sequence).expect("atomic write");
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            b"outside must survive",
+            "the temp-file create must never follow an existing symlink"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_file_refuses_to_replace_an_existing_unreadable_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let target = tmp.path().join("locked.txt");
+        std::fs::write(&target, b"secret").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = write_file_impl(&target, "replacement");
+
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(
+            result.is_err(),
+            "an unreadable existing file must not be replaced"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"secret");
+    }
+
+    #[test]
+    fn capped_reader_enforces_the_limit_during_the_read() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let path = tmp.path().join("growing.bin");
+        std::fs::write(&path, b"12345").unwrap();
+
+        let error = read_bytes_capped(&path, 4).expect_err("fifth byte must trip the cap");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::FileTooLarge);
+    }
 
     #[test]
     fn write_then_read_round_trips_content() {
@@ -400,6 +541,27 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
         assert_eq!(std::fs::read_to_string(&link).unwrap(), "new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_file_preserves_a_broken_final_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let missing_target = tmp.path().join("missing.txt");
+        let link = tmp.path().join("link.txt");
+        symlink(&missing_target, &link).unwrap();
+
+        let error = write_file_impl(&link, "new content")
+            .expect_err("saving must not replace a broken symlink entry");
+
+        assert!(error.contains("symlink"), "{error}");
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!missing_target.exists());
     }
 
     #[test]

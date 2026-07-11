@@ -1,7 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::mem;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use notify::event::{EventKind, MetadataKind, ModifyKind};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -9,6 +10,9 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::path_access::{self, PathAccessManager};
+use crate::workspace_paths::{
+    path_resolves_into_workspace_trash, path_resolves_through_workspace_name,
+};
 
 const WORKSPACE_FS_CHANGE_EVENT: &str = "workspace:fs-change";
 
@@ -16,7 +20,27 @@ const WORKSPACE_FS_CHANGE_EVENT: &str = "workspace:fs-change";
 /// and watching/unwatching in one window never disturbs another window's.
 #[derive(Default)]
 pub struct WorkspaceWatchManager {
-    active: Mutex<HashMap<String, ActiveWatcher>>,
+    state: Mutex<WorkspaceWatchState>,
+}
+
+#[derive(Default)]
+struct WorkspaceWatchState {
+    active: HashMap<String, ActiveWatcher>,
+    /// Watch setups run without the state lock because notify::watch can block.
+    /// The token lets unwatch/window teardown invalidate an in-flight setup so it
+    /// cannot install a watcher after its owner has already gone away.
+    pending: HashMap<String, PendingWatcher>,
+    /// Window labels in this app are monotonic and never reused. Remembering a
+    /// destroyed label prevents a watch command that was still canonicalizing
+    /// its root from claiming state after `remove_window` already ran.
+    removed_windows: HashSet<String>,
+    shutting_down: bool,
+}
+
+struct PendingWatcher {
+    root: PathBuf,
+    requested_root: String,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl WorkspaceWatchManager {
@@ -24,8 +48,14 @@ impl WorkspaceWatchManager {
     /// `RecommendedWatcher` stops its notify worker threads, mirroring the other
     /// managers' `shutdown_all()` so nothing emits during teardown.
     pub fn shutdown_all(&self) {
-        let removed = match self.active.lock() {
-            Ok(mut active) => mem::take(&mut *active),
+        let removed = match self.state.lock() {
+            Ok(mut state) => {
+                state.shutting_down = true;
+                for pending in state.pending.drain().map(|(_, pending)| pending) {
+                    pending.cancelled.store(true, Ordering::Release);
+                }
+                mem::take(&mut state.active)
+            }
             Err(_) => HashMap::new(),
         };
         drop(removed);
@@ -36,8 +66,14 @@ impl WorkspaceWatchManager {
     /// dropped after the guard is released, since dropping a
     /// `RecommendedWatcher` can block while its worker threads shut down.
     pub fn remove_window(&self, label: &str) {
-        let removed = match self.active.lock() {
-            Ok(mut active) => active.remove(label),
+        let removed = match self.state.lock() {
+            Ok(mut state) => {
+                state.removed_windows.insert(label.to_string());
+                if let Some(pending) = state.pending.remove(label) {
+                    pending.cancelled.store(true, Ordering::Release);
+                }
+                state.active.remove(label)
+            }
             Err(_) => None,
         };
         drop(removed);
@@ -75,24 +111,56 @@ pub fn watch_workspace(
 ) -> Result<(), String> {
     let root_path = canonical_dir(&root)?;
     let label = window.label().to_string();
-    path_access::authorize_workspace_root_impl(&app, &label, &access, root_path.clone())?;
     // Dedup check under the lock, then RELEASE it before building the watcher.
     // notify's recursive `watch()` is synchronous and can block for a noticeable
     // time (large trees, network/FUSE mounts, slow disks). Holding `active`
     // across it would stall every other holder of this lock — most importantly
     // `remove_window`, which runs on the main UI thread when ANY window is
     // destroyed — freezing the app until the slow setup finishes.
-    {
-        let active = state
-            .active
+    let pending_token = {
+        let mut watch_state = state
+            .state
             .lock()
             .map_err(|_| "workspace watcher lock poisoned".to_string())?;
-        if active
+        if watch_state
+            .active
             .get(&label)
             .is_some_and(|watcher| watcher.root == root_path)
         {
+            // A slower setup for another root may still be pending even though
+            // the requested root is already active. This newest request wins:
+            // invalidate the stale setup before returning success.
+            if let Some(previous) = watch_state.pending.remove(&label) {
+                previous.cancelled.store(true, Ordering::Release);
+            }
             return Ok(());
         }
+        let Some(token) =
+            claim_pending_watch(&mut watch_state, &label, root_path.clone(), root.clone())
+        else {
+            return Ok(());
+        };
+        token
+    };
+
+    if let Err(error) = path_access::authorize_workspace_root_for_watcher_impl(
+        &app,
+        &label,
+        &access,
+        root_path.clone(),
+    ) {
+        remove_pending_watch(&state, &label, &pending_token);
+        // A superseded same-root setup may already have authorized this root,
+        // then deferred its own revoke because this newer setup was pending.
+        // Authorization failed before this setup inserted anything, but it must
+        // still release that inherited grant when no active/newer setup needs
+        // it; otherwise a failed watch leaves stale IPC access behind.
+        revoke_watch_access_if_unused(&app, &access, &state, &label, &root_path);
+        return Err(error);
+    }
+    if !pending_watch_is_current(&state, &label, &pending_token) {
+        revoke_watch_access_if_unused(&app, &access, &state, &label, &root_path);
+        return Ok(());
     }
 
     let event_root = root.clone();
@@ -100,53 +168,79 @@ pub fn watch_workspace(
     let requested_root = PathBuf::from(&root);
     let app_for_events = app.clone();
     let label_for_events = label.clone();
-    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        let Ok(event) = event else { return };
-        let Some(event_paths) = workspace_event_paths(&watched_root, &requested_root, &event)
-        else {
-            return;
-        };
-        let payload = WorkspaceFsEvent {
-            root: event_root.clone(),
-            paths: event_paths.paths,
-            kind: format!("{:?}", event.kind),
-            git_changed: event_paths.git_changed,
-        };
-        let _ = app_for_events.emit_to(
-            label_for_events.as_str(),
-            WORKSPACE_FS_CHANGE_EVENT,
-            payload,
-        );
-    })
-    .map_err(|e| format!("watcher setup failed: {e}"))?;
+    let watcher_result =
+        notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            let Ok(event) = event else { return };
+            let Some(event_paths) = workspace_event_paths(&watched_root, &requested_root, &event)
+            else {
+                return;
+            };
+            let payload = WorkspaceFsEvent {
+                root: event_root.clone(),
+                paths: event_paths.paths,
+                kind: format!("{:?}", event.kind),
+                git_changed: event_paths.git_changed,
+            };
+            let _ = app_for_events.emit_to(
+                label_for_events.as_str(),
+                WORKSPACE_FS_CHANGE_EVENT,
+                payload,
+            );
+        });
+    let mut watcher = match watcher_result {
+        Ok(watcher) => watcher,
+        Err(error) => {
+            remove_pending_watch(&state, &label, &pending_token);
+            revoke_watch_access_if_unused(&app, &access, &state, &label, &root_path);
+            return Err(format!("watcher setup failed: {error}"));
+        }
+    };
 
     // Slow, blocking setup happens with NO lock held.
-    watcher
-        .watch(&root_path, RecursiveMode::Recursive)
-        .map_err(|e| format!("{}: {e}", root_path.display()))?;
+    if let Err(error) = watcher.watch(&root_path, RecursiveMode::Recursive) {
+        remove_pending_watch(&state, &label, &pending_token);
+        revoke_watch_access_if_unused(&app, &access, &state, &label, &root_path);
+        return Err(format!("{}: {error}", root_path.display()));
+    }
     let next = ActiveWatcher {
-        root: root_path,
-        requested_root: root,
+        root: root_path.clone(),
+        requested_root: root.clone(),
         _watcher: watcher,
     };
     // Re-acquire only to install the finished watcher, re-checking the dedup in
     // case a concurrent call already installed an identical one for this label.
-    let mut active = state
-        .active
+    let mut watch_state = state
+        .state
         .lock()
         .map_err(|_| "workspace watcher lock poisoned".to_string())?;
-    if active
-        .get(&label)
-        .is_some_and(|watcher| watcher.root == next.root)
-    {
-        // Another call won the race with an identical watcher; drop ours (its
-        // Drop stops the just-started notify threads) outside the lock.
-        drop(active);
+    let still_current = watch_state.pending.get(&label).is_some_and(|pending| {
+        Arc::ptr_eq(&pending.cancelled, &pending_token)
+            && !pending.cancelled.load(Ordering::Acquire)
+    });
+    if !still_current {
+        // An unwatch/window-destroy/newer-watch invalidated this slow setup. Drop
+        // the just-started notify threads and undo only this stale authorization.
+        drop(watch_state);
         drop(next);
+        revoke_watch_access_if_unused(&app, &access, &state, &label, &root_path);
         return Ok(());
     }
-    let removed = active.insert(label, next);
-    drop(active);
+    watch_state.pending.remove(&label);
+    let removed = watch_state.active.insert(label, next);
+    if let Some(previous) = removed.as_ref() {
+        if previous.root != root_path {
+            // The new watcher supersedes a different workspace. Release every
+            // grant for the old canonical root while claims are serialized by
+            // `state`; grants for the newly active root remain untouched.
+            let _ = path_access::revoke_workspace_root_canonical_impl(
+                &app,
+                window.label(),
+                &access,
+                Some(&previous.root),
+            );
+        }
+    }
+    drop(watch_state);
     drop(removed);
     Ok(())
 }
@@ -161,11 +255,11 @@ pub fn unwatch_workspace(
 ) -> Result<(), String> {
     let label = window.label();
     let removed = {
-        let mut active = state
-            .active
+        let mut watch_state = state
+            .state
             .lock()
             .map_err(|_| "workspace watcher lock poisoned".to_string())?;
-        let should_clear = match (active.get(label), root.as_deref()) {
+        let should_clear = match (watch_state.active.get(label), root.as_deref()) {
             (None, _) => false,
             (Some(_), None) => true,
             (Some(watcher), Some(root)) => {
@@ -176,15 +270,170 @@ pub fn unwatch_workspace(
                         .is_some_and(|path| path == watcher.root)
             }
         };
+        let should_cancel_pending = match (watch_state.pending.get(label), root.as_deref()) {
+            (None, _) => false,
+            (Some(_), None) => true,
+            (Some(pending), Some(root)) => {
+                pending.requested_root == root
+                    || Path::new(root)
+                        .canonicalize()
+                        .ok()
+                        .is_some_and(|path| path == pending.root)
+            }
+        };
+        let mut canonical_roots = HashSet::new();
         if should_clear {
-            active.remove(label)
+            if let Some(active) = watch_state.active.get(label) {
+                canonical_roots.insert(active.root.clone());
+            }
+        }
+        if should_cancel_pending {
+            if let Some(pending) = watch_state.pending.get(label) {
+                canonical_roots.insert(pending.root.clone());
+            }
+        }
+        // With no matching state, a still-existing requested path can identify
+        // a leftover grant. If its symlink disappeared, matching state above
+        // supplies the stored canonical identity instead.
+        if canonical_roots.is_empty() {
+            if let Some(canonical) = root
+                .as_deref()
+                .and_then(|requested| Path::new(requested).canonicalize().ok())
+            {
+                canonical_roots.insert(canonical);
+            }
+        }
+        if should_cancel_pending {
+            if let Some(pending) = watch_state.pending.remove(label) {
+                pending.cancelled.store(true, Ordering::Release);
+            }
+        }
+        let removed = if should_clear {
+            watch_state.active.remove(label)
         } else {
             None
+        };
+        // Keep the watcher-state guard through revocation. A same-root setup
+        // cannot claim between state removal and grant removal. A completed
+        // workspace unwatch owns both direct-command and watcher grants.
+        if root.is_none() {
+            path_access::revoke_workspace_root_canonical_impl(&app, label, &access, None)?;
+        } else {
+            for canonical_root in &canonical_roots {
+                path_access::revoke_workspace_root_canonical_impl(
+                    &app,
+                    label,
+                    &access,
+                    Some(canonical_root),
+                )?;
+            }
         }
+        removed
     };
     drop(removed);
-    path_access::revoke_workspace_root_impl(&app, label, &access, root.as_deref())?;
     Ok(())
+}
+
+fn pending_watch_is_current(
+    manager: &WorkspaceWatchManager,
+    label: &str,
+    token: &Arc<AtomicBool>,
+) -> bool {
+    manager.state.lock().ok().is_some_and(|state| {
+        state.pending.get(label).is_some_and(|pending| {
+            Arc::ptr_eq(&pending.cancelled, token) && !pending.cancelled.load(Ordering::Acquire)
+        })
+    })
+}
+
+fn claim_pending_watch(
+    state: &mut WorkspaceWatchState,
+    label: &str,
+    root: PathBuf,
+    requested_root: String,
+) -> Option<Arc<AtomicBool>> {
+    if state.shutting_down || state.removed_windows.contains(label) {
+        return None;
+    }
+    let token = Arc::new(AtomicBool::new(false));
+    if let Some(previous) = state.pending.insert(
+        label.to_string(),
+        PendingWatcher {
+            root,
+            requested_root,
+            cancelled: token.clone(),
+        },
+    ) {
+        previous.cancelled.store(true, Ordering::Release);
+    }
+    Some(token)
+}
+
+fn remove_pending_watch(manager: &WorkspaceWatchManager, label: &str, token: &Arc<AtomicBool>) {
+    let Ok(mut state) = manager.state.lock() else {
+        token.store(true, Ordering::Release);
+        return;
+    };
+    if state
+        .pending
+        .get(label)
+        .is_some_and(|pending| Arc::ptr_eq(&pending.cancelled, token))
+    {
+        if let Some(pending) = state.pending.remove(label) {
+            pending.cancelled.store(true, Ordering::Release);
+        }
+    }
+}
+
+fn revoke_watch_access_if_unused(
+    app: &AppHandle,
+    access: &State<'_, PathAccessManager>,
+    manager: &WorkspaceWatchManager,
+    label: &str,
+    canonical_root: &Path,
+) {
+    // A newer concurrent setup may target the same root. Remove this watcher-
+    // owned grant only when no active or pending watcher still needs it; direct
+    // editor/LSP grants for the same root are intentionally preserved.
+    with_unused_watch_access(manager, label, canonical_root, || {
+        // Do not release `state` before revoking: a new same-root setup must not
+        // claim/authorize in the check-to-revoke gap and lose its fresh grant.
+        let _ = path_access::revoke_workspace_root_for_watcher_impl(
+            app,
+            label,
+            access,
+            Some(canonical_root),
+        );
+    });
+}
+
+fn with_unused_watch_access(
+    manager: &WorkspaceWatchManager,
+    label: &str,
+    canonical_root: &Path,
+    revoke: impl FnOnce(),
+) {
+    let Ok(state) = manager.state.lock() else {
+        return;
+    };
+    if !watch_access_is_needed_in_state(&state, label, canonical_root) {
+        revoke();
+    }
+}
+
+fn watch_access_is_needed_in_state(
+    state: &WorkspaceWatchState,
+    label: &str,
+    canonical_root: &Path,
+) -> bool {
+    state
+        .active
+        .get(label)
+        .is_some_and(|watcher| watcher.root == canonical_root)
+        || state
+            .pending
+            .get(label)
+            .is_some_and(|watcher| watcher.root == canonical_root)
 }
 
 fn canonical_dir(path: &str) -> Result<PathBuf, String> {
@@ -259,6 +508,14 @@ fn workspace_event_paths(
             Some(InternalWorkspacePath::Git) => {
                 git_changed = true;
             }
+            Some(InternalWorkspacePath::AmbiguousGit) => {
+                git_changed = true;
+                paths.push(event_path_for_requested_root(
+                    canonical_root,
+                    requested_root,
+                    path,
+                ));
+            }
             Some(InternalWorkspacePath::Trash) => {}
             None => paths.push(event_path_for_requested_root(
                 canonical_root,
@@ -285,6 +542,7 @@ fn ignores_workspace_event_kind(kind: &EventKind) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InternalWorkspacePath {
     Git,
+    AmbiguousGit,
     Trash,
 }
 
@@ -303,36 +561,75 @@ fn internal_workspace_path_kind(
         || matches!(requested_kind, Some(InternalWorkspacePath::Git))
     {
         Some(InternalWorkspacePath::Git)
+    } else if matches!(canonical_kind, Some(InternalWorkspacePath::AmbiguousGit))
+        || matches!(requested_kind, Some(InternalWorkspacePath::AmbiguousGit))
+    {
+        Some(InternalWorkspacePath::AmbiguousGit)
     } else {
         None
     }
 }
 
 fn internal_path_kind_under_root(root: &Path, path: &Path) -> Option<InternalWorkspacePath> {
-    let Ok(relative) = path.strip_prefix(root) else {
+    if path.strip_prefix(root).is_err() {
         return None;
-    };
-    for component in relative.components() {
-        if let Component::Normal(name) = component {
-            if name == ".lyceum-trash" {
-                return Some(InternalWorkspacePath::Trash);
-            }
-            if name == ".git" {
-                return Some(InternalWorkspacePath::Git);
-            }
-        }
+    }
+    // Only the root trash identity is internal; an ordinary nested directory
+    // with the same name remains visible. Aliases resolving into the root trash
+    // are internal at any lexical depth.
+    if path_resolves_into_workspace_trash(root, path) {
+        return Some(InternalWorkspacePath::Trash);
+    }
+    if path_resolves_through_workspace_name(root, path, ".git") {
+        return Some(InternalWorkspacePath::Git);
+    }
+    // Once a case-aliased `.git` directory has been removed, neither spelling
+    // has an identity to compare. Keep the path visible (it may be a legitimate
+    // `.GIT` on a case-sensitive filesystem) but conservatively refresh Git
+    // decorations too.
+    if path_contains_absent_ascii_case_alias(root, path, ".git") {
+        return Some(InternalWorkspacePath::AmbiguousGit);
     }
     None
 }
 
+fn path_contains_absent_ascii_case_alias(root: &Path, path: &Path, name: &str) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return false;
+    };
+    let mut parent = root.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(component) = component else {
+            continue;
+        };
+        let entry = parent.join(component);
+        if component
+            .to_str()
+            .is_some_and(|component| component != name && component.eq_ignore_ascii_case(name))
+            && std::fs::symlink_metadata(&entry)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
+            return true;
+        }
+        parent = entry;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{event_path_for_requested_root, workspace_event_paths, WorkspaceEventPaths};
+    use super::{
+        claim_pending_watch, event_path_for_requested_root, pending_watch_is_current,
+        remove_pending_watch, watch_access_is_needed_in_state, with_unused_watch_access,
+        workspace_event_paths, PendingWatcher, WorkspaceEventPaths, WorkspaceWatchManager,
+    };
     use notify::event::{
         AccessKind, AccessMode, CreateKind, DataChange, EventKind, MetadataKind, ModifyKind,
     };
     use notify::Event;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     fn visible(paths: &[&str]) -> Option<WorkspaceEventPaths> {
         Some(WorkspaceEventPaths {
@@ -353,6 +650,124 @@ mod tests {
             paths: paths.iter().map(|path| (*path).to_string()).collect(),
             git_changed: true,
         })
+    }
+
+    #[test]
+    fn removing_a_window_invalidates_its_in_flight_watch_setup() {
+        let manager = WorkspaceWatchManager::default();
+        let token = Arc::new(AtomicBool::new(false));
+        manager.state.lock().unwrap().pending.insert(
+            "main1".to_string(),
+            PendingWatcher {
+                root: PathBuf::from("/workspace"),
+                requested_root: "/workspace".to_string(),
+                cancelled: token.clone(),
+            },
+        );
+        assert!(pending_watch_is_current(&manager, "main1", &token));
+
+        manager.remove_window("main1");
+
+        assert!(token.load(Ordering::Acquire));
+        assert!(!pending_watch_is_current(&manager, "main1", &token));
+        let mut state = manager.state.lock().unwrap();
+        assert!(
+            claim_pending_watch(
+                &mut state,
+                "main1",
+                PathBuf::from("/workspace"),
+                "/workspace".to_string(),
+            )
+            .is_none(),
+            "a command delayed before its claim must not resurrect a destroyed label"
+        );
+    }
+
+    #[test]
+    fn newer_overlapping_watch_keeps_a_distinct_token_and_cancels_the_old_one() {
+        let manager = WorkspaceWatchManager::default();
+        let mut state = manager.state.lock().unwrap();
+        let first = claim_pending_watch(
+            &mut state,
+            "main1",
+            PathBuf::from("/workspace-a"),
+            "/workspace-a".to_string(),
+        )
+        .unwrap();
+        let second = claim_pending_watch(
+            &mut state,
+            "main1",
+            PathBuf::from("/workspace-b"),
+            "/workspace-b".to_string(),
+        )
+        .unwrap();
+        drop(state);
+
+        assert!(first.load(Ordering::Acquire));
+        assert!(!second.load(Ordering::Acquire));
+        assert!(!pending_watch_is_current(&manager, "main1", &first));
+        assert!(pending_watch_is_current(&manager, "main1", &second));
+    }
+
+    #[test]
+    fn failed_newer_same_root_setup_releases_inherited_authorization() {
+        let manager = WorkspaceWatchManager::default();
+        let root = PathBuf::from("/workspace");
+        let first = {
+            let mut state = manager.state.lock().unwrap();
+            claim_pending_watch(&mut state, "main1", root.clone(), "/workspace".to_string())
+                .unwrap()
+        };
+        let second = {
+            let mut state = manager.state.lock().unwrap();
+            claim_pending_watch(&mut state, "main1", root.clone(), "/workspace".to_string())
+                .unwrap()
+        };
+        assert!(first.load(Ordering::Acquire));
+        assert!(watch_access_is_needed_in_state(
+            &manager.state.lock().unwrap(),
+            "main1",
+            &root
+        ));
+
+        // Model the newer setup's authorization failure: its pending token is
+        // removed, and the superseded first setup is no longer registered.
+        // The failure branch must therefore revoke the inherited grant.
+        remove_pending_watch(&manager, "main1", &second);
+
+        let revoked = std::cell::Cell::new(false);
+        with_unused_watch_access(&manager, "main1", &root, || {
+            assert!(matches!(
+                manager.state.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
+            revoked.set(true);
+        });
+        assert!(revoked.get());
+    }
+
+    #[test]
+    fn same_root_claim_cannot_interleave_between_unused_check_and_revoke() {
+        let manager = WorkspaceWatchManager::default();
+        let root = PathBuf::from("/workspace");
+        let revoke_ran = std::cell::Cell::new(false);
+
+        with_unused_watch_access(&manager, "main1", &root, || {
+            // The callback is the PathAccess revoke in production. Prove the
+            // watcher-state lock remains held through it, so another setup's
+            // claim cannot appear in the check-to-revoke gap.
+            assert!(matches!(
+                manager.state.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
+            revoke_ran.set(true);
+        });
+
+        assert!(revoke_ran.get());
+        let mut state = manager.state.lock().unwrap();
+        assert!(
+            claim_pending_watch(&mut state, "main1", root, "/workspace".to_string(),).is_some()
+        );
     }
 
     #[test]
@@ -468,6 +883,129 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn nested_trash_named_directory_events_remain_visible() {
+        let event = Event::new(EventKind::Create(CreateKind::File))
+            .add_path(PathBuf::from("/real/project/docs/.lyceum-trash/file.tex"));
+
+        assert_eq!(
+            workspace_event_paths(
+                Path::new("/real/project"),
+                Path::new("/link/project"),
+                &event
+            ),
+            visible(&["/link/project/docs/.lyceum-trash/file.tex"])
+        );
+    }
+
+    #[test]
+    fn case_aliased_root_trash_events_are_internal_when_the_filesystem_aliases_it() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let upper = root.join(".LYCEUM-TRASH");
+        std::fs::create_dir(&upper).unwrap();
+        if !root.join(".lyceum-trash").exists() {
+            return;
+        }
+        let event = Event::new(EventKind::Create(CreateKind::File))
+            .add_path(upper.join("batch").join("file.tex"));
+
+        assert_eq!(workspace_event_paths(root, root, &event), None);
+    }
+
+    #[test]
+    fn case_aliased_nested_git_events_follow_filesystem_identity() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let nested = root.join("nested");
+        let upper_git = nested.join(".GIT");
+        std::fs::create_dir_all(&upper_git).unwrap();
+        let event_path = upper_git.join("index.lock");
+        let visible_path = event_path.to_string_lossy().into_owned();
+        let event = Event::new(EventKind::Create(CreateKind::File)).add_path(event_path);
+
+        let result = workspace_event_paths(root, root, &event);
+        if nested.join(".git").exists() {
+            assert_eq!(result, git_only());
+        } else {
+            assert_eq!(result, visible(&[&visible_path]));
+        }
+    }
+
+    #[test]
+    fn absent_case_ambiguous_git_event_remains_visible_and_refreshes_git() {
+        let event_path = PathBuf::from("/real/project/.GIT");
+        let event =
+            Event::new(EventKind::Remove(notify::event::RemoveKind::Folder)).add_path(event_path);
+
+        assert_eq!(
+            workspace_event_paths(
+                Path::new("/real/project"),
+                Path::new("/link/project"),
+                &event,
+            ),
+            visible_with_git(&["/link/project/.GIT"])
+        );
+    }
+
+    #[test]
+    fn removed_case_aliased_git_directory_remains_visible_and_refreshes_git() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let upper_git = root.join(".GIT");
+        std::fs::create_dir(&upper_git).unwrap();
+        if !root.join(".git").exists() {
+            return;
+        }
+        std::fs::remove_dir(&upper_git).unwrap();
+        let visible_path = upper_git.to_string_lossy().into_owned();
+        let event =
+            Event::new(EventKind::Remove(notify::event::RemoveKind::Folder)).add_path(upper_git);
+
+        assert_eq!(
+            workspace_event_paths(root, root, &event),
+            visible_with_git(&[&visible_path])
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn aliases_into_root_workspace_trash_do_not_refresh_workspace() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let trash = root.join(".lyceum-trash");
+        let docs = root.join("docs");
+        std::fs::create_dir(&trash).unwrap();
+        std::fs::write(trash.join("deleted.txt"), b"deleted").unwrap();
+        std::fs::create_dir(&docs).unwrap();
+        symlink(".lyceum-trash", root.join("trash-link")).unwrap();
+        symlink("../.lyceum-trash/deleted.txt", docs.join("deleted-link")).unwrap();
+
+        let event = Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Content)))
+            .add_path(root.join("trash-link").join("deleted.txt"))
+            .add_path(docs.join("deleted-link"));
+
+        assert_eq!(workspace_event_paths(root, root, &event), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removed_event_through_git_directory_alias_still_refreshes_git() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        std::fs::create_dir(root.join("docs")).unwrap();
+        symlink("../.git", root.join("docs").join("git-link")).unwrap();
+        let event = Event::new(EventKind::Remove(notify::event::RemoveKind::File))
+            .add_path(root.join("docs").join("git-link").join("removed.lock"));
+
+        assert_eq!(workspace_event_paths(root, root, &event), git_only());
     }
 
     #[test]

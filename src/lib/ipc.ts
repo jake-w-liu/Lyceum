@@ -6,6 +6,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import packageMetadata from "../../package.json";
 import { useWorkspaceStore } from "../state/workspaceStore";
 
 export interface AppInfo {
@@ -37,6 +38,12 @@ export interface MovedPath {
   from: string;
   to: string;
   isDir: boolean;
+  /** True when this transfer replaced a pre-existing destination entry. */
+  replaced?: boolean;
+  /** Existing destination path with its original on-disk casing. */
+  replacedPath?: string | null;
+  /** Non-fatal cleanup problem after a committed replacement. */
+  cleanupWarning?: string | null;
 }
 
 export interface WorkspaceFsEvent {
@@ -53,7 +60,7 @@ export interface WorkspaceFsEvent {
 
 const FALLBACK_APP_INFO: AppInfo = {
   name: "lyceum",
-  version: "0.2.0",
+  version: packageMetadata.version,
   os: "web",
   arch: "unknown",
 };
@@ -115,8 +122,10 @@ export async function cancelQuit(): Promise<void> {
 
 /** List the immediate children of a directory (file explorer, M2). */
 export async function readDirectory(path: string): Promise<DirEntry[]> {
-  await ensureCurrentWorkspaceAccess(path);
-  return invoke<DirEntry[]>("read_directory", { path });
+  const root = useWorkspaceStore.getState().rootPath;
+  if (!root) return [];
+  await authorizeWorkspaceRoot(root);
+  return invoke<DirEntry[]>("read_directory", { root, path });
 }
 
 /** Start recursively watching the current workspace for filesystem changes. */
@@ -164,22 +173,25 @@ export async function runCancel(id: string): Promise<void> {
 }
 
 /** Create a new empty file (errors if it already exists). */
-export async function createFile(path: string): Promise<void> {
-  await ensureCurrentWorkspaceAccess(path);
-  await invoke("create_file", { path });
+export async function createFile(root: string, path: string): Promise<void> {
+  await authorizeWorkspaceRoot(root);
+  await invoke("create_file", { root, path });
 }
 
 /** Create a directory (and any missing parents). */
-export async function createDirectory(path: string): Promise<void> {
-  await ensureCurrentWorkspaceAccess(path);
-  await invoke("create_directory", { path });
+export async function createDirectory(root: string, path: string): Promise<void> {
+  await authorizeWorkspaceRoot(root);
+  await invoke("create_directory", { root, path });
 }
 
 /** Rename/move a path (errors if the destination exists). */
-export async function renamePath(from: string, to: string): Promise<void> {
-  await ensureCurrentWorkspaceAccess(from);
-  await ensureCurrentWorkspaceAccess(to);
-  await invoke("rename_path", { from, to });
+export async function renamePath(
+  root: string,
+  from: string,
+  to: string,
+): Promise<void> {
+  await authorizeWorkspaceRoot(root);
+  await invoke("rename_path", { root, from, to });
 }
 
 /** Move files/directories into an existing workspace directory. */
@@ -187,9 +199,18 @@ export async function movePaths(
   root: string,
   paths: string[],
   destinationDir: string,
+  replaceExisting = false,
+  expectedConflictPaths: string[] = [],
 ): Promise<MovedPath[]> {
   await authorizeWorkspaceRoot(root);
-  return invoke<MovedPath[]>("move_paths", { root, paths, destinationDir });
+  return invoke<MovedPath[]>("move_paths", {
+    root,
+    paths,
+    destinationDir,
+    ...(replaceExisting
+      ? { replaceExisting: true, expectedConflictPaths }
+      : {}),
+  });
 }
 
 /** Copy external (or workspace) files/directories into a workspace directory. */
@@ -197,9 +218,18 @@ export async function copyPaths(
   root: string,
   paths: string[],
   destinationDir: string,
+  replaceExisting = false,
+  expectedConflictPaths: string[] = [],
 ): Promise<MovedPath[]> {
   await authorizeWorkspaceRoot(root);
-  return invoke<MovedPath[]>("copy_paths", { root, paths, destinationDir });
+  return invoke<MovedPath[]>("copy_paths", {
+    root,
+    paths,
+    destinationDir,
+    ...(replaceExisting
+      ? { replaceExisting: true, expectedConflictPaths }
+      : {}),
+  });
 }
 
 /** Move files/directories into Lyceum's workspace-local trash for undoable delete. */

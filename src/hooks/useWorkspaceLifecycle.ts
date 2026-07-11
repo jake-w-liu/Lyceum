@@ -90,27 +90,49 @@ export function useWorkspaceLifecycle(): void {
     let unlisten: (() => void) | undefined;
     let disposed = false;
     let closing = false;
+    let closeRequestPending = false;
+    // If clearing the backend's app-wide Quit latch fails, no later close may
+    // destroy this window until a retry succeeds. Otherwise the Destroyed event
+    // can still observe QUIT_REQUESTED=true and force-exit the remaining windows.
+    let quitCancellationRequired = false;
     void (async () => {
       try {
         const currentWindow = getCurrentWindow();
         const off = await currentWindow.onCloseRequested((event) => {
-          if (closing) return;
+          // Every native close request must be cancelled until the explicit
+          // destroy below. A second request can arrive while the discard dialog
+          // or persistence flush is still pending; letting that request through
+          // would bypass both safeguards.
           event.preventDefault();
+          if (closing || closeRequestPending) return;
+          closeRequestPending = true;
           void (async () => {
-            if (hasDirtyWorkspaceDocs()) {
-              const ok = await askDiscard(
-                "Discard unsaved changes and close the window?",
-              );
-              if (!ok) {
-                // Declined: abort any in-progress Quit so its QUIT_REQUESTED latch
-                // can't force-exit the app on a later, unrelated last-window close.
-                void cancelQuit();
-                return;
-              }
-              if (disposed) return;
-            }
-            closing = true;
             try {
+              // A previous decline may have failed to reach the backend. Clear
+              // that stale app-wide latch before processing this newer close.
+              if (quitCancellationRequired) {
+                await cancelQuit();
+                quitCancellationRequired = false;
+                if (disposed) return;
+              }
+              if (hasDirtyWorkspaceDocs()) {
+                const ok = await askDiscard(
+                  "Discard unsaved changes and close the window?",
+                );
+                if (!ok) {
+                  // Declined: abort any in-progress Quit so its QUIT_REQUESTED latch
+                  // can't force-exit the app on a later, unrelated last-window close.
+                  // Keep this close gate held until the backend acknowledges the
+                  // cancellation. On failure the flag remains set, so a later
+                  // close retries cancellation before it can prompt or destroy.
+                  quitCancellationRequired = true;
+                  await cancelQuit();
+                  quitCancellationRequired = false;
+                  return;
+                }
+                if (disposed) return;
+              }
+              closing = true;
               await flushSettingsPersistence();
               if (disposed) {
                 closing = false;
@@ -119,6 +141,8 @@ export function useWorkspaceLifecycle(): void {
               await currentWindow.destroy();
             } catch {
               closing = false;
+            } finally {
+              closeRequestPending = false;
             }
           })();
         });

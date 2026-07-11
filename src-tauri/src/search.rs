@@ -6,21 +6,18 @@
 
 use serde::Serialize;
 use std::collections::HashSet;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use tauri::{AppHandle, State};
 
 use crate::path_access::{self, PathAccessManager};
+use crate::workspace_paths::{
+    path_resolves_into_workspace_trash, path_resolves_through_workspace_names,
+};
 
 /// Directory names that are skipped entirely (not descended into).
-const SKIP_DIRS: [&str; 6] = [
-    ".git",
-    "node_modules",
-    "target",
-    "dist",
-    ".vite",
-    ".lyceum-trash",
-];
+const SKIP_DIRS: [&str; 4] = ["node_modules", "target", "dist", ".vite"];
 
 /// Files larger than this are skipped, so a single huge file (a multi-GB log or
 /// dataset that happens to be valid UTF-8) cannot be slurped wholesale into a
@@ -168,6 +165,11 @@ pub fn search_in_dir(root: &Path, query: &str, max: usize) -> Result<Vec<SearchM
                 continue;
             };
             let path = entry.path();
+            if path_resolves_into_workspace_trash(root, &path)
+                || path_resolves_through_workspace_names(root, &path, &[".git"], &SKIP_DIRS)
+            {
+                continue;
+            }
             // Resolve the REAL kind: file_type() reports a symlink as a symlink
             // (is_dir() == false), so a symlinked directory would otherwise fall
             // into the file branch and its subtree would be silently skipped.
@@ -180,10 +182,6 @@ pub fn search_in_dir(root: &Path, query: &str, max: usize) -> Result<Vec<SearchM
                 file_type.is_dir()
             };
             if is_dir {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if SKIP_DIRS.contains(&name.as_str()) {
-                    continue;
-                }
                 // Canonicalize before descending so a tree reachable via a
                 // symlink (or two paths) is searched at most once.
                 match path.canonicalize() {
@@ -231,8 +229,22 @@ pub fn search_in_dir(root: &Path, query: &str, max: usize) -> Result<Vec<SearchM
             if meta.len() > MAX_FILE_SIZE {
                 continue;
             }
-            let contents = match std::fs::read_to_string(&canonical_file) {
-                Ok(c) => c,
+            // Re-enforce the cap while reading. The file can grow after metadata()
+            // above; read_to_string alone would then allocate until EOF and defeat
+            // the explicit 16 MiB resource bound.
+            let mut contents = String::new();
+            let contents = match std::fs::File::open(&canonical_file).and_then(|file| {
+                file.take(MAX_FILE_SIZE.saturating_add(1))
+                    .read_to_string(&mut contents)?;
+                if contents.len() as u64 > MAX_FILE_SIZE {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::FileTooLarge,
+                        "file grew beyond workspace-search size limit",
+                    ));
+                }
+                Ok(contents)
+            }) {
+                Ok(contents) => contents,
                 Err(_) => continue,
             };
             let path_str = path.to_string_lossy().to_string();
@@ -350,6 +362,18 @@ mod tests {
     }
 
     #[test]
+    fn regular_file_named_like_a_heavy_directory_remains_searchable() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        fs::write(root.join("target"), b"ordinary searchable file").unwrap();
+
+        let matches = search_in_dir(root, "searchable", 100).expect("search");
+
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].path.ends_with("target"));
+    }
+
+    #[test]
     fn excludes_lyceum_trash() {
         let tmp = tempfile::tempdir().expect("create temp dir");
         let root = tmp.path();
@@ -366,6 +390,174 @@ mod tests {
         assert_eq!(matches.len(), 1);
         assert!(matches[0].path.ends_with("keep.txt"));
         assert!(!matches.iter().any(|m| m.path.contains(".lyceum-trash")));
+    }
+
+    #[test]
+    fn searches_nested_trash_named_directories() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let nested = root.join("docs").join(".lyceum-trash");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("visible.txt"), b"find nested content").unwrap();
+
+        let matches = search_in_dir(root, "nested content", 100).expect("search");
+
+        assert_eq!(matches.len(), 1);
+        assert!(Path::new(&matches[0].path)
+            .ends_with(Path::new("docs").join(".lyceum-trash").join("visible.txt")));
+    }
+
+    #[test]
+    fn excludes_a_case_aliased_root_trash_entry_when_the_filesystem_aliases_it() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let upper = root.join(".LYCEUM-TRASH");
+        fs::create_dir(&upper).unwrap();
+        fs::write(upper.join("internal.txt"), b"secret needle").unwrap();
+        if !root.join(".lyceum-trash").exists() {
+            return;
+        }
+
+        let matches = search_in_dir(root, "secret needle", 100).expect("search");
+
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn excludes_the_reserved_root_trash_name_even_when_it_is_a_file() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        fs::write(root.join(".lyceum-trash"), b"secret needle").unwrap();
+
+        let matches = search_in_dir(root, "secret needle", 100).expect("search");
+
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn excludes_gitdir_pointer_files_before_kind_dispatch() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        fs::write(root.join(".git"), b"secret needle").unwrap();
+
+        assert!(search_in_dir(root, "secret needle", 100)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn case_aliased_git_and_heavy_directories_follow_filesystem_identity() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let upper_git = root.join(".GIT");
+        let upper_modules = root.join("NODE_MODULES");
+        fs::create_dir(&upper_git).unwrap();
+        fs::create_dir(&upper_modules).unwrap();
+        fs::write(upper_git.join("metadata.txt"), b"secret needle").unwrap();
+        fs::write(upper_modules.join("dependency.txt"), b"secret needle").unwrap();
+        let aliases = root.join(".git").exists();
+
+        let matches = search_in_dir(root, "secret needle", 100).unwrap();
+
+        if aliases {
+            assert!(matches.is_empty());
+        } else {
+            assert_eq!(matches.len(), 2);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_alias_to_git_metadata_is_not_searched() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join(".git").join("secret"), b"secret needle").unwrap();
+        symlink(".git", root.join("git-link")).unwrap();
+        fs::create_dir(root.join("node_modules")).unwrap();
+        fs::write(
+            root.join("node_modules").join("dependency.txt"),
+            b"secret needle",
+        )
+        .unwrap();
+        symlink("node_modules", root.join("deps-link")).unwrap();
+        fs::create_dir(root.join("nested")).unwrap();
+        fs::create_dir(root.join("nested").join(".git")).unwrap();
+        fs::write(
+            root.join("nested").join(".git").join("cross-parent-secret"),
+            b"secret needle",
+        )
+        .unwrap();
+        symlink("nested/.git", root.join("nested-git-link")).unwrap();
+        fs::create_dir(root.join("nested").join("node_modules")).unwrap();
+        fs::write(
+            root.join("nested")
+                .join("node_modules")
+                .join("cross-parent-dependency.txt"),
+            b"secret needle",
+        )
+        .unwrap();
+        symlink("nested/node_modules", root.join("nested-deps-link")).unwrap();
+
+        assert!(search_in_dir(root, "secret needle", 100)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_symlinks_into_git_and_heavy_directories_are_not_searched() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join(".git").join("config"), b"secret needle").unwrap();
+        fs::create_dir(root.join("node_modules")).unwrap();
+        fs::write(
+            root.join("node_modules").join("dependency.js"),
+            b"secret needle",
+        )
+        .unwrap();
+        fs::create_dir(root.join("docs")).unwrap();
+        symlink("../.git/config", root.join("docs").join("config-link")).unwrap();
+        symlink(
+            "../node_modules/dependency.js",
+            root.join("docs").join("dependency-link"),
+        )
+        .unwrap();
+
+        assert!(search_in_dir(root, "secret needle", 100)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn aliases_into_root_workspace_trash_are_not_searched() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        fs::create_dir(root.join(".lyceum-trash")).unwrap();
+        fs::write(
+            root.join(".lyceum-trash").join("deleted.txt"),
+            b"secret needle",
+        )
+        .unwrap();
+        symlink(".lyceum-trash", root.join("trash-link")).unwrap();
+        fs::create_dir(root.join("docs")).unwrap();
+        symlink(
+            "../.lyceum-trash/deleted.txt",
+            root.join("docs").join("deleted-link"),
+        )
+        .unwrap();
+
+        assert!(search_in_dir(root, "secret needle", 100)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

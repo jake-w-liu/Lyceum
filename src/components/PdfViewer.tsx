@@ -44,6 +44,7 @@ import {
   type PdfMatch,
   type PdfPageIndex,
 } from "../lib/pdfSearch";
+import { registerPdfTextSelection } from "../lib/pdfTextSelection";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -421,6 +422,7 @@ function PdfPage({
     let cancelled = false;
     let task: RenderTask | null = null;
     let textLayer: TextLayerRender | null = null;
+    let unregisterTextSelection: (() => void) | null = null;
     setRenderError(null);
     setTextReady(false);
     (async () => {
@@ -488,9 +490,16 @@ function PdfPage({
           viewport: annotationViewport,
           structTreeLayer: null,
         });
+        const renderTextLayer = async (): Promise<void> => {
+          await textLayer!.render();
+          if (!cancelled) {
+            unregisterTextSelection =
+              registerPdfTextSelection(textLayerElement);
+          }
+        };
         await Promise.all([
           task.promise,
-          textLayer.render(),
+          renderTextLayer(),
           annotationLayer.render({
             annotations,
             viewport: annotationViewport,
@@ -511,6 +520,7 @@ function PdfPage({
     })();
     return () => {
       cancelled = true;
+      unregisterTextSelection?.();
       task?.cancel();
       textLayer?.cancel();
     };

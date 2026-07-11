@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::env;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -108,7 +108,7 @@ struct LspSession {
     // map lock across blocking I/O (a full stdin pipe would otherwise deadlock
     // lsp_start/lsp_stop for every server).
     stdin: Arc<Mutex<Box<dyn Write + Send>>>,
-    child: Child,
+    child: crate::julia::OwnedRun,
     gen: u64,
 }
 
@@ -121,18 +121,25 @@ fn session_key(window: &tauri::Window, id: &str) -> String {
 #[derive(Default)]
 pub struct LspManager {
     servers: Mutex<HashMap<String, LspSession>>,
+    teardowns: crate::julia::TeardownTracker,
 }
 
 impl LspManager {
     /// Kill and reap every running language server. Called on app exit so no
     /// server subprocess is orphaned when Lyceum quits.
     pub fn shutdown_all(&self) {
-        if let Ok(mut servers) = self.servers.lock() {
-            for (_id, mut session) in servers.drain() {
-                crate::julia::kill_pid(session.child.id());
-                let _ = session.child.wait();
-            }
+        let removed: Vec<LspSession> = {
+            let mut servers = self
+                .servers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            servers.drain().map(|(_, session)| session).collect()
+        };
+        for session in removed {
+            crate::julia::terminate_owned_child(&session.child);
+            let _ = crate::julia::wait_owned_child(&session.child);
         }
+        self.teardowns.shutdown_and_join();
     }
 
     /// Kill and reap every server belonging to one window (called when it is
@@ -141,9 +148,10 @@ impl LspManager {
     pub fn stop_servers_for_window(&self, label: &str) {
         let prefix = format!("{label}:");
         let removed: Vec<LspSession> = {
-            let Ok(mut servers) = self.servers.lock() else {
-                return;
-            };
+            let mut servers = self
+                .servers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let keys: Vec<String> = servers
                 .keys()
                 .filter(|key| key.starts_with(&prefix))
@@ -156,16 +164,16 @@ impl LspManager {
         }
         // Reap OFF the caller's thread. This runs in the window `Destroyed`
         // handler, which Tauri dispatches synchronously on the main event-loop
-        // (UI) thread; kill_pid + child.wait() blocks until the server exits —
+        // (UI) thread; owned termination + reap blocks until the server exits —
         // up to the ~2s SIGKILL-escalation delay for a server that ignores
         // SIGTERM — and doing that inline would freeze every window for that span.
         // The entries are already removed from the map, so no other window's LSP
         // command can observe or race them.
-        std::thread::spawn(move || {
-            for mut session in removed {
-                crate::julia::kill_pid(session.child.id());
+        self.teardowns.spawn(move || {
+            for session in removed {
+                crate::julia::terminate_owned_child(&session.child);
                 // Reap so the exited server does not linger as a zombie process.
-                let _ = session.child.wait();
+                let _ = crate::julia::wait_owned_child(&session.child);
             }
         });
     }
@@ -221,6 +229,7 @@ pub fn lsp_start(
     let stdin = child.stdin.take().ok_or("failed to capture stdin")?;
     let mut stdout = child.stdout.take().ok_or("failed to capture stdout")?;
 
+    let child = crate::julia::own_child_in_new_process_group(child);
     let gen = SESSION_GEN.fetch_add(1, Ordering::Relaxed);
     let label = window.label().to_string();
     let app_for_thread = app.clone();
@@ -237,17 +246,23 @@ pub fn lsp_start(
     // under edition 2021) is dropped before the blocking kill+wait below —
     // otherwise the global servers lock would be held across child.wait(), which
     // can block ~2s for a server slow to exit on SIGTERM, stalling all LSP IPC.
-    let displaced = state.servers.lock().unwrap().insert(
-        key,
-        LspSession {
-            stdin: Arc::new(Mutex::new(Box::new(stdin))),
-            child,
-            gen,
-        },
-    );
-    if let Some(mut old) = displaced {
-        crate::julia::kill_pid(old.child.id());
-        let _ = old.child.wait();
+    let displaced = state
+        .servers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            key,
+            LspSession {
+                stdin: Arc::new(Mutex::new(Box::new(stdin))),
+                child,
+                gen,
+            },
+        );
+    if let Some(old) = displaced {
+        state.teardowns.spawn(move || {
+            crate::julia::terminate_owned_child(&old.child);
+            let _ = crate::julia::wait_owned_child(&old.child);
+        });
     }
 
     // Reader thread: frame stdout, emit each message, then emit exit on EOF.
@@ -270,16 +285,25 @@ pub fn lsp_start(
         // and reap the child so no zombie process or dead map entry lingers.
         // Only remove our own generation — a new server may have reused the id.
         if let Some(manager) = app_for_thread.try_state::<LspManager>() {
-            let mut servers = manager.servers.lock().unwrap();
-            if servers
-                .get(&key_for_thread)
-                .is_some_and(|session| session.gen == gen)
-            {
-                if let Some(mut session) = servers.remove(&key_for_thread) {
-                    drop(servers);
-                    crate::julia::kill_pid(session.child.id());
-                    let _ = session.child.wait();
+            let removed = {
+                let mut servers = manager
+                    .servers
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if servers
+                    .get(&key_for_thread)
+                    .is_some_and(|session| session.gen == gen)
+                {
+                    servers.remove(&key_for_thread)
+                } else {
+                    None
                 }
+            };
+            if let Some(session) = removed {
+                manager.teardowns.spawn(move || {
+                    crate::julia::terminate_owned_child(&session.child);
+                    let _ = crate::julia::wait_owned_child(&session.child);
+                });
             }
         }
         let _ = app_for_thread.emit_to(label.as_str(), &exit_event, ());
@@ -341,13 +365,18 @@ pub fn lsp_send(
     // the map lock BEFORE the (potentially blocking) write/flush so a full pipe
     // on one server can't wedge lsp_start/lsp_stop for all the others.
     let stdin = {
-        let servers = state.servers.lock().unwrap();
+        let servers = state
+            .servers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let session = servers
             .get(&session_key(&window, &id))
             .ok_or("no such lsp server")?;
         session.stdin.clone()
     };
-    let mut stdin = stdin.lock().unwrap();
+    let mut stdin = stdin
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     stdin
         .write_all(&encode_message(&message))
         .map_err(|e| e.to_string())?;
@@ -365,12 +394,12 @@ pub fn lsp_stop(window: tauri::Window, state: State<LspManager>, id: String) -> 
     let removed = state
         .servers
         .lock()
-        .unwrap()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(&session_key(&window, &id));
-    if let Some(mut session) = removed {
-        crate::julia::kill_pid(session.child.id());
+    if let Some(session) = removed {
+        crate::julia::terminate_owned_child(&session.child);
         // Reap so the exited server does not linger as a zombie process.
-        let _ = session.child.wait();
+        let _ = crate::julia::wait_owned_child(&session.child);
     }
     Ok(())
 }
@@ -382,6 +411,20 @@ mod tests {
     #[test]
     fn encode_message_frames_body() {
         assert_eq!(encode_message("hello"), b"Content-Length: 5\r\n\r\nhello");
+    }
+
+    #[test]
+    fn lsp_reader_reap_is_manager_tracked() {
+        let source = include_str!("lsp.rs");
+        let reader = source
+            .split_once("// Reader thread: frame stdout")
+            .expect("reader source")
+            .1
+            .split_once("fn lsp_command(")
+            .expect("reader end")
+            .0;
+        assert!(reader.contains("manager.teardowns.spawn(move ||"));
+        assert!(reader.contains("wait_owned_child(&session.child)"));
     }
 
     #[test]

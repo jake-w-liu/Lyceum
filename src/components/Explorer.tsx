@@ -16,9 +16,14 @@ import {
   renamePath,
   restoreTrashBatch,
   type DirEntry,
+  type MovedPath,
 } from "../lib/ipc";
 import { useTreeStore } from "../state/treeStore";
-import { confirmDiscard, useEditorStore } from "../state/editorStore";
+import {
+  confirmDiscard,
+  flushPendingEdits,
+  useEditorStore,
+} from "../state/editorStore";
 import {
   gitScopeForEntry,
   gitStatusForEntry,
@@ -31,6 +36,7 @@ import {
 } from "../state/contextMenuStore";
 import { commandRegistry } from "../commands/commandRegistry";
 import { fileIconFor } from "../lib/fileIcons";
+import { parentDirectory } from "../lib/pathParent";
 import { Icon } from "./Icon";
 
 // Delay before a click on an already-selected file opens its inline rename.
@@ -80,11 +86,6 @@ function gitStatusLabel(status: string, scope: GitScope = "workspace"): string {
   }
 }
 
-function parentDir(path: string): string {
-  const idx = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-  return idx > 0 ? path.slice(0, idx) : path.slice(0, idx + 1);
-}
-
 // Join a parent directory and a child name without ever doubling the separator
 // (e.g. a parent of "/" must yield "/name", not "//name").
 function joinPath(parent: string, name: string): string {
@@ -101,8 +102,22 @@ function isSameOrDescendant(path: string, parent: string): boolean {
   return path === parent || path.startsWith(parent.endsWith(sep) ? parent : `${parent}${sep}`);
 }
 
+function normalizedPathForMatch(path: string): string {
+  const normalized = path.replace(/\\/g, "/");
+  if (normalized === "/") return normalized;
+  return normalized.replace(/\/+$/, "") || normalized;
+}
+
+function foldedPathForMatch(path: string): string {
+  // Conflict paths carry the existing entry's on-disk spelling, while a
+  // successful retry carries the incoming source name. Those can differ only
+  // by case on a case-insensitive filesystem, including when the existing
+  // entry disappears between preflight and retry.
+  return normalizedPathForMatch(path).normalize("NFC").toLowerCase();
+}
+
 function isDirectChild(path: string, parent: string): boolean {
-  return parentDir(path) === parent;
+  return parentDirectory(path) === parent;
 }
 
 function isEditableEventTarget(target: EventTarget | null): boolean {
@@ -135,6 +150,50 @@ function dragPathsFromDataTransfer(dataTransfer: DataTransfer): string[] {
 async function confirmDelete(text: string): Promise<boolean> {
   try {
     return await ask(text, { title: "Delete", kind: "warning" });
+  } catch {
+    return confirm(text);
+  }
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+// The backend performs a no-mutation planning pass before returning this
+// specific error. Only that verified conflict is eligible for an overwrite
+// retry; permission, validation, and I/O failures must keep their normal error
+// path instead of being mislabeled as replaceable.
+function destinationConflictPaths(error: unknown): string[] | null {
+  const prefix = "destination conflict: already exists: ";
+  const text = errorText(error);
+  const index = text.indexOf(prefix);
+  if (index < 0) return null;
+  try {
+    const parsed: unknown = JSON.parse(text.slice(index + prefix.length));
+    if (
+      !Array.isArray(parsed) ||
+      parsed.length === 0 ||
+      !parsed.every((path) => typeof path === "string" && path.length > 0)
+    ) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+async function confirmReplace(destinationDir: string): Promise<boolean> {
+  const text =
+    `One or more items already exist in "${destinationDir}". Replace them? ` +
+    "Existing files or folders with matching names will be permanently replaced.";
+  try {
+    return await ask(text, {
+      title: "Replace Existing Items",
+      kind: "warning",
+      okLabel: "Replace",
+      cancelLabel: "Cancel",
+    });
   } catch {
     return confirm(text);
   }
@@ -186,6 +245,104 @@ interface ExplorerClipboard {
   entries: DirEntry[];
 }
 
+interface ReplacementDocSnapshot {
+  content: string;
+  savedContent: string;
+  reloadVersion: number;
+}
+
+interface TransferOutcome {
+  items: MovedPath[];
+  blockedReplacementPaths: string[];
+}
+
+interface ReplacementTarget {
+  item: MovedPath;
+  path: string;
+}
+
+function replacementTargetsForTransfer(
+  transferred: MovedPath[],
+  approvedConflictPaths: string[],
+): ReplacementTarget[] {
+  const targets: ReplacementTarget[] = [];
+  const exactItems = new Map<string, MovedPath | null>();
+  const foldedItems = new Map<string, MovedPath | null>();
+  const add = (item: MovedPath, path: string) => {
+    if (
+      !targets.some(
+        (target) => target.item.to === item.to && target.path === path,
+      )
+    ) {
+      targets.push({ item, path });
+    }
+  };
+  const indexPath = (item: MovedPath, path: string | null | undefined) => {
+    if (!path) return;
+    const exact = normalizedPathForMatch(path);
+    const exactExisting = exactItems.get(exact);
+    exactItems.set(
+      exact,
+      exactExisting === undefined || exactExisting === item ? item : null,
+    );
+    const folded = foldedPathForMatch(path);
+    const foldedExisting = foldedItems.get(folded);
+    foldedItems.set(
+      folded,
+      foldedExisting === undefined || foldedExisting === item ? item : null,
+    );
+  };
+
+  for (const item of transferred) {
+    indexPath(item, item.to);
+    indexPath(item, item.replacedPath);
+    if (item.replaced === true) add(item, item.replacedPath ?? item.to);
+  }
+  for (const path of approvedConflictPaths) {
+    const exact = normalizedPathForMatch(path);
+    const item = exactItems.has(exact)
+      ? exactItems.get(exact)
+      : foldedItems.get(foldedPathForMatch(path));
+    if (item) add(item, path);
+  }
+  return targets;
+}
+
+function surfaceTransferCleanupWarnings(items: MovedPath[]) {
+  const warnings = [
+    ...new Set(
+      items
+        .map((item) => item.cleanupWarning)
+        .filter((warning): warning is string => Boolean(warning)),
+    ),
+  ];
+  if (warnings.length > 0) void message(warnings.join("\n"));
+}
+
+function replacementDocSnapshot(doc: {
+  content: string;
+  savedContent: string;
+  reloadVersion: number;
+}): ReplacementDocSnapshot {
+  return {
+    content: doc.content,
+    savedContent: doc.savedContent,
+    reloadVersion: doc.reloadVersion,
+  };
+}
+
+function matchesReplacementSnapshot(
+  doc: { content: string; savedContent: string; reloadVersion: number },
+  snapshot: ReplacementDocSnapshot | undefined,
+): boolean {
+  return (
+    snapshot !== undefined &&
+    snapshot.content === doc.content &&
+    snapshot.savedContent === doc.savedContent &&
+    snapshot.reloadVersion === doc.reloadVersion
+  );
+}
+
 function flattenVisibleEntries(
   entries: DirEntry[] | undefined,
   children: Record<string, DirEntry[]>,
@@ -206,6 +363,7 @@ function flattenVisibleEntries(
 }
 
 interface NodeProps {
+  rootPath: string;
   entry: DirEntry;
   depth: number;
   onOpenFile: (path: string) => void;
@@ -233,6 +391,7 @@ interface NodeProps {
 }
 
 function TreeNode({
+  rootPath,
   entry,
   depth,
   onOpenFile,
@@ -389,7 +548,7 @@ function TreeNode({
   }
 
   function pasteDestinationDir(): string {
-    return entry.isDir ? entry.path : parentDir(entry.path);
+    return entry.isDir ? entry.path : parentDirectory(entry.path);
   }
 
   function canPasteHere(): boolean {
@@ -416,8 +575,8 @@ function TreeNode({
       return;
     }
     try {
-      const to = joinPath(parentDir(entry.path), trimmed);
-      await renamePath(entry.path, to);
+      const to = joinPath(parentDirectory(entry.path), trimmed);
+      await renamePath(rootPath, entry.path, to);
       const move = [{ from: entry.path, to }];
       useEditorStore.getState().moveDocPaths(move);
       useTreeStore.getState().remapExpanded(move);
@@ -580,6 +739,7 @@ function TreeNode({
           {children?.map((child) => (
             <TreeNode
               key={child.path}
+              rootPath={rootPath}
               entry={child}
               depth={depth + 1}
               onOpenFile={onOpenFile}
@@ -869,7 +1029,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     // empty and wrongly create the item at the workspace root.
     if (resolvedSelectedEntries.length !== 1) return rootPath;
     const selected = resolvedSelectedEntries[0];
-    return selected.isDir ? selected.path : parentDir(selected.path);
+    return selected.isDir ? selected.path : parentDirectory(selected.path);
   }
 
   function startCreate(kind: "file" | "folder") {
@@ -913,8 +1073,8 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     }
     const target = joinPath(pending.parentPath, trimmed);
     try {
-      if (pending.kind === "folder") await createDirectory(target);
-      else await createFile(target);
+      if (pending.kind === "folder") await createDirectory(rootPath, target);
+      else await createFile(rootPath, target);
       useTreeStore.getState().refresh();
     } catch (err) {
       console.error("create failed", err);
@@ -1032,6 +1192,160 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     }
   }
 
+  async function confirmDiscardForReplacement(
+    targetPaths: string[],
+  ): Promise<Map<string, ReplacementDocSnapshot> | null> {
+    const approved = new Map<string, ReplacementDocSnapshot>();
+    // Native prompts are sequential. Re-scan until every currently affected
+    // doc still matches the exact state that was approved: a doc can be edited
+    // after its early prompt while a later prompt is open, and a newly opened
+    // matching doc must not inherit somebody else's approval.
+    for (;;) {
+      flushPendingEdits();
+      const affectedDocs = useEditorStore
+        .getState()
+        .docs.filter((doc) =>
+          targetPaths.some((target) => isSameOrDescendant(doc.path, target)),
+        );
+      for (const doc of affectedDocs) {
+        if (matchesReplacementSnapshot(doc, approved.get(doc.path))) continue;
+        if (!(await confirmDiscard(doc.path))) return null;
+        flushPendingEdits();
+        const current = useEditorStore
+          .getState()
+          .docs.find((candidate) => candidate.path === doc.path);
+        if (
+          current &&
+          targetPaths.some((target) =>
+            isSameOrDescendant(current.path, target),
+          )
+        ) {
+          approved.set(current.path, replacementDocSnapshot(current));
+        } else {
+          approved.delete(doc.path);
+        }
+      }
+
+      flushPendingEdits();
+      const currentDocs = useEditorStore
+        .getState()
+        .docs.filter((doc) =>
+          targetPaths.some((target) => isSameOrDescendant(doc.path, target)),
+        );
+      if (
+        currentDocs.every((doc) =>
+          matchesReplacementSnapshot(doc, approved.get(doc.path)),
+        )
+      ) {
+        return new Map(
+          currentDocs.map((doc) => [doc.path, replacementDocSnapshot(doc)]),
+        );
+      }
+    }
+  }
+
+  async function closeReplacedDocs(
+    transferred: MovedPath[],
+    snapshots: Map<string, ReplacementDocSnapshot>,
+    approvedConflictPaths: string[],
+  ): Promise<string[]> {
+    const replacedItems = replacementTargetsForTransfer(
+      transferred,
+      approvedConflictPaths,
+    );
+    if (replacedItems.length === 0) return [];
+
+    const blocked = new Set<string>();
+    for (;;) {
+      flushPendingEdits();
+      const docs = useEditorStore.getState().docs;
+      const closable = docs
+        .map((doc) => ({
+          doc,
+          replacement: replacedItems.find(({ path }) =>
+            isSameOrDescendant(doc.path, path),
+          ),
+        }))
+        .filter(
+          (candidate) =>
+            candidate.replacement !== undefined &&
+            !blocked.has(candidate.replacement.item.to),
+        );
+      if (closable.length === 0) break;
+
+      for (const { doc, replacement } of closable) {
+        if (!replacement) continue;
+        if (blocked.has(replacement.item.to)) continue;
+        if (
+          !matchesReplacementSnapshot(doc, snapshots.get(doc.path)) &&
+          !(await confirmDiscard(doc.path))
+        ) {
+          blocked.add(replacement.item.to);
+          continue;
+        }
+        useEditorStore.getState().closeDoc(doc.path);
+      }
+    }
+    return [...blocked];
+  }
+
+  async function transferWithReplaceOption(
+    destinationDir: string,
+    operation: (
+      replaceExisting?: true,
+      expectedConflictPaths?: string[],
+    ) => Promise<MovedPath[]>,
+  ): Promise<TransferOutcome | undefined> {
+    let conflictPaths: string[];
+    const approvedConflictPaths = new Set<string>();
+    try {
+      const items = await operation();
+      surfaceTransferCleanupWarnings(items);
+      return { items, blockedReplacementPaths: [] };
+    } catch (err) {
+      const parsed = destinationConflictPaths(err);
+      if (!parsed) throw err;
+      conflictPaths = parsed;
+    }
+
+    // A destination can change while native Replace/dirty-buffer prompts are
+    // open. The retry echoes the exact approved paths; if the backend reports a
+    // newly appeared conflict, loop through a fresh prompt without mutating.
+    for (;;) {
+      if (!(await confirmReplace(destinationDir))) return undefined;
+      const pathsToApprove = [
+        ...new Set([...approvedConflictPaths, ...conflictPaths]),
+      ];
+      const snapshots = await confirmDiscardForReplacement(pathsToApprove);
+      if (!snapshots) return undefined;
+      for (const path of conflictPaths) approvedConflictPaths.add(path);
+      let transferred: MovedPath[];
+      try {
+        transferred = await operation(true, conflictPaths);
+      } catch (err) {
+        const changed = destinationConflictPaths(err);
+        if (!changed) throw err;
+        conflictPaths = changed;
+        continue;
+      }
+      surfaceTransferCleanupWarnings(transferred);
+      // Close the old destination models before an internal move remaps source
+      // models onto those paths; otherwise the editor can hold duplicate tabs
+      // and duplicate Monaco models for one replaced file.
+      const blockedReplacementPaths = await closeReplacedDocs(
+        transferred,
+        snapshots,
+        [...approvedConflictPaths],
+      );
+      if (blockedReplacementPaths.length > 0) {
+        void message(
+          "Replacement finished on disk, but newly edited destination tabs were kept open.",
+        );
+      }
+      return { items: transferred, blockedReplacementPaths };
+    }
+  }
+
   async function moveEntries(
     entries: DirEntry[],
     destinationDir: string,
@@ -1040,17 +1354,34 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
       entries.filter((entry) => !isDirectChild(entry.path, destinationDir)),
     );
     if (!canMoveEntriesTo(movable, destinationDir)) return false;
+    const sourcePaths = movable.map((entry) => entry.path);
     try {
-      const moved = await movePaths(
-        rootPath,
-        movable.map((entry) => entry.path),
+      const outcome = await transferWithReplaceOption(
         destinationDir,
+        (replaceExisting, expectedConflictPaths) =>
+          replaceExisting
+            ? movePaths(
+                rootPath,
+                sourcePaths,
+                destinationDir,
+                true,
+                expectedConflictPaths,
+              )
+            : movePaths(rootPath, sourcePaths, destinationDir),
       );
+      if (!outcome) {
+        useTreeStore.getState().refresh();
+        return false;
+      }
+      const { items: moved, blockedReplacementPaths } = outcome;
       if (moved.length > 0) {
-        const localMoves = moved.map(({ from, to }) => ({ from, to }));
-        useEditorStore.getState().moveDocPaths(localMoves);
-        useTreeStore.getState().remapExpanded(localMoves);
-        useTreeStore.getState().setSelection(localMoves.map((item) => item.to));
+        const treeMoves = moved.map(({ from, to }) => ({ from, to }));
+        const editorMoves = moved
+          .filter((item) => !blockedReplacementPaths.includes(item.to))
+          .map(({ from, to }) => ({ from, to }));
+        useEditorStore.getState().moveDocPaths(editorMoves);
+        useTreeStore.getState().remapExpanded(treeMoves);
+        useTreeStore.getState().setSelection(treeMoves.map((item) => item.to));
       }
       if (destinationDir !== rootPath) {
         useTreeStore.getState().setExpanded(destinationDir, true);
@@ -1118,7 +1449,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
   function selectedPasteDestination(): string {
     if (resolvedSelectedEntries.length !== 1) return rootPath;
     const selected = resolvedSelectedEntries[0];
-    return selected.isDir ? selected.path : parentDir(selected.path);
+    return selected.isDir ? selected.path : parentDirectory(selected.path);
   }
 
   async function pasteInto(destinationDir: string) {
@@ -1130,12 +1461,26 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
       return;
     }
     if (!canCopyEntriesTo(pending.entries, destinationDir)) return;
+    const sourcePaths = pending.entries.map((entry) => entry.path);
     try {
-      const copied = await copyPaths(
-        rootPath,
-        pending.entries.map((entry) => entry.path),
+      const outcome = await transferWithReplaceOption(
         destinationDir,
+        (replaceExisting, expectedConflictPaths) =>
+          replaceExisting
+            ? copyPaths(
+                rootPath,
+                sourcePaths,
+                destinationDir,
+                true,
+                expectedConflictPaths,
+              )
+            : copyPaths(rootPath, sourcePaths, destinationDir),
       );
+      if (!outcome) {
+        useTreeStore.getState().refresh();
+        return;
+      }
+      const copied = outcome.items;
       if (destinationDir !== rootPath) {
         useTreeStore.getState().setExpanded(destinationDir, true);
       }
@@ -1176,7 +1521,24 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
   async function importPaths(sourcePaths: string[], destinationDir: string) {
     if (sourcePaths.length === 0) return;
     try {
-      const copied = await copyPaths(rootPath, sourcePaths, destinationDir);
+      const outcome = await transferWithReplaceOption(
+        destinationDir,
+        (replaceExisting, expectedConflictPaths) =>
+          replaceExisting
+            ? copyPaths(
+                rootPath,
+                sourcePaths,
+                destinationDir,
+                true,
+                expectedConflictPaths,
+              )
+            : copyPaths(rootPath, sourcePaths, destinationDir),
+      );
+      if (!outcome) {
+        useTreeStore.getState().refresh();
+        return;
+      }
+      const copied = outcome.items;
       if (destinationDir !== rootPath) {
         useTreeStore.getState().setExpanded(destinationDir, true);
       }
@@ -1186,6 +1548,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
       useTreeStore.getState().refresh();
     } catch (err) {
       console.error("import failed", err);
+      useTreeStore.getState().refresh();
       void message(`Import failed: ${String(err)}`);
     }
   }
@@ -1202,7 +1565,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     const path = row.dataset.rowPath ?? row.dataset.path;
     if (!path) return rootPath;
     const isDir = row.dataset.rowIsdir === "1" || row.dataset.isdir === "1";
-    return isDir ? path : parentDir(path);
+    return isDir ? path : parentDirectory(path);
   }
 
   useEffect(() => {
@@ -1356,7 +1719,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
         if (entry?.isDir && expanded[current]) {
           tree.setExpanded(current, false);
         } else {
-          const parent = parentDir(current);
+          const parent = parentDirectory(current);
           if (visiblePaths.includes(parent)) moveTo(parent);
         }
         break;
@@ -1507,6 +1870,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
         {rootChildren?.map((entry) => (
           <TreeNode
             key={entry.path}
+            rootPath={rootPath}
             entry={entry}
             depth={0}
             onOpenFile={onOpenFile}

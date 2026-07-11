@@ -42,6 +42,21 @@ describe("parentOf", () => {
   it("handles Windows separators", () => {
     expect(parentOf("C:\\a\\b.txt")).toBe("C:\\a");
   });
+
+  it("walks through Windows drive roots and then stops", () => {
+    expect(parentOf("C:\\file.txt")).toBe("C:\\");
+    expect(parentOf("C:\\")).toBe("");
+    expect(parentOf("C:/file.txt")).toBe("C:/");
+    expect(parentOf("C:/")).toBe("");
+  });
+
+  it("stops traversal at a UNC share root", () => {
+    expect(parentOf("\\\\server\\share\\file.txt")).toBe(
+      "\\\\server\\share",
+    );
+    expect(parentOf("\\\\server\\share")).toBe("");
+    expect(parentOf("\\\\server\\share\\")).toBe("");
+  });
 });
 
 describe("computeFolders", () => {
@@ -59,6 +74,17 @@ describe("computeFolders", () => {
     const folders = computeFolders(files);
     expect(folders["/repo/src"]).toBe("untracked");
     expect(folders["/repo"]).toBe("untracked");
+  });
+
+  it("rolls UNC changes up to the share root without inventing a server folder", () => {
+    const folders = computeFolders({
+      "\\\\server\\share\\src\\file.ts": "modified",
+    });
+    expect(folders).toEqual({
+      "\\\\server\\share\\src": "modified",
+      "\\\\server\\share": "modified",
+    });
+    expect(folders["\\\\server"]).toBeUndefined();
   });
 
   it("lets modified win over untracked when a folder contains both", () => {

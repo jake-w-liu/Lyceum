@@ -14,9 +14,14 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 
 use crate::path_access::{self, PathAccessManager};
+use crate::workspace_paths::{
+    path_resolves_into_workspace_trash, path_starts_with_workspace_trash,
+    path_would_be_workspace_trash, LYCEUM_TRASH_DIR,
+};
 
-const LYCEUM_TRASH_DIR: &str = ".lyceum-trash";
 static TRASH_BATCH_SEQ: AtomicU64 = AtomicU64::new(0);
+static ROLLBACK_STAGE_SEQ: AtomicU64 = AtomicU64::new(0);
+static COPY_STAGE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// A single entry in a directory listing.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -51,6 +56,9 @@ pub struct MovedPathDto {
     pub from: String,
     pub to: String,
     pub is_dir: bool,
+    pub replaced: bool,
+    pub replaced_path: Option<String>,
+    pub cleanup_warning: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,9 +67,350 @@ struct WorkspaceEntryTarget {
     is_dir: bool,
 }
 
+/// Identity of an entry created or moved by the current operation. Rollback
+/// must check identity, not just the pathname: another actor can remove our
+/// entry and create a different one at the same path before a later batch item
+/// fails. Acting on that replacement would delete or relocate data we do not
+/// own.
+#[cfg(unix)]
+#[derive(Debug)]
+struct EntryIdentity {
+    device: u64,
+    inode: u64,
+    size: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    mode: u32,
+    // Keep the inode allocated while the rollback token is live. This closes
+    // the otherwise-theoretical unlink + inode-reuse hole in a dev/inode token.
+    _handle: Option<std::fs::File>,
+}
+
+#[cfg(unix)]
+impl EntryIdentity {
+    fn capture_with_pin(path: &Path, pin: bool) -> std::io::Result<Self> {
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = std::fs::symlink_metadata(path)?;
+        let handle = if pin {
+            Some(open_unix_entry_without_following(path, &metadata)?)
+        } else {
+            None
+        };
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            size: metadata.size(),
+            modified_seconds: metadata.mtime(),
+            modified_nanoseconds: metadata.mtime_nsec(),
+            mode: metadata.mode(),
+            _handle: handle,
+        })
+    }
+
+    fn still_at(&self, path: &Path) -> bool {
+        use std::os::unix::fs::MetadataExt;
+
+        std::fs::symlink_metadata(path)
+            .map(|metadata| {
+                metadata.dev() == self.device
+                    && metadata.ino() == self.inode
+                    && metadata.size() == self.size
+                    && metadata.mtime() == self.modified_seconds
+                    && metadata.mtime_nsec() == self.modified_nanoseconds
+                    && metadata.mode() == self.mode
+            })
+            .unwrap_or(false)
+    }
+}
+
+#[cfg(unix)]
+fn open_unix_entry_without_following(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        let _ = metadata;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH | libc::O_NOFOLLOW)
+            .open(path)
+    }
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        let flags = if metadata.file_type().is_symlink() {
+            libc::O_EVTONLY | libc::O_SYMLINK
+        } else {
+            libc::O_EVTONLY
+        };
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(flags)
+            .open(path)
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios"
+    )))]
+    {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "cannot pin a filesystem entry on this Unix platform",
+        ))
+    }
+}
+
+/// Windows does not expose stable file IDs through stable `MetadataExt`. Open
+/// the entry itself (including directory/reparse-point entries), retain that
+/// handle, and query the kernel's volume + file-index tuple.
+#[cfg(windows)]
+#[derive(Debug)]
+struct EntryIdentity {
+    volume: u32,
+    index: u64,
+    size: u64,
+    attributes: u32,
+    last_write: u64,
+    _handle: Option<std::fs::File>,
+}
+
+#[cfg(windows)]
+impl EntryIdentity {
+    fn capture_with_pin(path: &Path, pin: bool) -> std::io::Result<Self> {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        const FILE_SHARE_READ: u32 = 0x0000_0001;
+        const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+        const FILE_SHARE_DELETE: u32 = 0x0000_0004;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+        let handle = std::fs::OpenOptions::new()
+            .access_mode(0)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)?;
+        let (volume, index, size, attributes, last_write) = windows_file_identity(&handle)?;
+        Ok(Self {
+            volume,
+            index,
+            size,
+            attributes,
+            last_write,
+            _handle: pin.then_some(handle),
+        })
+    }
+
+    fn still_at(&self, path: &Path) -> bool {
+        Self::capture_with_pin(path, true)
+            .map(|current| {
+                current.volume == self.volume
+                    && current.index == self.index
+                    && current.size == self.size
+                    && current.attributes == self.attributes
+                    && current.last_write == self.last_write
+            })
+            .unwrap_or(false)
+    }
+}
+
+#[cfg(windows)]
+#[repr(C)]
+#[allow(non_snake_case)]
+struct WindowsFileTime {
+    dwLowDateTime: u32,
+    dwHighDateTime: u32,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+#[allow(non_snake_case)]
+struct ByHandleFileInformation {
+    dwFileAttributes: u32,
+    ftCreationTime: WindowsFileTime,
+    ftLastAccessTime: WindowsFileTime,
+    ftLastWriteTime: WindowsFileTime,
+    dwVolumeSerialNumber: u32,
+    nFileSizeHigh: u32,
+    nFileSizeLow: u32,
+    nNumberOfLinks: u32,
+    nFileIndexHigh: u32,
+    nFileIndexLow: u32,
+}
+
+#[cfg(windows)]
+fn windows_file_identity(file: &std::fs::File) -> std::io::Result<(u32, u64, u64, u32, u64)> {
+    use std::os::windows::io::AsRawHandle;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetFileInformationByHandle(
+            handle: *mut std::ffi::c_void,
+            information: *mut ByHandleFileInformation,
+        ) -> i32;
+    }
+
+    let mut information = std::mem::MaybeUninit::<ByHandleFileInformation>::uninit();
+    // SAFETY: `file` owns a valid kernel handle and `information` points to
+    // writable storage of the exact BY_HANDLE_FILE_INFORMATION layout.
+    let succeeded =
+        unsafe { GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr()) };
+    if succeeded == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: a successful GetFileInformationByHandle initializes every field.
+    let information = unsafe { information.assume_init() };
+    let index =
+        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
+    let size = (u64::from(information.nFileSizeHigh) << 32) | u64::from(information.nFileSizeLow);
+    let last_write = (u64::from(information.ftLastWriteTime.dwHighDateTime) << 32)
+        | u64::from(information.ftLastWriteTime.dwLowDateTime);
+    Ok((
+        information.dwVolumeSerialNumber,
+        index,
+        size,
+        information.dwFileAttributes,
+        last_write,
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+#[derive(Debug)]
+struct EntryIdentity;
+
+#[cfg(not(any(unix, windows)))]
+impl EntryIdentity {
+    fn capture_with_pin(_path: &Path, _pin: bool) -> std::io::Result<Self> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "filesystem identity tokens are unavailable on this platform",
+        ))
+    }
+
+    fn still_at(&self, _path: &Path) -> bool {
+        false
+    }
+}
+
+#[derive(Debug)]
+struct OwnedEntry {
+    path: PathBuf,
+    tree: Option<Vec<OwnedTreeNode>>,
+}
+
+#[derive(Debug)]
+struct OwnedTreeNode {
+    relative: PathBuf,
+    identity: EntryIdentity,
+}
+
+impl OwnedEntry {
+    fn try_capture(path: PathBuf) -> std::io::Result<Self> {
+        let mut tree = Vec::new();
+        capture_owned_tree(&path, Path::new(""), &mut tree)?;
+        Ok(Self {
+            path,
+            tree: Some(tree),
+        })
+    }
+
+    #[cfg(test)]
+    fn capture(path: PathBuf) -> Self {
+        Self::try_capture(path).expect("capture owned entry tree")
+    }
+
+    fn is_still_owned_at(&self, path: &Path) -> bool {
+        let Some(tree) = self.tree.as_ref() else {
+            return false;
+        };
+        let mut current_paths = HashSet::new();
+        if collect_tree_paths(path, Path::new(""), &mut current_paths).is_err()
+            || current_paths.len() != tree.len()
+        {
+            return false;
+        }
+        tree.iter().all(|node| {
+            current_paths.contains(&node.relative)
+                && node
+                    .identity
+                    .still_at(&if node.relative.as_os_str().is_empty() {
+                        path.to_path_buf()
+                    } else {
+                        path.join(&node.relative)
+                    })
+        })
+    }
+}
+
+fn capture_owned_tree(
+    path: &Path,
+    relative: &Path,
+    out: &mut Vec<OwnedTreeNode>,
+) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    out.push(OwnedTreeNode {
+        relative: relative.to_path_buf(),
+        // Pin only the root. Descendant IDs/fingerprints are verified after the
+        // root is atomically quarantined; retaining one descriptor per node
+        // would exhaust RLIMIT_NOFILE on ordinary large project trees.
+        identity: EntryIdentity::capture_with_pin(path, relative.as_os_str().is_empty())?,
+    });
+    if metadata.file_type().is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            capture_owned_tree(&entry.path(), &relative.join(entry.file_name()), out)?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_tree_paths(
+    path: &Path,
+    relative: &Path,
+    out: &mut HashSet<PathBuf>,
+) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    out.insert(relative.to_path_buf());
+    if metadata.file_type().is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            collect_tree_paths(&entry.path(), &relative.join(entry.file_name()), out)?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct CompletedMove {
+    destination: OwnedEntry,
+    source: PathBuf,
+}
+
+impl CompletedMove {
+    #[cfg(test)]
+    fn capture(destination: PathBuf, source: PathBuf) -> Self {
+        Self {
+            destination: OwnedEntry::capture(destination),
+            source,
+        }
+    }
+}
+
 /// List the immediate children of `dir`, directories first then files, each
 /// group sorted case-insensitively by name. Returns an error string on failure.
+#[cfg(test)]
 pub fn read_dir_entries(dir: &Path) -> Result<Vec<DirEntryDto>, String> {
+    read_dir_entries_for_workspace(dir, dir)
+}
+
+fn read_dir_entries_for_workspace(
+    dir: &Path,
+    workspace_root: &Path,
+) -> Result<Vec<DirEntryDto>, String> {
     if !dir.is_dir() {
         return Err(format!("not a directory: {}", dir.display()));
     }
@@ -72,7 +421,7 @@ pub fn read_dir_entries(dir: &Path) -> Result<Vec<DirEntryDto>, String> {
         let entry = entry.map_err(|e| e.to_string())?;
         let file_type = entry.file_type().map_err(|e| e.to_string())?;
         let name = entry.file_name().to_string_lossy().to_string();
-        if name == LYCEUM_TRASH_DIR {
+        if is_trash_entry_for_workspace(workspace_root, &entry.path(), &name) {
             continue;
         }
         let path = entry.path();
@@ -109,10 +458,18 @@ pub fn read_directory(
     app: AppHandle,
     window: tauri::Window,
     access: State<'_, PathAccessManager>,
+    root: String,
     path: String,
 ) -> Result<Vec<DirEntryDto>, String> {
+    let root = path_access::ensure_existing_dir_allowed(&app, &window, &access, Path::new(&root))?;
     let dir = path_access::ensure_existing_dir_allowed(&app, &window, &access, Path::new(&path))?;
-    read_dir_entries(&dir)
+    if !dir.starts_with(&root) {
+        return Err(format!(
+            "directory is outside workspace root: {}",
+            dir.display()
+        ));
+    }
+    read_dir_entries_for_workspace(&dir, &root)
 }
 
 /// Create an empty file at `path`. Errors if it already exists. Parent
@@ -122,11 +479,18 @@ pub fn create_file(
     app: AppHandle,
     window: tauri::Window,
     access: State<'_, PathAccessManager>,
+    root: String,
     path: String,
 ) -> Result<(), String> {
+    let root = path_access::ensure_existing_dir_allowed(&app, &window, &access, Path::new(&root))?;
     let target =
         path_access::ensure_write_target_allowed(&app, &window, &access, Path::new(&path))?;
-    create_file_impl(&target)
+    create_file_in_workspace_impl(&root, &target)
+}
+
+fn create_file_in_workspace_impl(root: &Path, target: &Path) -> Result<(), String> {
+    validate_workspace_mutation_destination(root, target)?;
+    create_file_impl(target)
 }
 
 fn create_file_impl(target: &Path) -> Result<(), String> {
@@ -159,18 +523,36 @@ pub fn create_directory(
     app: AppHandle,
     window: tauri::Window,
     access: State<'_, PathAccessManager>,
+    root: String,
     path: String,
 ) -> Result<(), String> {
+    let root = path_access::ensure_existing_dir_allowed(&app, &window, &access, Path::new(&root))?;
     let target =
         path_access::ensure_write_target_allowed(&app, &window, &access, Path::new(&path))?;
-    create_directory_impl(&target)
+    create_directory_in_workspace_impl(&root, &target)
+}
+
+fn create_directory_in_workspace_impl(root: &Path, target: &Path) -> Result<(), String> {
+    validate_workspace_mutation_destination(root, target)?;
+    create_directory_impl(target)
 }
 
 fn create_directory_impl(target: &Path) -> Result<(), String> {
     if path_entry_exists(target) {
         return Err(format!("already exists: {}", target.display()));
     }
-    std::fs::create_dir_all(target).map_err(|e| format!("{}: {e}", target.display()))
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    // Claim the leaf atomically. `create_dir_all(target)` would silently succeed
+    // if another actor created it after the preflight check above.
+    std::fs::create_dir(target).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            format!("already exists: {}", target.display())
+        } else {
+            format!("{}: {e}", target.display())
+        }
+    })
 }
 
 /// Rename/move `from` to `to`. Errors if the destination already exists.
@@ -179,12 +561,25 @@ pub fn rename_path(
     app: AppHandle,
     window: tauri::Window,
     access: State<'_, PathAccessManager>,
+    root: String,
     from: String,
     to: String,
 ) -> Result<(), String> {
+    let root = path_access::ensure_existing_dir_allowed(&app, &window, &access, Path::new(&root))?;
     path_access::ensure_existing_allowed(&app, &window, &access, Path::new(&from))?;
     path_access::ensure_write_target_allowed(&app, &window, &access, Path::new(&to))?;
-    rename_path_impl(Path::new(&from), Path::new(&to))
+    // Validation may canonicalize an existing case-only destination back to
+    // the source's disk spelling. Preserve the requested final spelling for
+    // rename_case_only while still normalizing lexical traversal segments.
+    let to = absolute_lexical_path(Path::new(&to));
+    let from = existing_workspace_entry_target(&from)?.path;
+    rename_path_in_workspace_impl(&root, &from, &to)
+}
+
+fn rename_path_in_workspace_impl(root: &Path, from: &Path, to: &Path) -> Result<(), String> {
+    validate_workspace_move_target(root, from)?;
+    validate_workspace_mutation_destination(root, to)?;
+    rename_path_impl(from, to)
 }
 
 fn rename_path_impl(from_path: &Path, to_path: &Path) -> Result<(), String> {
@@ -199,7 +594,7 @@ fn rename_path_impl(from_path: &Path, to_path: &Path) -> Result<(), String> {
         }
         return Err(format!("already exists: {}", to_path.display()));
     }
-    std::fs::rename(from_path, to_path)
+    move_entry(from_path, to_path)
         .map_err(|e| format!("{} -> {}: {e}", from_path.display(), to_path.display()))
 }
 
@@ -238,17 +633,19 @@ fn rename_case_only(from: &Path, to: &Path) -> Result<(), String> {
         Some(p) => p.join(tmp_name),
         None => PathBuf::from(tmp_name),
     };
-    std::fs::rename(from, &tmp)
+    rename_noreplace(from, &tmp)
         .map_err(|e| format!("{} -> {}: {e}", from.display(), tmp.display()))?;
-    if let Err(e) = std::fs::rename(&tmp, to) {
+    if let Err(e) = rename_noreplace(&tmp, to) {
         // Roll back so the file isn't stranded under the temp name.
-        let _ = std::fs::rename(&tmp, from);
+        let _ = rename_noreplace(&tmp, from);
         return Err(format!("{} -> {}: {e}", from.display(), to.display()));
     }
     Ok(())
 }
 
 /// Move one or more workspace paths into an existing destination directory.
+// Tauri injects app/window/state before the five serialized command fields.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn move_paths(
     app: AppHandle,
@@ -257,15 +654,25 @@ pub fn move_paths(
     root: String,
     paths: Vec<String>,
     destination_dir: String,
+    replace_existing: Option<bool>,
+    expected_conflict_paths: Option<Vec<String>>,
 ) -> Result<Vec<MovedPathDto>, String> {
     let root_path =
         path_access::ensure_existing_dir_allowed(&app, &window, &access, Path::new(&root))?;
-    move_paths_impl(&root_path, paths, Path::new(&destination_dir))
+    move_paths_impl_with_replace(
+        &root_path,
+        paths,
+        Path::new(&destination_dir),
+        replace_existing.unwrap_or(false),
+        expected_conflict_paths.as_deref(),
+    )
 }
 
 /// Copy one or more source paths — which may live OUTSIDE the workspace (e.g.
 /// files dropped from the OS file manager) — into an existing destination
 /// directory under the workspace root.
+// Tauri injects app/window/state before the five serialized command fields.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn copy_paths(
     app: AppHandle,
@@ -274,10 +681,18 @@ pub fn copy_paths(
     root: String,
     paths: Vec<String>,
     destination_dir: String,
+    replace_existing: Option<bool>,
+    expected_conflict_paths: Option<Vec<String>>,
 ) -> Result<Vec<MovedPathDto>, String> {
     let root_path =
         path_access::ensure_existing_dir_allowed(&app, &window, &access, Path::new(&root))?;
-    copy_paths_impl(&root_path, paths, Path::new(&destination_dir))
+    copy_paths_impl_with_replace(
+        &root_path,
+        paths,
+        Path::new(&destination_dir),
+        replace_existing.unwrap_or(false),
+        expected_conflict_paths.as_deref(),
+    )
 }
 
 #[tauri::command]
@@ -328,20 +743,29 @@ fn move_paths_to_trash_impl(root: &Path, paths: Vec<String>) -> Result<TrashBatc
     }
 
     let id = unique_trash_batch_id();
-    let batch_dir = root.join(LYCEUM_TRASH_DIR).join(&id);
-    std::fs::create_dir_all(&batch_dir).map_err(|e| format!("{}: {e}", batch_dir.display()))?;
+    let (trash_root, created_trash_root) = ensure_safe_trash_root(&root)?;
+    let batch_dir = trash_root.join(&id);
+    if let Err(error) = std::fs::create_dir(&batch_dir) {
+        if created_trash_root {
+            let _ = std::fs::remove_dir(&trash_root);
+        }
+        return Err(format!("{}: {error}", batch_dir.display()));
+    }
 
     let mut items = Vec::with_capacity(targets.len());
     // Completed moves (trashed_dest, original_source); on any failure these are
     // rolled back so a partial multi-file delete cannot silently lose files
     // into the hidden trash dir with no Undo affordance.
-    let mut done: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut done: Vec<CompletedMove> = Vec::new();
     for target in targets {
         let rel = match target.path.strip_prefix(&root) {
             Ok(rel) => rel,
             Err(e) => {
                 rollback_moves(&done);
                 let _ = std::fs::remove_dir_all(&batch_dir);
+                if created_trash_root {
+                    let _ = std::fs::remove_dir(&trash_root);
+                }
                 return Err(format!("{}: {e}", target.path.display()));
             }
         };
@@ -350,27 +774,38 @@ fn move_paths_to_trash_impl(root: &Path, paths: Vec<String>) -> Result<TrashBatc
             if let Err(e) = std::fs::create_dir_all(parent) {
                 rollback_moves(&done);
                 let _ = std::fs::remove_dir_all(&batch_dir);
+                if created_trash_root {
+                    let _ = std::fs::remove_dir(&trash_root);
+                }
                 return Err(format!("{}: {e}", parent.display()));
             }
         }
-        if let Err(e) = move_entry(&target.path, &destination) {
-            rollback_moves(&done);
-            // move_entry may have deliberately KEPT a complete copy at
-            // `destination` (a cross-device DIRECTORY whose non-atomic
-            // remove_dir_all of the source partially failed — the source is then
-            // incomplete and this copy is the only complete one). Wiping batch_dir
-            // would destroy it -> permanent data loss. Only clean up the batch dir
-            // when nothing was left behind at `destination`.
-            if std::fs::symlink_metadata(&destination).is_err() {
-                let _ = std::fs::remove_dir_all(&batch_dir);
+        let destination_ownership = match move_entry_owned(&target.path, &destination) {
+            Ok(ownership) => ownership,
+            Err(e) => {
+                rollback_moves(&done);
+                // move_entry_owned may have deliberately KEPT a complete copy at
+                // `destination` (a cross-device DIRECTORY whose non-atomic
+                // remove_dir_all of the source partially failed — the source is
+                // then incomplete and this copy is the only complete one). Wiping
+                // batch_dir would destroy it -> permanent data loss.
+                if std::fs::symlink_metadata(&destination).is_err() {
+                    let _ = std::fs::remove_dir_all(&batch_dir);
+                    if created_trash_root {
+                        let _ = std::fs::remove_dir(&trash_root);
+                    }
+                }
+                return Err(format!(
+                    "{} -> {}: {e}",
+                    target.path.display(),
+                    destination.display()
+                ));
             }
-            return Err(format!(
-                "{} -> {}: {e}",
-                target.path.display(),
-                destination.display()
-            ));
-        }
-        done.push((destination.clone(), target.path.clone()));
+        };
+        done.push(CompletedMove {
+            destination: destination_ownership,
+            source: target.path.clone(),
+        });
         items.push(TrashItemDto {
             original_path: path_for_requested_root(&root, &requested_root, &target.path),
             trashed_path: path_for_requested_root(&root, &requested_root, &destination),
@@ -381,10 +816,420 @@ fn move_paths_to_trash_impl(root: &Path, paths: Vec<String>) -> Result<TrashBatc
     Ok(TrashBatchDto { id, items })
 }
 
+/// Return Lyceum's hidden trash directory only when the path is a real
+/// directory entry under the workspace. Following a workspace-provided symlink
+/// here would move deleted/replaced data outside the authorized root and make it
+/// impossible for the validated restore path to recover it.
+fn ensure_safe_trash_root(root: &Path) -> Result<(PathBuf, bool), String> {
+    let requested = root.join(LYCEUM_TRASH_DIR);
+    let trash_root = if path_entry_exists(&requested) {
+        existing_entry_path_with_disk_case(&requested)
+    } else {
+        requested
+    };
+    match std::fs::symlink_metadata(&trash_root) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "Lyceum trash path is not a safe directory: {}",
+                    trash_root.display()
+                ));
+            }
+            Ok((trash_root, false))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match std::fs::create_dir(&trash_root) {
+                Ok(()) => Ok((trash_root, true)),
+                // Another actor may have won the creation race. Re-validate the
+                // actual entry rather than treating an attacker-created symlink
+                // as a directory on retry.
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let metadata = std::fs::symlink_metadata(&trash_root)
+                        .map_err(|e| format!("{}: {e}", trash_root.display()))?;
+                    if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+                        Ok((trash_root, false))
+                    } else {
+                        Err(format!(
+                            "Lyceum trash path is not a safe directory: {}",
+                            trash_root.display()
+                        ))
+                    }
+                }
+                Err(error) => Err(format!("{}: {error}", trash_root.display())),
+            }
+        }
+        Err(error) => Err(format!("{}: {error}", trash_root.display())),
+    }
+}
+
+#[derive(Debug)]
+struct ReplacementBackup {
+    /// Destination spelling requested by the incoming source name.
+    destination: PathBuf,
+    /// Actual on-disk spelling of the entry that was displaced.
+    original: PathBuf,
+    backup: PathBuf,
+    ownership: Option<OwnedEntry>,
+    original_permissions: Option<std::fs::Permissions>,
+}
+
+#[derive(Debug)]
+struct ReplacementStage {
+    directory: PathBuf,
+    trash_root: PathBuf,
+    created_trash_root: bool,
+    backups: Vec<ReplacementBackup>,
+}
+
+impl ReplacementStage {
+    fn replaced_path_for(&self, destination: &Path) -> Option<&Path> {
+        self.backups
+            .iter()
+            .find(|item| item.destination == destination)
+            .map(|item| item.original.as_path())
+    }
+}
+
+/// Move every pre-existing destination out of the way before the transfer
+/// starts. The originals remain recoverable until the full batch succeeds, so
+/// a failed file/directory copy or move never destroys the entries the user
+/// chose to replace.
+fn stage_existing_destinations(
+    root: &Path,
+    planned: &[(PathBuf, PathBuf, bool, bool)],
+) -> Result<Option<ReplacementStage>, String> {
+    if !planned.iter().any(|(_, _, _, exists)| *exists) {
+        return Ok(None);
+    }
+
+    let (trash_root, created_trash_root) = ensure_safe_trash_root(root)?;
+
+    let directory = trash_root.join(format!(".replace-{}", unique_trash_batch_id()));
+    if let Err(error) = std::fs::create_dir(&directory) {
+        if created_trash_root {
+            let _ = std::fs::remove_dir(&trash_root);
+        }
+        return Err(format!("{}: {error}", directory.display()));
+    }
+    let mut stage = ReplacementStage {
+        directory,
+        trash_root,
+        created_trash_root,
+        backups: Vec::new(),
+    };
+
+    for (index, (_, destination, _, existed_during_plan)) in planned.iter().enumerate() {
+        if !*existed_during_plan || !path_entry_exists(destination) {
+            continue;
+        }
+        let original = existing_entry_path_with_disk_case(destination);
+        let backup = stage.directory.join(index.to_string());
+        let metadata = match std::fs::symlink_metadata(&original) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                rollback_replacement_stage(Some(&stage));
+                return Err(format!("{}: {error}", original.display()));
+            }
+        };
+        let original_permissions = if metadata.file_type().is_symlink() {
+            None
+        } else {
+            let permissions = metadata.permissions();
+            if let Err(error) = make_path_owner_writable(&original, &metadata) {
+                rollback_replacement_stage(Some(&stage));
+                return Err(format!(
+                    "could not prepare existing destination {}: {error}",
+                    original.display()
+                ));
+            }
+            Some(permissions)
+        };
+        stage.backups.push(ReplacementBackup {
+            destination: destination.clone(),
+            original: original.clone(),
+            backup: backup.clone(),
+            ownership: None,
+            original_permissions,
+        });
+        match move_entry_owned(&original, &backup) {
+            Ok(ownership) => {
+                if let Some(staged) = stage.backups.last_mut() {
+                    staged.ownership = Some(ownership);
+                }
+            }
+            Err(error) => {
+                rollback_replacement_stage(Some(&stage));
+                return Err(format!(
+                    "could not stage existing destination {}: {error}",
+                    original.display()
+                ));
+            }
+        }
+    }
+
+    Ok(Some(stage))
+}
+
+/// Restore staged originals after a failed transfer. Never overwrite an entry
+/// that appeared concurrently: if a destination is occupied, retain its backup
+/// in the hidden staging directory rather than risking either copy.
+fn rollback_replacement_stage(stage: Option<&ReplacementStage>) {
+    let Some(stage) = stage else {
+        return;
+    };
+    for item in stage.backups.iter().rev() {
+        let permission_target = match item.ownership.as_ref() {
+            Some(ownership) if ownership.is_still_owned_at(&item.original) => Some(&item.original),
+            Some(ownership) if !path_entry_exists(&item.original) => {
+                match quarantine_owned_entry(ownership) {
+                    Ok(quarantined) => {
+                        if move_entry(&quarantined, &item.original).is_ok() {
+                            Some(&item.original)
+                        } else {
+                            restore_quarantined_entry(&quarantined, &item.backup);
+                            ownership
+                                .is_still_owned_at(&item.backup)
+                                .then_some(&item.backup)
+                        }
+                    }
+                    Err(_) => None,
+                }
+            }
+            Some(ownership) => {
+                // A concurrent entry appeared at the original path. Keep its
+                // permissions untouched and restore only our retained backup.
+                ownership
+                    .is_still_owned_at(&item.backup)
+                    .then_some(&item.backup)
+            }
+            None if path_entry_exists(&item.original) => {
+                // Ownership capture failed before staging moved anything; undo
+                // the preparatory chmod on the still-present original.
+                Some(&item.original)
+            }
+            None => None,
+        };
+        if let (Some(path), Some(permissions)) = (permission_target, &item.original_permissions) {
+            let _ = std::fs::set_permissions(path, permissions.clone());
+        }
+    }
+    // Only empty directories are removed here. Any backup that could not be
+    // restored remains recoverable instead of being deleted during cleanup.
+    let _ = std::fs::remove_dir(&stage.directory);
+    if stage.created_trash_root {
+        let _ = std::fs::remove_dir(&stage.trash_root);
+    }
+}
+
+/// The transfer committed; the displaced originals can now be discarded.
+fn discard_replacement_stage(stage: Option<&ReplacementStage>) -> Result<(), String> {
+    let Some(stage) = stage else {
+        return Ok(());
+    };
+    let cleanup_error = |error: &dyn std::fmt::Display| {
+        format!(
+            "replacement succeeded, but old items remain at {}: {error}",
+            stage.directory.display()
+        )
+    };
+    for item in stage.backups.iter().rev() {
+        let ownership = item
+            .ownership
+            .as_ref()
+            .ok_or_else(|| cleanup_error(&"missing backup ownership token"))?;
+        let quarantined =
+            quarantine_owned_entry(ownership).map_err(|error| cleanup_error(&error))?;
+        if let Err(error) = remove_owned_copy(&quarantined) {
+            restore_quarantined_entry(&quarantined, &item.backup);
+            return Err(cleanup_error(&error));
+        }
+    }
+    // Remove only an empty stage directory. Any concurrent extra entry remains
+    // recoverable and turns into a cleanup warning instead of being deleted.
+    std::fs::remove_dir(&stage.directory).map_err(|error| cleanup_error(&error))?;
+    if stage.created_trash_root {
+        let _ = std::fs::remove_dir(&stage.trash_root);
+    }
+    Ok(())
+}
+
+/// Grant the owner enough permission to delete a staged tree. Directory
+/// replacement can legitimately stage a read-only directory; removal must not
+/// follow symlinks or mutate their targets.
+fn make_tree_removable(path: &Path) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+    if metadata.is_dir() {
+        make_path_owner_writable(path, &metadata)?;
+        for entry in std::fs::read_dir(path)? {
+            make_tree_removable(&entry?.path())?;
+        }
+    } else {
+        make_path_owner_writable(path, &metadata)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn make_path_owner_writable(path: &Path, metadata: &std::fs::Metadata) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = metadata.permissions();
+    let mode = permissions.mode();
+    let required = if metadata.is_dir() { 0o700 } else { 0o600 };
+    if mode & required != required {
+        permissions.set_mode(mode | required);
+        std::fs::set_permissions(path, permissions)?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn make_path_owner_writable(path: &Path, metadata: &std::fs::Metadata) -> std::io::Result<()> {
+    let mut permissions = metadata.permissions();
+    if permissions.readonly() {
+        permissions.set_readonly(false);
+        std::fs::set_permissions(path, permissions)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn make_path_owner_writable(_path: &Path, _metadata: &std::fs::Metadata) -> std::io::Result<()> {
+    Ok(())
+}
+
+fn existing_entry_path_with_disk_case(path: &Path) -> PathBuf {
+    let (Some(parent), Some(requested_name)) = (path.parent(), path.file_name()) else {
+        return path.to_path_buf();
+    };
+    let Ok(read) = std::fs::read_dir(parent) else {
+        return path.to_path_buf();
+    };
+    let candidates: Vec<PathBuf> = read
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect();
+    if let Some(exact) = candidates
+        .iter()
+        .find(|candidate| candidate.file_name() == Some(requested_name))
+    {
+        return exact.clone();
+    }
+    if let Some(same) = candidates
+        .iter()
+        .find(|candidate| same_filesystem_entry(candidate, path))
+    {
+        return same.clone();
+    }
+    // Fallback for platforms where file identity is unavailable and a broken
+    // symlink cannot be canonicalized. This branch is reached only after
+    // symlink_metadata(path) proved that the requested spelling resolves.
+    let requested = requested_name.to_string_lossy();
+    candidates
+        .into_iter()
+        .find(|candidate| {
+            candidate
+                .file_name()
+                .map(|name| name.to_string_lossy().eq_ignore_ascii_case(&requested))
+                .unwrap_or(false)
+        })
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
+#[cfg(unix)]
+fn same_filesystem_entry(left: &Path, right: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let (Ok(left), Ok(right)) = (
+        std::fs::symlink_metadata(left),
+        std::fs::symlink_metadata(right),
+    ) else {
+        return false;
+    };
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(not(unix))]
+fn same_filesystem_entry(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn destination_conflict_error(paths: &[String]) -> String {
+    // String serialization cannot fail, but keep a non-structured fallback so
+    // an impossible serializer failure still reports the underlying problem.
+    let encoded = serde_json::to_string(paths).unwrap_or_else(|_| "[]".to_string());
+    format!("destination conflict: already exists: {encoded}")
+}
+
+fn conflict_paths_are_approved(current: &[String], approved: &[String]) -> bool {
+    let approved: HashSet<&String> = approved.iter().collect();
+    current.iter().all(|path| approved.contains(path))
+}
+
+fn reject_sources_inside_replaced_destinations(
+    planned: &[(PathBuf, PathBuf, bool, bool)],
+) -> Result<(), String> {
+    // Resolve the actual on-disk spelling for both sides before the lexical
+    // containment check. On a case-insensitive filesystem, a planned
+    // destination such as `Container` can resolve to an existing `container`;
+    // comparing the requested spellings would miss a source nested in the
+    // entry that replacement staging is about to move out of the way.
+    let replaced_destinations: Vec<PathBuf> = planned
+        .iter()
+        .filter(|(_, _, _, exists)| *exists)
+        .map(|(_, destination, _, _)| existing_entry_path_with_disk_case(destination))
+        .collect();
+    for (source, _, _, _) in planned {
+        let comparable_source =
+            existing_entry_path_with_disk_case(&canonical_entry_path_without_following(source));
+        if let Some(destination) = replaced_destinations
+            .iter()
+            .find(|destination| comparable_source.starts_with(destination.as_path()))
+        {
+            return Err(format!(
+                "source is inside a destination that would be replaced: {} inside {}",
+                source.display(),
+                destination.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn canonical_entry_path_without_following(path: &Path) -> PathBuf {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return path.to_path_buf();
+    };
+    parent
+        .canonicalize()
+        .map(|parent| parent.join(name))
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
+#[cfg(test)]
 fn move_paths_impl(
     root: &Path,
     paths: Vec<String>,
     destination_dir: &Path,
+) -> Result<Vec<MovedPathDto>, String> {
+    move_paths_impl_with_replace(root, paths, destination_dir, false, None)
+}
+
+fn move_paths_impl_with_replace(
+    root: &Path,
+    paths: Vec<String>,
+    destination_dir: &Path,
+    replace_existing: bool,
+    expected_conflict_paths: Option<&[String]>,
 ) -> Result<Vec<MovedPathDto>, String> {
     let requested_root = root.to_path_buf();
     let root = canonical_dir(root)?;
@@ -396,6 +1241,7 @@ fn move_paths_impl(
 
     let mut planned = Vec::new();
     let mut destinations = HashSet::new();
+    let mut conflicts = Vec::new();
     for target in targets {
         let parent = target
             .path
@@ -416,21 +1262,40 @@ fn move_paths_impl(
             .file_name()
             .ok_or_else(|| format!("cannot determine file name for {}", target.path.display()))?;
         let to = destination.join(name);
+        reject_workspace_trash_destination(&root, &to)?;
         if !destinations.insert(to.clone()) {
             return Err(format!(
                 "multiple moved items would overwrite {}",
                 to.display()
             ));
         }
-        if path_entry_exists(&to) {
-            return Err(format!("already exists: {}", to.display()));
+        let replaced = path_entry_exists(&to);
+        if replaced {
+            let existing = existing_entry_path_with_disk_case(&to);
+            conflicts.push(path_for_requested_root(&root, &requested_root, &existing));
         }
-        planned.push((target.path.clone(), to, target.is_dir));
+        planned.push((target.path.clone(), to, target.is_dir, replaced));
     }
 
+    reject_sources_inside_replaced_destinations(&planned)?;
+
+    if replace_existing {
+        if !conflict_paths_are_approved(&conflicts, expected_conflict_paths.unwrap_or(&[])) {
+            return Err(destination_conflict_error(&conflicts));
+        }
+    } else if !conflicts.is_empty() {
+        return Err(destination_conflict_error(&conflicts));
+    }
+
+    let replacement_stage = if replace_existing {
+        stage_existing_destinations(&root, &planned)?
+    } else {
+        None
+    };
+
     let mut moved = Vec::with_capacity(planned.len());
-    let mut done: Vec<(PathBuf, PathBuf)> = Vec::new();
-    for (from, to, is_dir) in planned {
+    let mut done: Vec<CompletedMove> = Vec::new();
+    for (from, to, is_dir, _had_conflict) in planned {
         // Re-check existence right before the move. The planning loop above ran
         // path_entry_exists BEFORE any move, so an earlier move in THIS batch may
         // have created `to`; and on a case-insensitive filesystem (macOS/Windows)
@@ -441,27 +1306,77 @@ fn move_paths_impl(
         // behavior, so it neither false-rejects on a case-sensitive FS nor misses
         // a collision on a case-insensitive one.
         if path_entry_exists(&to) {
+            let batch_collision = done
+                .iter()
+                .any(|item| same_filesystem_entry(&item.destination.path, &to));
             rollback_moves(&done);
-            return Err(format!("already exists: {}", to.display()));
+            rollback_replacement_stage(replacement_stage.as_ref());
+            if batch_collision {
+                return Err(format!(
+                    "multiple moved items would overwrite {}",
+                    to.display()
+                ));
+            }
+            let existing = existing_entry_path_with_disk_case(&to);
+            let conflict = path_for_requested_root(&root, &requested_root, &existing);
+            return Err(destination_conflict_error(&[conflict]));
         }
-        if let Err(e) = move_entry(&from, &to) {
+        let destination_ownership = match move_entry_owned(&from, &to) {
+            Ok(ownership) => ownership,
+            Err(e) => {
+                rollback_moves(&done);
+                rollback_replacement_stage(replacement_stage.as_ref());
+                return Err(format!("{} -> {}: {e}", from.display(), to.display()));
+            }
+        };
+        done.push(CompletedMove {
+            destination: destination_ownership,
+            source: from.clone(),
+        });
+        if path_starts_with_trash(&root, &to) {
             rollback_moves(&done);
-            return Err(format!("{} -> {}: {e}", from.display(), to.display()));
+            rollback_replacement_stage(replacement_stage.as_ref());
+            return Err(format!(
+                "refusing to create a Lyceum trash alias: {}",
+                to.display()
+            ));
         }
-        done.push((to.clone(), from.clone()));
+        let replaced_path = replacement_stage
+            .as_ref()
+            .and_then(|stage| stage.replaced_path_for(&to))
+            .map(|path| path_for_requested_root(&root, &requested_root, path));
         moved.push(MovedPathDto {
             from: path_for_requested_root(&root, &requested_root, &from),
             to: path_for_requested_root(&root, &requested_root, &to),
             is_dir,
+            replaced: replaced_path.is_some(),
+            replaced_path,
+            cleanup_warning: None,
         });
+    }
+    if let Err(warning) = discard_replacement_stage(replacement_stage.as_ref()) {
+        if let Some(first) = moved.first_mut() {
+            first.cleanup_warning = Some(warning);
+        }
     }
     Ok(moved)
 }
 
+#[cfg(test)]
 fn copy_paths_impl(
     root: &Path,
     paths: Vec<String>,
     destination_dir: &Path,
+) -> Result<Vec<MovedPathDto>, String> {
+    copy_paths_impl_with_replace(root, paths, destination_dir, false, None)
+}
+
+fn copy_paths_impl_with_replace(
+    root: &Path,
+    paths: Vec<String>,
+    destination_dir: &Path,
+    replace_existing: bool,
+    expected_conflict_paths: Option<&[String]>,
 ) -> Result<Vec<MovedPathDto>, String> {
     let requested_root = root.to_path_buf();
     let root = canonical_dir(root)?;
@@ -473,8 +1388,9 @@ fn copy_paths_impl(
     // Plan: resolve every source and its destination name, rejecting collisions
     // and duplicate destinations BEFORE copying anything, so an invalid drop
     // leaves the workspace untouched.
-    let mut planned: Vec<(PathBuf, PathBuf, bool)> = Vec::new();
+    let mut planned: Vec<(PathBuf, PathBuf, bool, bool)> = Vec::new();
     let mut destinations = HashSet::new();
+    let mut conflicts = Vec::new();
     for raw in paths {
         let source = absolute_lexical_path(Path::new(&raw));
         let source_meta =
@@ -488,8 +1404,24 @@ fn copy_paths_impl(
             source_file_type.is_dir()
         };
         // Copying a folder into itself or its own descendant would recurse
-        // forever as the copy keeps re-reading what it just wrote.
-        if is_dir && destination.starts_with(&source) {
+        // forever as the copy keeps re-reading what it just wrote. Resolve
+        // ancestor symlinks and case aliases for a REAL directory source; the
+        // destination itself exists and is already canonical. Do not resolve a
+        // final symlink entry because copy_recursive preserves that link rather
+        // than traversing its directory target.
+        let canonical_directory_source = if source_file_type.is_dir() {
+            Some(
+                source
+                    .canonicalize()
+                    .map_err(|e| format!("{}: {e}", source.display()))?,
+            )
+        } else {
+            None
+        };
+        if canonical_directory_source
+            .as_ref()
+            .is_some_and(|source| destination.starts_with(source))
+        {
             return Err(format!(
                 "cannot copy a folder into itself: {} -> {}",
                 source.display(),
@@ -500,48 +1432,179 @@ fn copy_paths_impl(
             .file_name()
             .ok_or_else(|| format!("cannot determine file name for {}", source.display()))?;
         let to = destination.join(name);
+        reject_workspace_trash_destination(&root, &to)?;
+        if path_entry_exists(&to) && same_filesystem_entry(&source, &to) {
+            return Err(format!(
+                "source and destination are the same filesystem entry: {}",
+                source.display()
+            ));
+        }
         if !destinations.insert(to.clone()) {
             return Err(format!("multiple items would overwrite {}", to.display()));
         }
-        if path_entry_exists(&to) {
-            return Err(format!("already exists: {}", to.display()));
+        let replaced = path_entry_exists(&to);
+        if replaced {
+            let existing = existing_entry_path_with_disk_case(&to);
+            conflicts.push(path_for_requested_root(&root, &requested_root, &existing));
         }
-        planned.push((source, to, is_dir));
+        planned.push((source, to, is_dir, replaced));
     }
+
+    reject_sources_inside_replaced_destinations(&planned)?;
+
+    if replace_existing {
+        if !conflict_paths_are_approved(&conflicts, expected_conflict_paths.unwrap_or(&[])) {
+            return Err(destination_conflict_error(&conflicts));
+        }
+    } else if !conflicts.is_empty() {
+        return Err(destination_conflict_error(&conflicts));
+    }
+
+    let replacement_stage = if replace_existing {
+        stage_existing_destinations(&root, &planned)?
+    } else {
+        None
+    };
 
     let mut copied = Vec::with_capacity(planned.len());
     // Destinations created so far; on any failure they're removed so a partial
     // multi-item import leaves nothing stray behind. The sources are external
     // and never touched, so removing the copies is always safe.
-    let mut done: Vec<PathBuf> = Vec::new();
-    for (from, to, is_dir) in planned {
+    let mut done: Vec<OwnedEntry> = Vec::new();
+    for (from, to, is_dir, _had_conflict) in planned {
         // Re-check right before copying: an earlier copy in THIS batch, or a
         // case-insensitive FS folding two names together (note.txt vs NOTE.txt),
         // may have created `to` after the planning loop's check.
         if path_entry_exists(&to) {
+            let batch_collision = done
+                .iter()
+                .any(|destination| same_filesystem_entry(&destination.path, &to));
             rollback_copies(&done);
-            return Err(format!("already exists: {}", to.display()));
+            rollback_replacement_stage(replacement_stage.as_ref());
+            if batch_collision {
+                return Err(format!("multiple items would overwrite {}", to.display()));
+            }
+            let existing = existing_entry_path_with_disk_case(&to);
+            let conflict = path_for_requested_root(&root, &requested_root, &existing);
+            return Err(destination_conflict_error(&[conflict]));
         }
-        if let Err(e) = copy_recursive(&from, &to) {
-            let _ = remove_entry(&to);
+        let owned_copy = match copy_entry_owned(&from, &to) {
+            Ok(owned_copy) => owned_copy,
+            Err(e) => {
+                rollback_copies(&done);
+                rollback_replacement_stage(replacement_stage.as_ref());
+                return Err(format!("{} -> {}: {e}", from.display(), to.display()));
+            }
+        };
+        done.push(owned_copy);
+        if path_starts_with_trash(&root, &to) {
             rollback_copies(&done);
-            return Err(format!("{} -> {}: {e}", from.display(), to.display()));
+            rollback_replacement_stage(replacement_stage.as_ref());
+            return Err(format!(
+                "refusing to create a Lyceum trash alias: {}",
+                to.display()
+            ));
         }
-        done.push(to.clone());
+        let replaced_path = replacement_stage
+            .as_ref()
+            .and_then(|stage| stage.replaced_path_for(&to))
+            .map(|path| path_for_requested_root(&root, &requested_root, path));
         copied.push(MovedPathDto {
             from: from.to_string_lossy().to_string(),
             to: path_for_requested_root(&root, &requested_root, &to),
             is_dir,
+            replaced: replaced_path.is_some(),
+            replaced_path,
+            cleanup_warning: None,
         });
+    }
+    if let Err(warning) = discard_replacement_stage(replacement_stage.as_ref()) {
+        if let Some(first) = copied.first_mut() {
+            first.cleanup_warning = Some(warning);
+        }
     }
     Ok(copied)
 }
 
 /// Remove already-copied destinations to undo a partially-failed import.
-fn rollback_copies(done: &[PathBuf]) {
+fn rollback_copies(done: &[OwnedEntry]) {
+    rollback_copies_with_hook(done, |_owned, _quarantined| {});
+}
+
+fn rollback_copies_with_hook(
+    done: &[OwnedEntry],
+    mut after_quarantine: impl FnMut(&OwnedEntry, &Path),
+) {
     for dest in done.iter().rev() {
-        let _ = remove_entry(dest);
+        let Ok(quarantined) = quarantine_owned_entry(dest) else {
+            continue;
+        };
+        after_quarantine(dest, &quarantined);
+        if let Err(_error) = remove_owned_copy(&quarantined) {
+            restore_quarantined_entry(&quarantined, &dest.path);
+        }
     }
+}
+
+/// Atomically move the current pathname into a unique sibling before checking
+/// ownership. If another actor replaced the path before this rename, the token
+/// fails at the quarantine name and the entry is restored rather than deleted
+/// or moved as ours. A new entry created at the original name after quarantine
+/// is never touched by rollback.
+fn quarantine_owned_entry(owned: &OwnedEntry) -> std::io::Result<PathBuf> {
+    if owned.tree.is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "rollback ownership could not be captured",
+        ));
+    }
+    let parent = owned
+        .path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    const MAX_ATTEMPTS: usize = 128;
+    for _ in 0..MAX_ATTEMPTS {
+        let sequence = ROLLBACK_STAGE_SEQ.fetch_add(1, Ordering::Relaxed);
+        let quarantined = parent.join(format!(
+            ".lyceum-rollback.{}.{sequence}",
+            std::process::id()
+        ));
+        match rename_noreplace(&owned.path, &quarantined) {
+            Ok(()) => {
+                if owned.is_still_owned_at(&quarantined) {
+                    return Ok(quarantined);
+                }
+                restore_quarantined_entry(&quarantined, &owned.path);
+                return Err(std::io::Error::other(
+                    "rollback path no longer contains the owned entry tree",
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not claim a unique rollback quarantine path",
+    ))
+}
+
+fn restore_quarantined_entry(quarantined: &Path, original: &Path) {
+    // No-replace restoration protects an entry that appeared at `original`
+    // while rollback inspected the quarantine. If occupied, retain the
+    // quarantined data under its unique recovery name instead of overwriting.
+    let _ = rename_noreplace(quarantined, original);
+}
+
+fn remove_owned_copy(path: &Path) -> std::io::Result<()> {
+    // A completed copied directory already has the source's permissions. If that
+    // source was read-only, a later batch failure cannot traverse/unlink it until
+    // owner write/execute bits are restored. This path is owned by the current
+    // copy (its root was claimed with create_dir/create_new), so preparing it for
+    // rollback cannot affect a pre-existing destination.
+    make_tree_removable(path)?;
+    remove_entry(path)
 }
 
 fn restore_trash_batch_impl(root: &Path, items: Vec<TrashItemDto>) -> Result<(), String> {
@@ -572,7 +1635,7 @@ fn restore_trash_batch_impl(root: &Path, items: Vec<TrashItemDto>) -> Result<(),
             ));
         }
     }
-    let mut done: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut done: Vec<CompletedMove> = Vec::new();
     for item in &items {
         let original = workspace_path_for_canonical_root(
             &root,
@@ -608,15 +1671,21 @@ fn restore_trash_batch_impl(root: &Path, items: Vec<TrashItemDto>) -> Result<(),
                 original.display()
             ));
         }
-        if let Err(e) = move_entry(&trashed, &original) {
-            rollback_moves(&done);
-            return Err(format!(
-                "{} -> {}: {e}",
-                trashed.display(),
-                original.display()
-            ));
-        }
-        done.push((original.clone(), trashed.clone()));
+        let destination_ownership = match move_entry_owned(&trashed, &original) {
+            Ok(ownership) => ownership,
+            Err(e) => {
+                rollback_moves(&done);
+                return Err(format!(
+                    "{} -> {}: {e}",
+                    trashed.display(),
+                    original.display()
+                ));
+            }
+        };
+        done.push(CompletedMove {
+            destination: destination_ownership,
+            source: trashed.clone(),
+        });
         cleanup_empty_trash_ancestors(&root, &trashed);
     }
     Ok(())
@@ -650,7 +1719,7 @@ fn redo_trash_batch_impl(root: &Path, items: Vec<TrashItemDto>) -> Result<(), St
             ));
         }
     }
-    let mut done: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let mut done: Vec<CompletedMove> = Vec::new();
     for item in &items {
         let original = workspace_path_for_canonical_root(
             &root,
@@ -686,15 +1755,21 @@ fn redo_trash_batch_impl(root: &Path, items: Vec<TrashItemDto>) -> Result<(), St
                 trashed.display()
             ));
         }
-        if let Err(e) = move_entry(&original, &trashed) {
-            rollback_moves(&done);
-            return Err(format!(
-                "{} -> {}: {e}",
-                original.display(),
-                trashed.display()
-            ));
-        }
-        done.push((trashed.clone(), original.clone()));
+        let destination_ownership = match move_entry_owned(&original, &trashed) {
+            Ok(ownership) => ownership,
+            Err(e) => {
+                rollback_moves(&done);
+                return Err(format!(
+                    "{} -> {}: {e}",
+                    original.display(),
+                    trashed.display()
+                ));
+            }
+        };
+        done.push(CompletedMove {
+            destination: destination_ownership,
+            source: original.clone(),
+        });
     }
     Ok(())
 }
@@ -731,24 +1806,185 @@ fn is_cross_device(e: &std::io::Error) -> bool {
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub(crate) fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let from = CString::new(from.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "source path contains NUL")
+    })?;
+    let to = CString::new(to.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "destination path contains NUL",
+        )
+    })?;
+    // SAFETY: both pointers are valid NUL-terminated path strings for the
+    // duration of the call. RENAME_EXCL asks the kernel to fail atomically if
+    // the destination entry already exists.
+    let result = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(crate) fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let from = CString::new(from.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "source path contains NUL")
+    })?;
+    let to = CString::new(to.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "destination path contains NUL",
+        )
+    })?;
+    // SAFETY: the C strings remain alive for the call; renameat2 does not retain
+    // either pointer. RENAME_NOREPLACE makes the final existence check atomic.
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            from.as_ptr(),
+            libc::AT_FDCWD,
+            to.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn MoveFileExW(
+            existing_file_name: *const u16,
+            new_file_name: *const u16,
+            flags: u32,
+        ) -> i32;
+    }
+
+    fn wide_path(path: &Path) -> std::io::Result<Vec<u16>> {
+        let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+        if wide.contains(&0) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "path contains NUL",
+            ));
+        }
+        wide.push(0);
+        Ok(wide)
+    }
+
+    let from = wide_path(from)?;
+    let to = wide_path(to)?;
+    // Zero flags deliberately omits MOVEFILE_REPLACE_EXISTING. MoveFileExW then
+    // atomically fails with ERROR_ALREADY_EXISTS/ERROR_FILE_EXISTS if `to` is
+    // occupied, unlike modern std::fs::rename which may replace it on Windows.
+    // SAFETY: both vectors are live, NUL-terminated UTF-16 strings and the API
+    // retains neither pointer after returning.
+    let result = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) };
+    if result != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "linux",
+    target_os = "android",
+    windows
+)))]
+pub(crate) fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
+    let _ = (from, to);
+    // No portable no-replace rename exists in std. Never fall back to a racy
+    // check followed by std::fs::rename (which overwrites on Unix); signal the
+    // caller to use the slower create_new/create_dir copy+delete path instead.
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "atomic no-replace rename is unavailable on this platform",
+    ))
+}
+
+fn no_replace_rename_unavailable(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::Unsupported {
+        return true;
+    }
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        matches!(error.raw_os_error(), Some(libc::ENOTSUP | libc::EINVAL))
+    }
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        matches!(
+            error.raw_os_error(),
+            Some(libc::ENOSYS | libc::ENOTSUP | libc::EINVAL)
+        )
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "linux",
+        target_os = "android"
+    )))]
+    {
+        let _ = error;
+        false
+    }
+}
+
 /// Move `from` to `to`, preferring an atomic rename and falling back to a
 /// recursive copy + delete when the two live on different filesystems (a
 /// workspace that spans a mount point). Symlinks are recreated as symlinks
 /// (the link itself moves, never its target), matching the rename semantics the
 /// rest of the module relies on.
-fn move_entry(from: &Path, to: &Path) -> std::io::Result<()> {
-    match std::fs::rename(from, to) {
-        Ok(()) => Ok(()),
-        Err(e) if is_cross_device(&e) => {
-            if let Err(copy_err) = copy_recursive(from, to) {
-                // The copy failed partway and the source is untouched (removal
-                // happens only below). Remove any partial destination so callers
-                // see no stray copy — and so the trash path's "kept a copy?" check
-                // (symlink_metadata(destination)) only ever sees a DELIBERATELY
-                // kept complete copy, never this benign partial one.
-                let _ = remove_entry(to);
-                return Err(copy_err);
+fn move_entry_owned(from: &Path, to: &Path) -> std::io::Result<OwnedEntry> {
+    let mut source_ownership = OwnedEntry::try_capture(from.to_path_buf())?;
+    match rename_noreplace(from, to) {
+        Ok(()) => {
+            source_ownership.path = to.to_path_buf();
+            Ok(source_ownership)
+        }
+        Err(error) if is_cross_device(&error) || no_replace_rename_unavailable(&error) => {
+            let destination_ownership = copy_entry_owned(from, to)?;
+            if let Err(remove_error) = remove_entry(from) {
+                let copied_is_dir = std::fs::symlink_metadata(to)
+                    .map(|metadata| metadata.file_type().is_dir())
+                    .unwrap_or(false);
+                if !copied_is_dir {
+                    rollback_copies(std::slice::from_ref(&destination_ownership));
+                }
+                return Err(remove_error);
             }
+            Ok(destination_ownership)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn move_entry(from: &Path, to: &Path) -> std::io::Result<()> {
+    match rename_noreplace(from, to) {
+        Ok(()) => Ok(()),
+        Err(e) if is_cross_device(&e) || no_replace_rename_unavailable(&e) => {
+            // Publish a fully captured copy so cleanup after a source-removal
+            // failure can prove destination ownership instead of deleting by
+            // pathname alone.
+            let destination_ownership = copy_entry_owned(from, to)?;
             // If the source can't be removed after a successful copy, the data
             // would otherwise exist at BOTH paths while the move reports failure
             // (callers' rollback only reverses moves already recorded as done,
@@ -764,9 +2000,11 @@ fn move_entry(from: &Path, to: &Path) -> std::io::Result<()> {
                 let copied_is_dir = std::fs::symlink_metadata(to)
                     .map(|m| m.file_type().is_dir())
                     .unwrap_or(false);
-                if !copied_is_dir {
-                    let _ = remove_entry(to);
-                }
+                cleanup_failed_cross_device_destination(
+                    &destination_ownership,
+                    copied_is_dir,
+                    |_destination| {},
+                );
                 return Err(remove_err);
             }
             Ok(())
@@ -775,26 +2013,165 @@ fn move_entry(from: &Path, to: &Path) -> std::io::Result<()> {
     }
 }
 
+fn cleanup_failed_cross_device_destination(
+    destination: &OwnedEntry,
+    copied_is_dir: bool,
+    before_cleanup: impl FnOnce(&Path),
+) {
+    before_cleanup(&destination.path);
+    if !copied_is_dir {
+        rollback_copies(std::slice::from_ref(destination));
+    }
+}
+
+/// Build a top-level copy under a unique sibling name, snapshot every owned
+/// entry there, then publish it with an atomic no-replace rename. The snapshot
+/// therefore exists before external actors can reach the requested destination,
+/// closing the copy-complete-to-token-capture race.
+fn copy_entry_owned(from: &Path, to: &Path) -> std::io::Result<OwnedEntry> {
+    let parent = to
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    const MAX_ATTEMPTS: usize = 128;
+    for _ in 0..MAX_ATTEMPTS {
+        let sequence = COPY_STAGE_SEQ.fetch_add(1, Ordering::Relaxed);
+        let staging_directory =
+            parent.join(format!(".lyceum-copy.{}.{sequence}", std::process::id()));
+        match std::fs::create_dir(&staging_directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+        let staged = staging_directory.join("entry");
+        if let Err(error) = copy_recursive(from, &staged) {
+            let _ = remove_owned_copy(&staging_directory);
+            return Err(error);
+        }
+        let mut owned = match OwnedEntry::try_capture(staged.clone()) {
+            Ok(owned) => owned,
+            Err(error) => {
+                let _ = remove_owned_copy(&staging_directory);
+                return Err(error);
+            }
+        };
+        if let Err(error) = rename_noreplace(&staged, to) {
+            let _ = remove_owned_copy(&staging_directory);
+            return Err(error);
+        }
+        let _ = std::fs::remove_dir(&staging_directory);
+        owned.path = to.to_path_buf();
+        return Ok(owned);
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not claim a unique copy staging path",
+    ))
+}
+
 fn copy_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
     let meta = std::fs::symlink_metadata(from)?;
     let ft = meta.file_type();
     if ft.is_symlink() {
         let target = std::fs::read_link(from)?;
-        symlink_to(&target, to)
+        symlink_to(&target, to, copied_symlink_kind(from))
     } else if ft.is_dir() {
-        std::fs::create_dir_all(to)?;
-        for entry in std::fs::read_dir(from)? {
-            let entry = entry?;
-            copy_recursive(&entry.path(), &to.join(entry.file_name()))?;
+        // `create_dir` atomically claims the destination root; create_dir_all
+        // would merge into a concurrently-created directory.
+        std::fs::create_dir(to)?;
+        let result = (|| {
+            for entry in std::fs::read_dir(from)? {
+                let entry = entry?;
+                copy_recursive(&entry.path(), &to.join(entry.file_name()))?;
+            }
+            std::fs::set_permissions(to, meta.permissions())?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = remove_owned_copy(to);
+        }
+        result
+    } else if ft.is_file() {
+        let mut source = std::fs::File::open(from)?;
+        let mut destination = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(to)?;
+        let result = (|| {
+            std::io::copy(&mut source, &mut destination)?;
+            destination.sync_all()?;
+            Ok(())
+        })();
+        drop(destination);
+        if let Err(error) = result {
+            let _ = std::fs::remove_file(to);
+            return Err(error);
+        }
+        if let Err(error) = std::fs::set_permissions(to, meta.permissions()) {
+            let _ = std::fs::remove_file(to);
+            return Err(error);
         }
         Ok(())
     } else {
-        std::fs::copy(from, to).map(|_| ())
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!("unsupported filesystem entry: {}", from.display()),
+        ))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CopiedSymlinkKind {
+    File,
+    Directory,
+}
+
+#[cfg(not(windows))]
+fn copied_symlink_kind(source_link: &Path) -> CopiedSymlinkKind {
+    // `metadata(source_link)` follows a relative link from the SOURCE link's
+    // parent, which is the only correct basis for choosing Windows' distinct
+    // symlink_file/symlink_dir APIs. A broken link has no discoverable target
+    // kind through portable std APIs; preserve the historical file-link fallback.
+    if std::fs::metadata(source_link)
+        .map(|metadata| metadata.is_dir())
+        .unwrap_or(false)
+    {
+        CopiedSymlinkKind::Directory
+    } else {
+        CopiedSymlinkKind::File
+    }
+}
+
+#[cfg(windows)]
+fn copied_symlink_kind(source_link: &Path) -> CopiedSymlinkKind {
+    use std::os::windows::fs::FileTypeExt;
+
+    let file_type = match std::fs::symlink_metadata(source_link) {
+        Ok(metadata) => metadata.file_type(),
+        Err(_) => return CopiedSymlinkKind::File,
+    };
+    if file_type.is_symlink_dir() {
+        CopiedSymlinkKind::Directory
+    } else {
+        // Includes symlink_file and an explicitly documented conservative
+        // fallback for an unrecognized reparse-point kind.
+        CopiedSymlinkKind::File
     }
 }
 
 fn remove_entry(path: &Path) -> std::io::Result<()> {
     let meta = std::fs::symlink_metadata(path)?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileTypeExt;
+
+        // A Windows directory symlink is a symlink (so generic is_dir() is
+        // false) but DeleteFile/remove_file rejects its directory link kind.
+        // RemoveDirectory removes the link entry itself and never its target.
+        if meta.file_type().is_symlink_dir() {
+            return std::fs::remove_dir(path);
+        }
+    }
     if meta.file_type().is_dir() {
         std::fs::remove_dir_all(path)
     } else {
@@ -803,25 +2180,20 @@ fn remove_entry(path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(unix)]
-fn symlink_to(target: &Path, link: &Path) -> std::io::Result<()> {
+fn symlink_to(target: &Path, link: &Path, _kind: CopiedSymlinkKind) -> std::io::Result<()> {
     std::os::unix::fs::symlink(target, link)
 }
 
 #[cfg(windows)]
-fn symlink_to(target: &Path, link: &Path) -> std::io::Result<()> {
-    // Pick the right Windows symlink kind from the resolved target.
-    if std::fs::metadata(target)
-        .map(|m| m.is_dir())
-        .unwrap_or(false)
-    {
-        std::os::windows::fs::symlink_dir(target, link)
-    } else {
-        std::os::windows::fs::symlink_file(target, link)
+fn symlink_to(target: &Path, link: &Path, kind: CopiedSymlinkKind) -> std::io::Result<()> {
+    match kind {
+        CopiedSymlinkKind::Directory => std::os::windows::fs::symlink_dir(target, link),
+        CopiedSymlinkKind::File => std::os::windows::fs::symlink_file(target, link),
     }
 }
 
 #[cfg(not(any(unix, windows)))]
-fn symlink_to(_target: &Path, _link: &Path) -> std::io::Result<()> {
+fn symlink_to(_target: &Path, _link: &Path, _kind: CopiedSymlinkKind) -> std::io::Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "symlinks unsupported on this platform",
@@ -831,12 +2203,17 @@ fn symlink_to(_target: &Path, _link: &Path) -> std::io::Result<()> {
 /// Reverse a sequence of completed moves `(dest, source)` by moving each
 /// `dest` back to `source` (newest first). Best-effort cleanup used to keep
 /// trash/restore/redo all-or-nothing on a mid-batch failure.
-fn rollback_moves(done: &[(PathBuf, PathBuf)]) {
-    for (dest, source) in done.iter().rev() {
-        if let Some(parent) = source.parent() {
+fn rollback_moves(done: &[CompletedMove]) {
+    for item in done.iter().rev() {
+        let Ok(quarantined) = quarantine_owned_entry(&item.destination) else {
+            continue;
+        };
+        if let Some(parent) = item.source.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = move_entry(dest, source);
+        if move_entry(&quarantined, &item.source).is_err() {
+            restore_quarantined_entry(&quarantined, &item.destination.path);
+        }
     }
 }
 
@@ -964,6 +2341,53 @@ fn validate_move_destination(root: &Path, destination: &Path) -> Result<(), Stri
     Ok(())
 }
 
+fn validate_workspace_mutation_destination(root: &Path, target: &Path) -> Result<(), String> {
+    let effective = canonicalize_existing_ancestors_preserving_final_name(target)?;
+    validate_workspace_path_no_traversal(root, &effective, "workspace destination")?;
+    reject_workspace_trash_destination(root, &effective)
+}
+
+/// Resolve every currently existing parent component, but keep the requested
+/// leaf spelling. This closes parent-symlink boundary bypasses without turning
+/// a case-only rename destination back into the source's current disk case.
+fn canonicalize_existing_ancestors_preserving_final_name(path: &Path) -> Result<PathBuf, String> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| format!("cannot determine file name for {}", path.display()))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("cannot determine parent for {}", path.display()))?;
+    let mut existing = parent;
+    while !path_entry_exists(existing) {
+        existing = existing
+            .parent()
+            .ok_or_else(|| format!("no existing ancestor for {}", path.display()))?;
+    }
+    let canonical = existing
+        .canonicalize()
+        .map_err(|error| format!("{}: {error}", existing.display()))?;
+    let missing = parent
+        .strip_prefix(existing)
+        .map_err(|error| format!("{}: {error}", parent.display()))?;
+    Ok(canonical.join(missing).join(name))
+}
+
+fn reject_workspace_trash_destination(root: &Path, target: &Path) -> Result<(), String> {
+    let reserved = path_would_be_workspace_trash(root, target).map_err(|error| {
+        format!(
+            "could not validate reserved workspace path {}: {error}",
+            target.display()
+        )
+    })?;
+    if reserved {
+        return Err(format!(
+            "refusing to create or replace Lyceum trash: {}",
+            target.display()
+        ));
+    }
+    Ok(())
+}
+
 fn validate_restore_pair(root: &Path, original: &Path, trashed: &Path) -> Result<(), String> {
     validate_workspace_path_no_traversal(root, original, "restore destination")?;
     validate_workspace_path_no_traversal(root, trashed, "trash item")?;
@@ -1041,11 +2465,11 @@ fn validate_workspace_path_no_traversal(
 }
 
 fn path_starts_with_trash(root: &Path, path: &Path) -> bool {
-    path.strip_prefix(root)
-        .ok()
-        .and_then(|relative| relative.components().next())
-        .map(|component| component.as_os_str() == LYCEUM_TRASH_DIR)
-        .unwrap_or(false)
+    path_starts_with_workspace_trash(root, path)
+}
+
+fn is_trash_entry_for_workspace(root: &Path, entry: &Path, _name: &str) -> bool {
+    path_resolves_into_workspace_trash(root, entry)
 }
 
 fn path_for_requested_root(canonical_root: &Path, requested_root: &Path, path: &Path) -> String {
@@ -1119,6 +2543,603 @@ fn cleanup_empty_trash_ancestors(root: &Path, path: &Path) {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn move_entry_never_overwrites_an_existing_destination() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let source = tmp.path().join("source.txt");
+        let destination = tmp.path().join("destination.txt");
+        fs::write(&source, b"source").unwrap();
+        fs::write(&destination, b"destination must survive").unwrap();
+
+        let error = move_entry(&source, &destination)
+            .expect_err("a no-replace move must reject an occupied destination");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&source).unwrap(), b"source");
+        assert_eq!(fs::read(&destination).unwrap(), b"destination must survive");
+    }
+
+    #[test]
+    fn windows_noreplace_source_uses_movefile_without_replace_flag() {
+        // This host-independent guard covers the Windows-only cfg branch in
+        // local macOS/Linux runs; Windows CI additionally executes the behavior
+        // test above.
+        let source = include_str!("fs_ops.rs");
+        let start = source
+            .find("#[cfg(windows)]\npub(crate) fn rename_noreplace")
+            .expect("Windows no-replace branch");
+        let end = source[start..]
+            .find("#[cfg(not(any(")
+            .map(|offset| start + offset)
+            .expect("end of Windows branch");
+        let implementation = &source[start..end];
+
+        assert!(implementation.contains("MoveFileExW"));
+        assert!(implementation.contains("to.as_ptr(), 0"));
+        assert!(!implementation.contains("std::fs::rename(from, to)"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recursive_copy_never_follows_an_existing_destination_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let source = tmp.path().join("source.txt");
+        let outside = tmp.path().join("outside.txt");
+        let destination = tmp.path().join("destination.txt");
+        fs::write(&source, b"source").unwrap();
+        fs::write(&outside, b"outside must survive").unwrap();
+        symlink(&outside, &destination).unwrap();
+
+        copy_recursive(&source, &destination)
+            .expect_err("copy must atomically reject an occupied destination entry");
+
+        assert_eq!(fs::read(&outside).unwrap(), b"outside must survive");
+        assert!(fs::symlink_metadata(&destination)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_directory_symlink_kind_is_resolved_from_source_parent() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let source_parent = tmp.path().join("source");
+        fs::create_dir(&source_parent).unwrap();
+        fs::create_dir(source_parent.join("target-directory")).unwrap();
+        let source_link = source_parent.join("relative-link");
+        symlink("target-directory", &source_link).unwrap();
+
+        assert_eq!(
+            copied_symlink_kind(&source_link),
+            CopiedSymlinkKind::Directory
+        );
+    }
+
+    #[test]
+    fn windows_symlink_kind_source_reads_the_source_reparse_type() {
+        let source = include_str!("fs_ops.rs");
+        let start = source
+            .find("#[cfg(windows)]\nfn copied_symlink_kind")
+            .expect("Windows symlink-kind branch");
+        let end = source[start..]
+            .find("#[cfg(unix)]\nfn symlink_to")
+            .map(|offset| start + offset)
+            .expect("end of Windows symlink-kind branch");
+        let implementation = &source[start..end];
+
+        assert!(implementation.contains("FileTypeExt"));
+        assert!(implementation.contains("symlink_metadata(source_link)"));
+        assert!(implementation.contains("is_symlink_dir()"));
+        assert!(!implementation.contains("metadata(target)"));
+    }
+
+    #[test]
+    fn windows_directory_symlink_removal_source_uses_remove_directory() {
+        // Host-independent coverage for the Windows-only branch. Windows CI's
+        // runtime test below verifies the actual filesystem behavior whenever
+        // the runner permits creating symlinks.
+        let source = include_str!("fs_ops.rs");
+        let start = source
+            .find("fn remove_entry(path: &Path)")
+            .expect("remove-entry implementation");
+        let end = source[start..]
+            .find("#[cfg(unix)]\nfn symlink_to")
+            .map(|offset| start + offset)
+            .expect("end of remove-entry implementation");
+        let implementation = &source[start..end];
+
+        assert!(implementation.contains("FileTypeExt"));
+        assert!(implementation.contains("is_symlink_dir()"));
+        assert!(implementation.contains("std::fs::remove_dir(path)"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn remove_entry_deletes_a_directory_symlink_without_touching_its_target() {
+        use std::os::windows::fs::symlink_dir;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let target = tmp.path().join("target");
+        let link = tmp.path().join("directory-link");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("kept.txt"), b"must survive").unwrap();
+        if let Err(error) = symlink_dir(&target, &link) {
+            // Developer Mode or SeCreateSymbolicLinkPrivilege may be absent on
+            // a Windows CI host; the source guard remains mandatory coverage.
+            if error.kind() == std::io::ErrorKind::PermissionDenied {
+                return;
+            }
+            panic!("create directory symlink: {error}");
+        }
+
+        remove_entry(&link).expect("remove directory link entry");
+
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        assert_eq!(fs::read(target.join("kept.txt")).unwrap(), b"must survive");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recursive_copy_rejects_non_regular_special_files() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::sync::mpsc::RecvTimeoutError;
+        use std::time::Duration;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let source = tmp.path().join("source.fifo");
+        let destination = tmp.path().join("fifo-copy");
+        let source_c = CString::new(source.as_os_str().as_bytes()).unwrap();
+        // SAFETY: source_c is a valid NUL-terminated path and mkfifo retains no
+        // pointer after it returns.
+        assert_eq!(unsafe { libc::mkfifo(source_c.as_ptr(), 0o600) }, 0);
+
+        let source_for_copy = source.clone();
+        let destination_for_copy = destination.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let _ = tx.send(copy_recursive(&source_for_copy, &destination_for_copy));
+        });
+
+        let result = match rx.recv_timeout(Duration::from_millis(250)) {
+            Ok(result) => result,
+            Err(RecvTimeoutError::Timeout) => {
+                // Old behavior reached std::fs::copy and blocked opening the FIFO.
+                // Open its writer to release that owned test thread, then fail with
+                // direct evidence that the copy path was not bounded.
+                let writer = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&source)
+                    .unwrap();
+                drop(writer);
+                let _ = rx.recv_timeout(Duration::from_secs(2));
+                let _ = handle.join();
+                panic!("copying a FIFO blocked instead of rejecting its file type");
+            }
+            Err(RecvTimeoutError::Disconnected) => panic!("copy worker disconnected"),
+        };
+        handle.join().unwrap();
+
+        let error =
+            result.expect_err("copying a device as if it were a regular file must be rejected");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        assert!(!destination.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_rollback_removes_a_completed_read_only_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let source = tmp.path().join("source");
+        let destination = tmp.path().join("destination");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("child.txt"), b"content").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o555)).unwrap();
+
+        copy_recursive(&source, &destination).expect("complete directory copy");
+        let completed = OwnedEntry::capture(destination.clone());
+        rollback_copies(std::slice::from_ref(&completed));
+
+        // Restore source permissions for TempDir cleanup.
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            !destination.exists(),
+            "rollback must not leave a partial copy"
+        );
+    }
+
+    #[test]
+    fn copy_rollback_does_not_delete_a_concurrent_replacement() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let destination = tmp.path().join("copied.txt");
+        fs::write(&destination, b"owned copy").unwrap();
+        let completed = OwnedEntry::capture(destination.clone());
+
+        fs::remove_file(&destination).unwrap();
+        fs::write(&destination, b"concurrent replacement").unwrap();
+        rollback_copies(std::slice::from_ref(&completed));
+
+        assert_eq!(
+            fs::read(&destination).unwrap(),
+            b"concurrent replacement",
+            "rollback must not delete an entry that no longer has our identity"
+        );
+    }
+
+    #[test]
+    fn copy_rollback_quarantines_before_a_new_destination_can_appear() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let destination = tmp.path().join("copied.txt");
+        fs::write(&destination, b"owned copy").unwrap();
+        let completed = OwnedEntry::capture(destination.clone());
+
+        rollback_copies_with_hook(std::slice::from_ref(&completed), |owned, _quarantined| {
+            // This is the old check/use window: rollback has atomically moved
+            // its owned entry away, then a concurrent actor claims the original.
+            fs::write(&owned.path, b"concurrent destination").unwrap();
+        });
+
+        assert_eq!(fs::read(&destination).unwrap(), b"concurrent destination");
+    }
+
+    #[test]
+    fn copy_rollback_preserves_a_directory_with_a_concurrent_child() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let destination = tmp.path().join("copied-directory");
+        fs::create_dir(&destination).unwrap();
+        fs::write(destination.join("owned.txt"), b"owned").unwrap();
+        let completed = OwnedEntry::capture(destination.clone());
+
+        fs::write(destination.join("concurrent.txt"), b"must survive").unwrap();
+        rollback_copies(std::slice::from_ref(&completed));
+
+        assert_eq!(
+            fs::read(destination.join("concurrent.txt")).unwrap(),
+            b"must survive"
+        );
+        assert_eq!(fs::read(destination.join("owned.txt")).unwrap(), b"owned");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn large_tree_ownership_token_pins_only_the_root_descriptor() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path().join("large-tree");
+        fs::create_dir(&root).unwrap();
+        for index in 0..1_024 {
+            fs::write(root.join(format!("file-{index}")), b"x").unwrap();
+        }
+
+        let owned = OwnedEntry::try_capture(root).expect("capture large tree");
+        let tree = owned.tree.as_ref().expect("complete ownership tree");
+
+        assert_eq!(tree.len(), 1_025);
+        assert!(tree[0].identity._handle.is_some());
+        assert!(tree[1..].iter().all(|node| node.identity._handle.is_none()));
+    }
+
+    #[test]
+    fn copy_rollback_preserves_a_file_modified_in_place() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let destination = tmp.path().join("copied.txt");
+        fs::write(&destination, b"owned").unwrap();
+        let completed = OwnedEntry::capture(destination.clone());
+
+        fs::write(&destination, b"concurrent longer content").unwrap();
+        rollback_copies(std::slice::from_ref(&completed));
+
+        assert_eq!(
+            fs::read(&destination).unwrap(),
+            b"concurrent longer content"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_rollback_removes_only_the_owned_symlink_entry() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let target = tmp.path().join("target.txt");
+        let destination = tmp.path().join("copied-link");
+        fs::write(&target, b"target must survive").unwrap();
+        symlink(&target, &destination).unwrap();
+        let completed = OwnedEntry::capture(destination.clone());
+        assert!(
+            completed.tree.is_some(),
+            "supported Unix targets must capture symlink identity"
+        );
+
+        rollback_copies(std::slice::from_ref(&completed));
+
+        assert!(fs::symlink_metadata(&destination).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"target must survive");
+    }
+
+    #[test]
+    fn move_rollback_does_not_relocate_a_concurrent_replacement() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let source = tmp.path().join("source.txt");
+        let destination = tmp.path().join("moved.txt");
+        fs::write(&destination, b"owned move").unwrap();
+        let completed = CompletedMove::capture(destination.clone(), source.clone());
+
+        fs::remove_file(&destination).unwrap();
+        fs::write(&destination, b"concurrent replacement").unwrap();
+        rollback_moves(std::slice::from_ref(&completed));
+
+        assert!(
+            !source.exists(),
+            "unowned entry must not be moved to source"
+        );
+        assert_eq!(
+            fs::read(&destination).unwrap(),
+            b"concurrent replacement",
+            "rollback must leave the concurrent destination in place"
+        );
+    }
+
+    #[test]
+    fn move_rollback_preserves_a_directory_with_a_concurrent_child() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let source = tmp.path().join("source-directory");
+        let destination = tmp.path().join("moved-directory");
+        fs::create_dir(&destination).unwrap();
+        fs::write(destination.join("owned.txt"), b"owned").unwrap();
+        let completed = CompletedMove::capture(destination.clone(), source.clone());
+
+        fs::write(destination.join("concurrent.txt"), b"must survive").unwrap();
+        rollback_moves(std::slice::from_ref(&completed));
+
+        assert!(!source.exists());
+        assert_eq!(
+            fs::read(destination.join("concurrent.txt")).unwrap(),
+            b"must survive"
+        );
+    }
+
+    #[test]
+    fn failed_cross_device_cleanup_preserves_a_concurrent_file_replacement() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let destination = tmp.path().join("copied.txt");
+        fs::write(&destination, b"owned copy").unwrap();
+        let owned = OwnedEntry::capture(destination.clone());
+
+        cleanup_failed_cross_device_destination(&owned, false, |path| {
+            fs::remove_file(path).unwrap();
+            fs::write(path, b"concurrent replacement").unwrap();
+        });
+
+        assert_eq!(fs::read(&destination).unwrap(), b"concurrent replacement");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trash_rejects_a_symlinked_internal_trash_root() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let outside = tempfile::tempdir().expect("create outside dir");
+        let root = tmp.path();
+        let source = root.join("keep.txt");
+        fs::write(&source, b"must stay in workspace").unwrap();
+        symlink(outside.path(), root.join(LYCEUM_TRASH_DIR)).unwrap();
+
+        move_paths_to_trash_impl(root, vec![source.to_string_lossy().to_string()])
+            .expect_err("trash must reject a symlinked internal storage root");
+
+        assert_eq!(fs::read(&source).unwrap(), b"must stay in workspace");
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn trash_case_alias_is_hidden_and_protected_only_when_it_is_the_same_entry() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let upper = root.join(".LYCEUM-TRASH");
+        let requested = root.join(LYCEUM_TRASH_DIR);
+        let destination = root.join("destination");
+        fs::create_dir(&upper).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(upper.join("kept.txt"), b"internal").unwrap();
+
+        let aliases_reserved_name = path_entry_exists(&requested);
+        let names: Vec<String> = read_dir_entries(root)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+
+        if aliases_reserved_name {
+            assert!(!names.iter().any(|name| name == ".LYCEUM-TRASH"));
+            assert!(path_starts_with_trash(root, &upper.join("kept.txt")));
+            assert_eq!(
+                ensure_safe_trash_root(root).unwrap().0.file_name(),
+                upper.file_name()
+            );
+            assert!(
+                move_paths_to_trash_impl(root, vec![upper.to_string_lossy().to_string()]).is_err()
+            );
+            assert!(move_paths_impl(
+                root,
+                vec![upper.to_string_lossy().to_string()],
+                &destination,
+            )
+            .is_err());
+            assert_eq!(fs::read(upper.join("kept.txt")).unwrap(), b"internal");
+        } else {
+            // On a case-sensitive filesystem the uppercase directory is a
+            // legitimate distinct entry and must remain visible/unprotected.
+            assert!(names.iter().any(|name| name == ".LYCEUM-TRASH"));
+            assert!(!path_starts_with_trash(root, &upper.join("kept.txt")));
+        }
+    }
+
+    #[test]
+    fn nested_trash_named_directory_remains_visible_outside_workspace_root() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let nested_parent = root.join("subdirectory");
+        let nested_trash_name = nested_parent.join(LYCEUM_TRASH_DIR);
+        fs::create_dir(&nested_parent).unwrap();
+        fs::create_dir(&nested_trash_name).unwrap();
+        fs::create_dir(root.join(LYCEUM_TRASH_DIR)).unwrap();
+
+        let root_names: Vec<String> = read_dir_entries_for_workspace(root, root)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        let nested_names: Vec<String> = read_dir_entries_for_workspace(&nested_parent, root)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+
+        assert!(!root_names.iter().any(|name| name == LYCEUM_TRASH_DIR));
+        assert!(nested_names.iter().any(|name| name == LYCEUM_TRASH_DIR));
+        assert!(!path_starts_with_trash(root, &nested_trash_name));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explorer_hides_aliases_into_root_trash_at_every_depth() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let trash = root.join(LYCEUM_TRASH_DIR);
+        let docs = root.join("docs");
+        let nested_visible = docs.join(LYCEUM_TRASH_DIR);
+        fs::create_dir(&trash).unwrap();
+        fs::write(trash.join("deleted.txt"), b"deleted").unwrap();
+        fs::create_dir(&docs).unwrap();
+        fs::create_dir(&nested_visible).unwrap();
+        symlink(LYCEUM_TRASH_DIR, root.join("trash-link")).unwrap();
+        symlink(
+            format!("../{LYCEUM_TRASH_DIR}/deleted.txt"),
+            docs.join("deleted-link"),
+        )
+        .unwrap();
+
+        let root_names: Vec<String> = read_dir_entries_for_workspace(root, root)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        let docs_names: Vec<String> = read_dir_entries_for_workspace(&docs, root)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+
+        assert!(!root_names.iter().any(|name| name == "trash-link"));
+        assert!(!docs_names.iter().any(|name| name == "deleted-link"));
+        assert!(docs_names.iter().any(|name| name == LYCEUM_TRASH_DIR));
+    }
+
+    #[test]
+    fn create_and_rename_reserve_only_the_root_trash_identity() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path().canonicalize().unwrap();
+        let root = root.as_path();
+        let exact_file = root.join(LYCEUM_TRASH_DIR);
+        let exact_directory = root.join(LYCEUM_TRASH_DIR);
+
+        assert!(create_file_in_workspace_impl(root, &exact_file).is_err());
+        assert!(create_directory_in_workspace_impl(root, &exact_directory).is_err());
+        assert!(!exact_file.exists());
+
+        let nested = root.join("nested");
+        fs::create_dir(&nested).unwrap();
+        let nested_reserved_name = nested.join(LYCEUM_TRASH_DIR);
+        create_file_in_workspace_impl(root, &nested_reserved_name)
+            .expect("nested trash name remains ordinary user content");
+        assert!(nested_reserved_name.exists());
+
+        let source = nested.join("rename-source.txt");
+        fs::write(&source, b"source").unwrap();
+        assert!(rename_path_in_workspace_impl(root, &source, &exact_file).is_err());
+        assert_eq!(fs::read(&source).unwrap(), b"source");
+    }
+
+    #[test]
+    fn absent_trash_case_alias_create_and_rename_follow_directory_semantics() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path().canonicalize().unwrap();
+        let root = root.as_path();
+        let alias = root.join(".LYCEUM-TRASH");
+        let aliases_reserved = path_would_be_workspace_trash(root, &alias).unwrap();
+
+        let create_result = create_file_in_workspace_impl(root, &alias);
+        if aliases_reserved {
+            assert!(create_result.is_err());
+            assert!(!alias.exists());
+        } else {
+            create_result.expect("distinct uppercase name is valid on a sensitive directory");
+            fs::remove_file(&alias).unwrap();
+        }
+
+        let nested = root.join("nested");
+        fs::create_dir(&nested).unwrap();
+        let source = nested.join("source.txt");
+        fs::write(&source, b"source").unwrap();
+        let rename_result = rename_path_in_workspace_impl(root, &source, &alias);
+        if aliases_reserved {
+            assert!(rename_result.is_err());
+            assert_eq!(fs::read(&source).unwrap(), b"source");
+        } else {
+            rename_result.expect("distinct uppercase name is valid on a sensitive directory");
+            assert_eq!(fs::read(&alias).unwrap(), b"source");
+        }
+    }
+
+    #[test]
+    fn copy_and_move_reject_an_absent_root_trash_case_alias_before_publish() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let outside = tempfile::tempdir().expect("create outside dir");
+        let external = outside.path().join(".LYCEUM-TRASH");
+        fs::write(&external, b"external").unwrap();
+        let alias = root.join(".LYCEUM-TRASH");
+        let aliases_reserved = path_would_be_workspace_trash(root, &alias).unwrap();
+
+        let copy_result = copy_paths_impl(root, vec![external.to_string_lossy().to_string()], root);
+        if aliases_reserved {
+            assert!(copy_result.is_err());
+            assert!(!alias.exists());
+            assert_eq!(fs::read(&external).unwrap(), b"external");
+        } else {
+            copy_result.expect("distinct uppercase copy is valid on a sensitive directory");
+            assert_eq!(fs::read(&alias).unwrap(), b"external");
+            fs::remove_file(&alias).unwrap();
+        }
+
+        let nested = root.join("nested");
+        fs::create_dir(&nested).unwrap();
+        let moved_source = nested.join(".LYCEUM-TRASH");
+        fs::write(&moved_source, b"moved").unwrap();
+        let move_result =
+            move_paths_impl(root, vec![moved_source.to_string_lossy().to_string()], root);
+        if aliases_reserved {
+            assert!(move_result.is_err());
+            assert_eq!(fs::read(&moved_source).unwrap(), b"moved");
+            assert!(!alias.exists());
+        } else {
+            move_result.expect("distinct uppercase move is valid on a sensitive directory");
+            assert_eq!(fs::read(&alias).unwrap(), b"moved");
+        }
+    }
 
     #[test]
     fn errors_on_non_directory() {
@@ -1262,12 +3283,14 @@ mod tests {
     #[test]
     fn rename_path_supports_case_only_rename() {
         let tmp = tempfile::tempdir().expect("create temp dir");
-        let dir = tmp.path();
+        let root = tmp.path().canonicalize().unwrap();
+        let dir = root.as_path();
         let from = dir.join("Readme.md");
         let to = dir.join("readme.md");
         fs::write(&from, b"data").unwrap();
 
-        rename_path_impl(&from, &to).expect("case-only rename should succeed");
+        rename_path_in_workspace_impl(dir, &from, &to)
+            .expect("root-aware case-only rename should succeed");
 
         // The on-disk entry now carries the new case (verified via the directory
         // listing, which is reliable on both case-sensitive and -insensitive FS).
@@ -1283,6 +3306,29 @@ mod tests {
         assert_eq!(fs::read(&to).unwrap(), b"data");
         // No temp file was stranded.
         assert!(!names.iter().any(|n| n.contains("lyceum-case-rename")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_mutations_reject_root_trash_reached_through_a_parent_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path().canonicalize().unwrap();
+        let root = root.as_path();
+        let alias = root.join("alias");
+        symlink(root, &alias).unwrap();
+        let hidden_target = alias.join(LYCEUM_TRASH_DIR);
+
+        assert!(create_file_in_workspace_impl(root, &hidden_target).is_err());
+        assert!(create_directory_in_workspace_impl(root, &hidden_target).is_err());
+        assert!(!root.join(LYCEUM_TRASH_DIR).exists());
+
+        let source = root.join("source.txt");
+        fs::write(&source, b"source").unwrap();
+        assert!(rename_path_in_workspace_impl(root, &source, &hidden_target).is_err());
+        assert_eq!(fs::read(&source).unwrap(), b"source");
+        assert!(!root.join(LYCEUM_TRASH_DIR).exists());
     }
 
     #[cfg(unix)]
@@ -1456,6 +3502,79 @@ mod tests {
     }
 
     #[test]
+    fn move_paths_replaces_files_and_directories_as_one_batch() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let destination = root.join("destination");
+        let source_file = root.join("note.txt");
+        let source_dir = root.join("folder");
+        fs::create_dir(&destination).unwrap();
+        fs::write(&source_file, b"new note").unwrap();
+        fs::create_dir(&source_dir).unwrap();
+        fs::write(source_dir.join("new-only.txt"), b"new directory").unwrap();
+        fs::write(destination.join("note.txt"), b"old note").unwrap();
+        fs::create_dir(destination.join("folder")).unwrap();
+        fs::write(destination.join("folder/old-only.txt"), b"old directory").unwrap();
+        let expected_conflicts = vec![
+            destination.join("note.txt").to_string_lossy().to_string(),
+            destination.join("folder").to_string_lossy().to_string(),
+        ];
+
+        let moved = move_paths_impl_with_replace(
+            root,
+            vec![
+                source_file.to_string_lossy().to_string(),
+                source_dir.to_string_lossy().to_string(),
+            ],
+            &destination,
+            true,
+            Some(&expected_conflicts),
+        )
+        .expect("replace move batch");
+
+        assert_eq!(moved.len(), 2);
+        assert!(moved.iter().all(|item| item.replaced));
+        assert!(!source_file.exists());
+        assert!(!source_dir.exists());
+        assert_eq!(fs::read(destination.join("note.txt")).unwrap(), b"new note");
+        assert_eq!(
+            fs::read(destination.join("folder/new-only.txt")).unwrap(),
+            b"new directory"
+        );
+        assert!(!destination.join("folder/old-only.txt").exists());
+        assert!(!root.join(LYCEUM_TRASH_DIR).exists());
+    }
+
+    #[test]
+    fn move_paths_rejects_a_source_nested_in_a_replaced_destination() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let incoming_parent = root.join("incoming");
+        let incoming_dir = incoming_parent.join("container");
+        let existing_dir = root.join("container");
+        let nested_source = existing_dir.join("old.txt");
+        fs::create_dir_all(&incoming_dir).unwrap();
+        fs::write(incoming_dir.join("new.txt"), b"NEW").unwrap();
+        fs::create_dir(&existing_dir).unwrap();
+        fs::write(&nested_source, b"OLD").unwrap();
+
+        let error = move_paths_impl(
+            root,
+            vec![
+                incoming_dir.to_string_lossy().to_string(),
+                nested_source.to_string_lossy().to_string(),
+            ],
+            root,
+        )
+        .expect_err("nested source must not be staged inside its destination");
+
+        assert!(error.contains("source is inside"), "{error}");
+        assert_eq!(fs::read(&nested_source).unwrap(), b"OLD");
+        assert_eq!(fs::read(incoming_dir.join("new.txt")).unwrap(), b"NEW");
+        assert!(!root.join(LYCEUM_TRASH_DIR).exists());
+    }
+
+    #[test]
     fn copy_paths_imports_external_files_and_keeps_the_source() {
         let tmp = tempfile::tempdir().expect("create temp dir");
         let root = tmp.path();
@@ -1563,6 +3682,494 @@ mod tests {
         // Pre-collision check rejects before copying, so nothing strays in.
         assert!(!root.join("fresh.txt").exists(), "batch must roll back");
         assert_eq!(fs::read(root.join("taken.txt")).unwrap(), b"old");
+    }
+
+    #[test]
+    fn copy_paths_reports_every_existing_destination_without_mutating() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let outside = tempfile::tempdir().expect("create external dir");
+        let first = outside.path().join("first.txt");
+        let second = outside.path().join("second.txt");
+        fs::write(&first, b"new first").unwrap();
+        fs::write(&second, b"new second").unwrap();
+        fs::write(root.join("first.txt"), b"old first").unwrap();
+        fs::write(root.join("second.txt"), b"old second").unwrap();
+
+        let error = copy_paths_impl(
+            root,
+            vec![
+                first.to_string_lossy().to_string(),
+                second.to_string_lossy().to_string(),
+            ],
+            root,
+        )
+        .expect_err("both conflicts must be reported before copying");
+        let encoded = error
+            .strip_prefix("destination conflict: already exists: ")
+            .expect("structured conflict prefix");
+        let conflicts: Vec<String> = serde_json::from_str(encoded).expect("conflict paths JSON");
+
+        assert_eq!(
+            conflicts,
+            vec![
+                root.join("first.txt").to_string_lossy().to_string(),
+                root.join("second.txt").to_string_lossy().to_string(),
+            ]
+        );
+        assert_eq!(fs::read(root.join("first.txt")).unwrap(), b"old first");
+        assert_eq!(fs::read(root.join("second.txt")).unwrap(), b"old second");
+        assert_eq!(fs::read(&first).unwrap(), b"new first");
+        assert_eq!(fs::read(&second).unwrap(), b"new second");
+    }
+
+    #[test]
+    fn replace_copy_rejects_a_stale_approved_conflict_set_without_mutating() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let outside = tempfile::tempdir().expect("create external dir");
+        let first = outside.path().join("first.txt");
+        let appeared_later = outside.path().join("appeared-later.txt");
+        fs::write(&first, b"new first").unwrap();
+        fs::write(&appeared_later, b"new later").unwrap();
+        fs::write(root.join("first.txt"), b"old first").unwrap();
+        // Simulates a destination created after the frontend approved only the
+        // first preflight conflict but before its overwrite retry arrived.
+        fs::write(root.join("appeared-later.txt"), b"unapproved later").unwrap();
+        let stale_approval = vec![root.join("first.txt").to_string_lossy().to_string()];
+
+        let error = copy_paths_impl_with_replace(
+            root,
+            vec![
+                first.to_string_lossy().to_string(),
+                appeared_later.to_string_lossy().to_string(),
+            ],
+            root,
+            true,
+            Some(&stale_approval),
+        )
+        .expect_err("changed conflict set must require fresh approval");
+        let encoded = error
+            .strip_prefix("destination conflict: already exists: ")
+            .expect("fresh structured conflict");
+        let conflicts: Vec<String> = serde_json::from_str(encoded).unwrap();
+
+        assert_eq!(conflicts.len(), 2);
+        assert!(conflicts
+            .iter()
+            .any(|path| path.ends_with("appeared-later.txt")));
+        assert_eq!(fs::read(root.join("first.txt")).unwrap(), b"old first");
+        assert_eq!(
+            fs::read(root.join("appeared-later.txt")).unwrap(),
+            b"unapproved later"
+        );
+        assert!(!root.join(LYCEUM_TRASH_DIR).exists());
+    }
+
+    #[test]
+    fn copy_paths_rejects_a_source_nested_in_a_replaced_destination() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let outside = tempfile::tempdir().expect("create external dir");
+        let incoming_dir = outside.path().join("container");
+        let existing_dir = root.join("container");
+        let nested_source = existing_dir.join("old.txt");
+        fs::create_dir(&incoming_dir).unwrap();
+        fs::write(incoming_dir.join("new.txt"), b"NEW").unwrap();
+        fs::create_dir(&existing_dir).unwrap();
+        fs::write(&nested_source, b"OLD").unwrap();
+
+        let error = copy_paths_impl(
+            root,
+            vec![
+                incoming_dir.to_string_lossy().to_string(),
+                nested_source.to_string_lossy().to_string(),
+            ],
+            root,
+        )
+        .expect_err("nested source must not be staged inside its destination");
+
+        assert!(error.contains("source is inside"), "{error}");
+        assert_eq!(fs::read(&nested_source).unwrap(), b"OLD");
+        assert_eq!(fs::read(incoming_dir.join("new.txt")).unwrap(), b"NEW");
+        assert!(!root.join(LYCEUM_TRASH_DIR).exists());
+    }
+
+    #[test]
+    fn copy_paths_rejects_case_folded_nested_source_before_replacement() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let probe = root.join("LyceumCaseProbe");
+        fs::write(&probe, b"probe").unwrap();
+        let case_insensitive = path_entry_exists(&root.join("lyceumcaseprobe"));
+        fs::remove_file(&probe).unwrap();
+        if !case_insensitive {
+            return;
+        }
+
+        let outside = tempfile::tempdir().expect("create external dir");
+        let incoming_dir = outside.path().join("Container");
+        let existing_dir = root.join("container");
+        let nested_source = existing_dir.join("old.txt");
+        fs::create_dir(&incoming_dir).unwrap();
+        fs::write(incoming_dir.join("old.txt"), b"NEW").unwrap();
+        fs::create_dir(&existing_dir).unwrap();
+        fs::write(&nested_source, b"OLD").unwrap();
+        let expected_conflicts = vec![existing_dir.to_string_lossy().to_string()];
+
+        let error = copy_paths_impl_with_replace(
+            root,
+            vec![
+                incoming_dir.to_string_lossy().to_string(),
+                nested_source.to_string_lossy().to_string(),
+            ],
+            root,
+            true,
+            Some(&expected_conflicts),
+        )
+        .expect_err("case-folded nested source must be rejected before staging");
+
+        assert!(error.contains("source is inside"), "{error}");
+        assert_eq!(fs::read(&nested_source).unwrap(), b"OLD");
+        assert_eq!(fs::read(incoming_dir.join("old.txt")).unwrap(), b"NEW");
+        assert!(!root.join("old.txt").exists());
+        assert!(!root.join(LYCEUM_TRASH_DIR).exists());
+    }
+
+    #[test]
+    fn replacement_rollback_does_not_move_a_concurrent_backup_replacement() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let incoming = root.join("incoming.txt");
+        let destination = root.join("destination.txt");
+        fs::write(&incoming, b"incoming").unwrap();
+        fs::write(&destination, b"original").unwrap();
+        let planned = vec![(incoming, destination.clone(), false, true)];
+        let stage = stage_existing_destinations(root, &planned)
+            .unwrap()
+            .expect("replacement stage");
+        let backup = stage.backups[0].backup.clone();
+
+        fs::remove_file(&backup).unwrap();
+        fs::write(&backup, b"concurrent backup replacement").unwrap();
+        rollback_replacement_stage(Some(&stage));
+
+        assert!(!destination.exists());
+        assert_eq!(fs::read(&backup).unwrap(), b"concurrent backup replacement");
+    }
+
+    #[test]
+    fn replacement_discard_preserves_a_concurrently_changed_backup() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let incoming = root.join("incoming.txt");
+        let destination = root.join("destination.txt");
+        fs::write(&incoming, b"incoming").unwrap();
+        fs::write(&destination, b"original").unwrap();
+        let planned = vec![(incoming, destination, false, true)];
+        let stage = stage_existing_destinations(root, &planned)
+            .unwrap()
+            .expect("replacement stage");
+        let backup = stage.backups[0].backup.clone();
+
+        fs::write(&backup, b"concurrent longer backup contents").unwrap();
+        let error = discard_replacement_stage(Some(&stage))
+            .expect_err("changed backup must remain recoverable");
+
+        assert!(error.contains("old items remain"));
+        assert_eq!(
+            fs::read(&backup).unwrap(),
+            b"concurrent longer backup contents"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_paths_rejects_nested_source_reached_through_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let outside = tempfile::tempdir().expect("create external dir");
+        let incoming_dir = outside.path().join("container");
+        let existing_dir = root.join("container");
+        let alias = outside.path().join("alias");
+        fs::create_dir(&incoming_dir).unwrap();
+        fs::write(incoming_dir.join("new.txt"), b"NEW").unwrap();
+        fs::create_dir(&existing_dir).unwrap();
+        fs::write(existing_dir.join("old.txt"), b"OLD").unwrap();
+        symlink(&existing_dir, &alias).unwrap();
+        let aliased_source = alias.join("old.txt");
+
+        let error = copy_paths_impl(
+            root,
+            vec![
+                incoming_dir.to_string_lossy().to_string(),
+                aliased_source.to_string_lossy().to_string(),
+            ],
+            root,
+        )
+        .expect_err("canonical parent must expose the nested-source dependency");
+
+        assert!(error.contains("source is inside"), "{error}");
+        assert_eq!(fs::read(existing_dir.join("old.txt")).unwrap(), b"OLD");
+        assert_eq!(fs::read(incoming_dir.join("new.txt")).unwrap(), b"NEW");
+        assert!(!root.join(LYCEUM_TRASH_DIR).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_rejects_self_descendant_reached_through_a_symlinked_ancestor_before_staging() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path().join("workspace");
+        let source = root.join("source");
+        let destination = source.join("nested");
+        fs::create_dir_all(&destination).unwrap();
+        let alias_parent = tmp.path().join("workspace-alias");
+        symlink(&root, &alias_parent).unwrap();
+        let aliased_source = alias_parent.join("source");
+
+        let error = copy_paths_impl(
+            &root,
+            vec![aliased_source.to_string_lossy().to_string()],
+            &destination,
+        )
+        .expect_err("canonical directory ancestry must reject the recursive copy");
+
+        assert!(error.contains("into itself"), "{error}");
+        assert!(fs::read_dir(&destination).unwrap().next().is_none());
+        assert!(!root.join(LYCEUM_TRASH_DIR).exists());
+    }
+
+    #[test]
+    fn copy_rejects_a_case_aliased_self_descendant_before_staging() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let source = root.join("SourceDirectory");
+        let destination = source.join("nested");
+        fs::create_dir_all(&destination).unwrap();
+        let aliased_source = root.join("sourcedirectory");
+        if !path_entry_exists(&aliased_source) {
+            return;
+        }
+
+        let error = copy_paths_impl(
+            root,
+            vec![aliased_source.to_string_lossy().to_string()],
+            &destination,
+        )
+        .expect_err("case-aliased directory ancestry must reject the recursive copy");
+
+        assert!(error.contains("into itself"), "{error}");
+        assert!(fs::read_dir(&destination).unwrap().next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_into_a_symlink_target_descendant_still_copies_the_final_link_entry() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path().join("workspace");
+        let target = root.join("target");
+        let destination = target.join("nested");
+        fs::create_dir_all(&destination).unwrap();
+        let link = tmp.path().join("target-link");
+        symlink(&target, &link).unwrap();
+
+        let copied = copy_paths_impl(
+            &root,
+            vec![link.to_string_lossy().to_string()],
+            &destination,
+        )
+        .expect("the final symlink entry is copied without traversing its target");
+
+        assert_eq!(copied.len(), 1);
+        assert!(fs::symlink_metadata(destination.join("target-link"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    fn copy_paths_replaces_files_and_directories_and_keeps_sources() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let outside = tempfile::tempdir().expect("create external dir");
+        let source_file = outside.path().join("note.txt");
+        let source_dir = outside.path().join("folder");
+        fs::write(&source_file, b"new note").unwrap();
+        fs::create_dir(&source_dir).unwrap();
+        fs::write(source_dir.join("new-only.txt"), b"new directory").unwrap();
+        fs::write(root.join("note.txt"), b"old note").unwrap();
+        fs::create_dir(root.join("folder")).unwrap();
+        fs::write(root.join("folder/old-only.txt"), b"old directory").unwrap();
+        let expected_conflicts = vec![
+            root.join("note.txt").to_string_lossy().to_string(),
+            root.join("folder").to_string_lossy().to_string(),
+        ];
+
+        let copied = copy_paths_impl_with_replace(
+            root,
+            vec![
+                source_file.to_string_lossy().to_string(),
+                source_dir.to_string_lossy().to_string(),
+            ],
+            root,
+            true,
+            Some(&expected_conflicts),
+        )
+        .expect("replace copy batch");
+
+        assert_eq!(copied.len(), 2);
+        assert!(copied.iter().all(|item| item.replaced));
+        assert_eq!(fs::read(root.join("note.txt")).unwrap(), b"new note");
+        assert_eq!(
+            fs::read(root.join("folder/new-only.txt")).unwrap(),
+            b"new directory"
+        );
+        assert!(!root.join("folder/old-only.txt").exists());
+        assert_eq!(fs::read(&source_file).unwrap(), b"new note");
+        assert!(source_dir.join("new-only.txt").exists());
+        assert!(
+            !root.join(LYCEUM_TRASH_DIR).exists(),
+            "successful replacement must clean its staging directory"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replace_copy_cleans_up_a_read_only_directory_backup() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let outside = tempfile::tempdir().expect("create external dir");
+        let source = outside.path().join("locked");
+        let destination = root.join("locked");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("new.txt"), b"NEW").unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(destination.join("old.txt"), b"OLD").unwrap();
+        fs::set_permissions(&destination, fs::Permissions::from_mode(0o555)).unwrap();
+        let expected_conflicts = vec![destination.to_string_lossy().to_string()];
+
+        let copied = copy_paths_impl_with_replace(
+            root,
+            vec![source.to_string_lossy().to_string()],
+            root,
+            true,
+            Some(&expected_conflicts),
+        )
+        .expect("replace read-only directory");
+
+        assert_eq!(fs::read(destination.join("new.txt")).unwrap(), b"NEW");
+        assert!(!destination.join("old.txt").exists());
+        assert!(copied.iter().all(|item| item.cleanup_warning.is_none()));
+        assert!(!root.join(LYCEUM_TRASH_DIR).exists());
+    }
+
+    #[test]
+    fn copy_paths_rejects_replacing_a_source_with_itself() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let source = root.join("note.txt");
+        fs::write(&source, b"must survive").unwrap();
+
+        let error = copy_paths_impl_with_replace(
+            root,
+            vec![source.to_string_lossy().to_string()],
+            root,
+            true,
+            None,
+        )
+        .expect_err("same-entry copy must be rejected before staging");
+
+        assert!(error.contains("same filesystem entry"), "{error}");
+        assert_eq!(fs::read(&source).unwrap(), b"must survive");
+        assert!(!root.join(LYCEUM_TRASH_DIR).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_replace_copy_restores_every_existing_destination() {
+        use std::os::unix::fs::FileTypeExt;
+        use std::os::unix::net::UnixListener;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let outside = tempfile::tempdir().expect("create external dir");
+        let good = outside.path().join("good.txt");
+        let unsupported = outside.path().join("unsupported.sock");
+        fs::write(&good, b"new good").unwrap();
+        let _socket = UnixListener::bind(&unsupported).expect("create unix socket");
+        fs::write(root.join("good.txt"), b"old good").unwrap();
+        fs::write(root.join("unsupported.sock"), b"old socket-named file").unwrap();
+        let expected_conflicts = vec![
+            root.join("good.txt").to_string_lossy().to_string(),
+            root.join("unsupported.sock").to_string_lossy().to_string(),
+        ];
+
+        copy_paths_impl_with_replace(
+            root,
+            vec![
+                good.to_string_lossy().to_string(),
+                unsupported.to_string_lossy().to_string(),
+            ],
+            root,
+            true,
+            Some(&expected_conflicts),
+        )
+        .expect_err("copying a Unix socket must fail and roll back");
+
+        assert_eq!(fs::read(root.join("good.txt")).unwrap(), b"old good");
+        assert_eq!(
+            fs::read(root.join("unsupported.sock")).unwrap(),
+            b"old socket-named file"
+        );
+        assert_eq!(fs::read(&good).unwrap(), b"new good");
+        assert!(std::fs::symlink_metadata(&unsupported)
+            .unwrap()
+            .file_type()
+            .is_socket());
+        assert!(!root.join(LYCEUM_TRASH_DIR).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replace_copy_can_replace_a_broken_symlink_without_touching_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let outside = tempfile::tempdir().expect("create external dir");
+        let source = outside.path().join("shortcut.txt");
+        let destination = root.join("shortcut.txt");
+        let missing_target = root.join("missing.txt");
+        fs::write(&source, b"replacement").unwrap();
+        symlink(&missing_target, &destination).unwrap();
+        assert!(!destination.exists());
+        let expected_conflicts = vec![destination.to_string_lossy().to_string()];
+
+        let copied = copy_paths_impl_with_replace(
+            root,
+            vec![source.to_string_lossy().to_string()],
+            root,
+            true,
+            Some(&expected_conflicts),
+        )
+        .expect("replace broken symlink entry");
+
+        assert_eq!(copied.len(), 1);
+        assert!(copied[0].replaced);
+        assert_eq!(
+            copied[0].replaced_path.as_deref(),
+            Some(destination.to_string_lossy().as_ref())
+        );
+        assert_eq!(fs::read(&destination).unwrap(), b"replacement");
+        assert!(!missing_target.exists());
     }
 
     #[cfg(unix)]
@@ -1760,6 +4367,46 @@ mod tests {
         collect_file_contents(root, &mut contents);
         assert!(contents.iter().any(|c| c == b"AAA"), "content AAA was lost");
         assert!(contents.iter().any(|c| c == b"BBB"), "content BBB was lost");
+    }
+
+    #[test]
+    fn copy_paths_reports_case_folded_batch_collision_as_non_replaceable() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let probe = root.join("LyceumCaseProbe");
+        fs::write(&probe, b"probe").unwrap();
+        let case_insensitive = path_entry_exists(&root.join("lyceumcaseprobe"));
+        fs::remove_file(&probe).unwrap();
+        if !case_insensitive {
+            return;
+        }
+
+        let outside = tempfile::tempdir().expect("create external dir");
+        let first_parent = outside.path().join("first");
+        let second_parent = outside.path().join("second");
+        fs::create_dir(&first_parent).unwrap();
+        fs::create_dir(&second_parent).unwrap();
+        let first = first_parent.join("Report.txt");
+        let second = second_parent.join("report.txt");
+        fs::write(&first, b"FIRST").unwrap();
+        fs::write(&second, b"SECOND").unwrap();
+
+        let error = copy_paths_impl(
+            root,
+            vec![
+                first.to_string_lossy().to_string(),
+                second.to_string_lossy().to_string(),
+            ],
+            root,
+        )
+        .expect_err("case-folded batch collision must fail");
+
+        assert!(error.contains("multiple items would overwrite"), "{error}");
+        assert!(!error.starts_with("destination conflict:"), "{error}");
+        assert_eq!(fs::read(&first).unwrap(), b"FIRST");
+        assert_eq!(fs::read(&second).unwrap(), b"SECOND");
+        assert!(!root.join("Report.txt").exists());
+        assert!(!root.join("report.txt").exists());
     }
 
     #[cfg(unix)]

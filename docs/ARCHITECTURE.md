@@ -19,7 +19,7 @@ and the principal data flows.
 | Backend | Tauri v2, Rust (edition 2021) |
 | Runtime | Native OS WebView via Tauri — no Electron, no bundled Chromium |
 | Frontend | React 19 + TypeScript, built with Vite |
-| Editor | Monaco Editor (`monaco-editor` / `@monaco-editor/react`), lazy-loaded |
+| Editor | Monaco Editor (`monaco-editor`), lazy-loaded |
 | Terminal | `xterm.js` frontend; real PTY in Rust via the `portable-pty` crate |
 | Preview | Markdown, sandboxed HTML, PDF.js (`pdfjs-dist`), and raw-byte image previews |
 | Syntax highlighting | Monaco built-in grammars first; custom Monarch grammars where weak or missing (Julia, LaTeX, TOML) |
@@ -27,7 +27,7 @@ and the principal data flows.
 | Styling | Plain CSS with CSS custom properties for theming, no UI framework |
 | LSP | Generic JSON-RPC client; Rust spawns servers over stdio, bridges to frontend |
 | Commands | TS command registry + keybinding registry; both persisted as JSON |
-| Testing | Vitest + React Testing Library (frontend); `cargo test` (Rust) |
+| Testing | Vitest + React Testing Library, Node release-gate tests, and `cargo test` |
 
 Everything below must remain consistent with this table and with `TRACKER.md`,
 `docs/ROADMAP.md`, `docs/KEYBINDINGS.md`, and `docs/SETTINGS_SCHEMA.md`.
@@ -36,8 +36,8 @@ Everything below must remain consistent with this table and with `TRACKER.md`,
 
 ## 1. High-level component diagram
 
-The application is a single Tauri desktop process hosting one WebView (the React
-UI). The Rust **core** owns all privileged I/O: the filesystem, child processes
+The application is a single Tauri desktop process hosting one React WebView per
+native app window. The Rust **core** owns all privileged I/O: the filesystem, child processes
 (PTYs and language servers), and on-disk configuration. The WebView talks to the
 core exclusively through Tauri **commands** (request/response) and **events**
 (streaming push). No language server, shell, or file handle is ever touched
@@ -48,14 +48,14 @@ directly by the WebView.
 |  Tauri Application Process (Rust)                                               |
 |                                                                                 |
 |  +---------------------------------------------------------------------------+  |
-|  |  WebView  (Chromium/WebKit)  -- React 19 + TypeScript (Vite bundle)        |  |
+|  |  WebView per window (Chromium/WebKit) -- React + TypeScript (Vite)         |  |
 |  |                                                                           |  |
 |  |  App.tsx                                                                   |  |
 |  |   +- ActivityBar  Sidebar  EditorArea(Monaco)  BottomPanel(xterm)  Status |  |
 |  |   +- Preview surfaces (inline source previews + PDF/image viewer tabs)    |  |
 |  |                                                                           |  |
 |  |  Zustand stores  |  Command registry  |  Keybinding registry              |  |
-|  |  src/lib: ipc.ts (invoke wrappers), events.ts (listen), lspClient.ts      |  |
+|  |  src/lib: IPC/event helpers       | src/lsp: JSON-RPC/LSP client          |  |
 |  +-------------------------------^-------------------------+-----------------+  |
 |                                  |                         |                    |
 |              invoke(cmd, args)   |  commands               |  events  emit()    |
@@ -67,7 +67,7 @@ directly by the WebView.
 |  |   file_ops  fs_ops  search  walk  terminal  julia  lsp  menu  app_info    |  |
 |  |   state: managed Mutex registries for PTYs, runs, and LSP sessions        |  |
 |  +----+-----------------+-------------------------+------------------+-------+  |
-|       | std::fs         | portable-pty            | tokio::process   |          |
+|       | std::fs         | portable-pty            | std::process     |          |
 |       v                 v                         v                  v          |
 |   Workspace files   PTY child procs           LSP child procs    Tauri path    |
 |   (read/write)      (shell: zsh/bash/pwsh)    (LanguageServer.jl, app-config   |
@@ -75,9 +75,9 @@ directly by the WebView.
 +---------------------------------------------------------------------------------+
 ```
 
-There is exactly **one** WebView. Heavy subsystems (Monaco, PDF.js, xterm, LSP
-sessions) are lazy-loaded so a cold start renders the shell layout without paying
-their cost.
+There is exactly **one WebView per open native window**. Heavy frontend
+subsystems (Monaco, PDF.js, and xterm) are lazy-loaded, and language-server
+processes start only after a matching document is opened.
 
 ---
 
@@ -89,24 +89,24 @@ Tauri offers two complementary IPC primitives. Lyceum uses each for a distinct r
 
 - **Direction:** frontend -> backend, with a typed return value (or error).
 - **Mechanism:** `@tauri-apps/api/core` `invoke(name, args)` on the frontend;
-  `#[tauri::command]` async functions on the backend.
+  `#[tauri::command]` functions on the backend.
 - **Use when** the frontend needs a result or an acknowledgement: read/write a
   file, list a directory, start/stop a terminal, send a keystroke to a PTY, send a
   JSON-RPC message to a language server, load/save settings, get app info.
-- **Errors** are returned as `Result<T, E>` where `E: serde::Serialize`; the JS
-  promise rejects, and `src/lib/ipc.ts` normalizes the error.
+- **Errors** are returned as serializable `Result` errors; the JS promise rejects
+  and the owning frontend flow either surfaces the failure or applies its documented fallback.
 
-All commands are funneled through thin typed wrappers in `src/lib/ipc.ts` so that
-command names and payload types live in exactly one place (matching the existing
-`getAppInfo()` wrapper that calls the `get_app_info` command). The wrappers also
-degrade gracefully when running outside a Tauri WebView (plain `vite` dev server or
-Vitest), returning safe fallbacks.
+Commands are called through typed subsystem wrappers: general filesystem/window
+IPC lives in `src/lib/ipc.ts`, while terminal, run/build, and LSP IPC lives in
+`src/lib/terminal.ts`, `src/lib/codeRun.ts`, `src/lib/latexBuild.ts`, and
+`src/lsp/lspBridge.ts`. Browser/test fallbacks are provided only where the
+owning flow explicitly supports running outside a Tauri WebView.
 
 ### 2.2 Events (streaming push)
 
 - **Direction:** backend -> frontend (primarily), one-to-many, fire-and-forget.
-- **Mechanism:** backend `app_handle.emit(...)` / `Channel`; frontend
-  `@tauri-apps/api/event` `listen(name, handler)`.
+- **Mechanism:** backend `emit_to(windowLabel, ...)`; frontend listeners are
+  scoped to the current WebView by `src/lib/windowEvents.ts`.
 - **Use when** data arrives asynchronously and continuously, with no single reply:
   PTY stdout/stderr chunks, PTY exit, LSP notifications/responses (diagnostics,
   log messages), long-running Julia run output, file-watcher change notifications.
@@ -128,15 +128,16 @@ Vitest), returning safe fallbacks.
 
 | Process | Owner | Lifetime | Notes |
 |---|---|---|---|
-| Main app + WebView | Tauri/OS | App lifetime | Single window (`main`), single WebView hosting React. |
+| Native windows + WebViews | Tauri/OS | Per window | One WebView hosts React in each app window (`main`, then `main1`, `main2`, …). |
 | PTY child processes | `terminal` module via `portable-pty` | Per terminal tab | One child shell per terminal; killed on close/app exit. |
-| LSP child processes | `lsp` module via `tokio::process` | Per language/workspace | One server per active language; reused across files. |
+| LSP child processes | `lsp` module via `std::process::Command` | Per language/window/workspace | One server per active language; reused across files. |
 | Build/run child processes | `julia` module | Per run invocation | Transient: `julia file.jl`, `latexmk`, etc.; streamed then reaped. |
 
-The Rust core holds long-lived child handles in an `AppState` registry
-(`Arc<Mutex<...>>` maps keyed by terminal id / session id) managed via Tauri's
-`State`. The WebView never holds an OS handle; it holds only opaque string ids.
-All child processes are terminated on window close to avoid orphans.
+The Rust core holds long-lived child handles in Tauri-managed subsystem managers
+whose mutex-protected maps are keyed by window plus terminal/session/run id. A
+WebView never holds an OS handle; it holds only opaque string ids.
+All child processes are terminated when their owning window closes or when the
+app exits, avoiding orphans without disrupting another open window.
 
 ---
 
@@ -161,21 +162,31 @@ src/
     editorStore.ts      Open documents, dirty flags, active tab, selections.
     terminalStore.ts    Terminal instances and their ids/titles.
     settingsStore.ts    Loaded settings; applies to UI + Monaco/terminal.
-    lspStore.ts         Per-session status and last-known diagnostics.
+    lspStatusStore.ts   Per-language server lifecycle/status for the status bar.
   commands/
     commandRegistry.ts  Command registry (register/execute/list).
     builtinCommands.ts  Built-in workbench commands.
   keybindings/
     keybindingRegistry.ts Keybinding registry + default shortcuts.
   lib/
-    ipc.ts              Typed invoke() wrappers (already present: getAppInfo).
-    events.ts           Typed listen() helpers and channel-name constants.
-    lspClient.ts        Generic JSON-RPC LSP client bridged over IPC.
-    monaco.ts           Lazy Monaco loader + theme/grammar registration.
+    ipc.ts              Filesystem, workspace, and window invoke wrappers.
+    windowEvents.ts     Per-WebView event listener helper.
+    terminal.ts         Terminal IPC and scoped event helpers.
+    codeRun.ts          Run-process IPC and output event flow.
+    latexBuild.ts       LaTeX build IPC and output event flow.
     pdf.ts              Lazy PDF.js loader + worker setup.
-    terminal.ts         xterm bootstrap + PTY wiring helpers.
+  lsp/
+    lspBridge.ts        LSP invoke/event bridge.
+    lspClient.ts        LSP lifecycle and session management.
+    jsonRpc.ts          JSON-RPC correlation and notification dispatch.
+    monacoLsp.ts        Monaco providers, document sync, and diagnostics.
+    servers.ts          Built-in language-server profiles.
+  editor/
+    monacoLanguages.ts  Custom Monaco language registrations.
   hooks/
-    useLayoutKeybindings.ts   Binds global keymap to commands at the App level.
+    useCommandKeybindings.ts  Resolves global keybindings to commands.
+    useWorkspaceLifecycle.ts  Restores/changes workspace authorization.
+    useWorkspaceFileWatcher.ts Refreshes UI state after filesystem events.
   styles/
     global.css          Resets, layout primitives, component styles.
     theme.css           CSS custom properties for the four themes.
@@ -187,8 +198,9 @@ src/
 - **Stores are the single source of UI truth.** Components subscribe to Zustand;
   commands mutate stores; IPC results feed stores. Components do not call IPC
   directly except through `lib/` wrappers.
-- **`src/lib/` is the only place that imports `@tauri-apps/api`.** This keeps the
-  Tauri surface mockable in tests and centralized for the security review.
+- **Privileged frontend calls stay behind narrow wrappers.** General calls live
+  in `src/lib/`; the LSP bridge lives in `src/lsp/lspBridge.ts`, and preview
+  components directly use only the Tauri URL/opener helpers they own.
 
 ---
 
@@ -200,26 +212,31 @@ src-tauri/
   build.rs              tauri-build codegen.
   tauri.conf.json       Window config, bundle, security CSP.
   capabilities/
-    default.json        Capability set granted to the `main` window (allowlist).
+    default.json        Capability set granted to `main*` windows (allowlist).
   src/
     main.rs             Binary entry; calls lyceum_lib::run().
-    lib.rs              Builder: plugins, AppState, invoke_handler (command list).
+    lib.rs              Builder: plugins, managed state, invoke_handler.
     app_info.rs         get_app_info data.
     file_ops.rs         read_file, write_file, read_file_bytes, app_config_path.
     fs_ops.rs           Explorer file operations (read/create/rename/delete,
                         undoable workspace-local trash restore/redo).
+    path_access.rs      Per-window workspace authorization and path validation.
     search.rs           Workspace text search.
     walk.rs             Quick-open workspace file listing.
+    workspace_watch.rs  Per-window recursive filesystem watchers.
+    git.rs              Best-effort Git status/decorations.
     terminal.rs         PTY manager + terminal_create/write/resize/close.
     julia.rs            Julia/build process manager + run/cancel commands.
+    latex.rs            TeX tool resolution and streamed builds.
     lsp.rs              LSP process manager + JSON-RPC framing/bridge.
     menu.rs             Native app menu mapped to frontend command ids.
+    window_ops.rs       Multi-window creation and guarded app quit.
 ```
 
 **Responsibility notes**
 
-- `lib.rs` registers every command in a single `invoke_handler!` and constructs
-  `AppState` once via `.manage(...)`.
+- `lib.rs` registers every command in a single `invoke_handler!` and installs
+  the subsystem managers with `.manage(...)`.
 - `terminal.rs`, `julia.rs`, and `lsp.rs` own the OS resources and the
   threads/tasks that read their output.
 - `file_ops.rs::app_config_path` is the single backend entry point for resolving
@@ -287,11 +304,11 @@ cover Julia, Python, TypeScript/JavaScript, Rust, C/C++, Go, C#, and R.
   an event on `lsp:message:<sessionId>`. The backend does **not** interpret LSP
   semantics; it only frames/deframes and routes.
 - Commands:
-  - `lsp_start(language, rootUri) -> sessionId`
-  - `lsp_send(sessionId, json)` (writes a framed JSON-RPC message to stdin)
-  - `lsp_stop(sessionId)` (graceful `shutdown`/`exit`, then kill if needed)
+  - `lsp_start({ id, serverId, cwd, juliaPath })`
+  - `lsp_send(id, message)` (writes a framed JSON-RPC message to stdin)
+  - `lsp_stop(id)` (terminates and reaps the child idempotently)
 
-### 7.2 Frontend (`src/lib/lspClient.ts`)
+### 7.2 Frontend (`src/lsp/lspClient.ts`)
 
 - Implements the JSON-RPC client semantics: monotonic request ids, a pending-
   request map resolving promises on matching responses, and a notification
@@ -301,7 +318,7 @@ cover Julia, Python, TypeScript/JavaScript, Rust, C/C++, Go, C#, and R.
   (definition, references, hover, completion) -> `shutdown`/`exit`.
 - Bridges to Monaco: registers providers (definition, references, hover,
   completion) per language and applies `textDocument/publishDiagnostics` as Monaco
-  markers (see §13.3). `lspStore.ts` tracks per-session status for the status bar.
+  markers (see §13.3). `lspStatusStore.ts` tracks server status for the status bar.
 
 This satisfies `F12` (go to definition), `Shift+F12` (find references), and
 `Cmd/Ctrl+Click` go-to-definition by routing those Monaco actions to LSP requests.
@@ -320,8 +337,8 @@ This satisfies `F12` (go to definition), `Shift+F12` (find references), and
   child exit is signaled on `terminal:exit:<id>`. **Input** (keystrokes, paste)
   is sent frontend -> backend with the `terminal_write(id, data)` command;
   resizing uses `terminal_resize(id, cols, rows)`.
-- **Multiple terminals:** each terminal has a unique id; the backend keeps a map
-  `id -> PtyHandle` in `AppState`. Creating, switching, and closing terminals is
+- **Multiple terminals:** each terminal has a unique frontend id; the backend's
+  `TerminalManager` scopes PTY handles by owning window plus id. Creating, switching, and closing terminals is
   command-driven (`Ctrl+\`` toggles the panel; `Ctrl+Shift+\`` creates a
   new terminal; `Cmd/Ctrl+J` toggles the bottom panel).
 - **Working directory** follows the `terminalCwdBehavior` setting
@@ -331,8 +348,8 @@ This satisfies `F12` (go to definition), `Shift+F12` (find references), and
 
 ## 9. Editor / Monaco integration
 
-- **Lazy load.** Monaco is dynamically imported the first time an editor tab opens
-  (`src/lib/monaco.ts`), keeping it out of the initial bundle. Vite is configured
+- **Lazy load.** `EditorArea.tsx` dynamically imports `MonacoEditor.tsx` the
+  first time a text editor tab opens, keeping it out of the initial bundle. Vite is configured
   so Monaco workers are emitted correctly.
 - **Models and tabs.** Each open document is a Monaco `ITextModel`; tabs in
   `EditorArea.tsx` map to models tracked in `editorStore.ts` (path, dirty flag,
@@ -466,13 +483,14 @@ the **Tauri path API** (`app.path().app_config_dir()`), centralized in
 4. The client converts LSP diagnostics into Monaco markers
    (`monaco.editor.setModelMarkers`) on the matching model, so squiggles appear
    inline; severity maps to Monaco marker severity.
-5. `lspStore.ts` updates counts for the Problems view / status bar.
+5. `lspStatusStore.ts` updates the language-server state shown in the status bar;
+   Monaco owns the diagnostic markers.
 
 ### 13.4 Toggle the terminal
 
 1. `Ctrl+\`` runs `terminal.toggle`, flipping a flag in `layoutStore.ts`.
-2. On first show, `terminal.ts` lazily creates an xterm instance and calls
-   `term_create`; thereafter it only re-attaches. Output continues flowing on the
+2. On first show, `BottomPanel.tsx` lazy-loads `TerminalPanel.tsx`; each
+   `TerminalView.tsx` creates xterm and calls `terminal_create`. Output continues on the
    per-id event channel regardless of panel visibility.
 
 ---
@@ -490,7 +508,8 @@ the **Tauri path API** (`app.path().app_config_dir()`), centralized in
   requests.
 - **Bounded streaming:** PTY and run output are streamed in chunks and rendered
   incrementally; xterm's scrollback is capped to avoid unbounded memory.
-- **Single WebView, single window:** keeps memory low and the IPC surface small.
+- **One WebView per native window:** each window loads the same code-split shell;
+  backend resources are keyed by window and released with their owning window.
 
 ---
 
@@ -500,7 +519,7 @@ Lyceum follows Tauri v2's capability/permission model — the WebView gets the
 **least privilege** required, and all sensitive I/O lives in Rust.
 
 - **Capabilities/permissions allowlist.** `src-tauri/capabilities/default.json`
-  grants the `main` window an explicit permission set. The scaffold starts from
+  grants every `main*` app window an explicit permission set. The scaffold starts from
   `core:default` and `opener:default`; new functionality adds **only** the
   specific permissions it needs. Lyceum does **not** expose broad plugin permissions
   (e.g. it does not grant the `fs` or `shell` plugins blanket access). Instead, all

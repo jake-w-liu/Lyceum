@@ -27,7 +27,9 @@ A lightweight, VS Code-inspired **research IDE** built with Tauri. It pairs a fo
 - **Styling:** plain CSS with CSS custom properties for theming. No heavy UI framework.
 - **LSP:** a generic JSON-RPC LSP client. The Rust backend spawns language servers over stdio and bridges messages to the frontend via Tauri commands/events. Built-in server profiles cover Julia LanguageServer.jl, Python (`pyright`), TypeScript/JavaScript (`typescript-language-server`), Rust (`rust-analyzer`), C/C++ (`clangd`), Go (`gopls`), C# (`csharp-ls`), and R (`languageserver`).
 - **Commands & keybindings:** a TypeScript command registry (every action is a command) plus a keybinding registry that maps shortcuts to command ids. Keybindings and settings are persisted as JSON in the OS app-config dir via Tauri.
-- **Testing:** Vitest + React Testing Library (frontend); `cargo test` (Rust). CI also runs npm audit, Rust clippy/fmt, cargo-audit, a production build, and a bundle-size gate.
+- **Testing:** Vitest + React Testing Library (frontend), Node release-gate tests,
+  and `cargo test` (Rust). CI also runs manifest-version consistency, npm audit,
+  Rust clippy/fmt, cargo-audit, a production build, and the bundle-size gate.
 
 ## Local Install And Build
 
@@ -40,7 +42,7 @@ cross-compile installers from another platform.
 
 Install these on every platform:
 
-- **Node.js 20.19+ or 22.12+** and npm — frontend toolchain and the local
+- **Node.js 20.19+ below 21, or 22.12+** and npm — frontend toolchain and the local
   Tauri CLI. The repo pins Node `22.12.0` in `.nvmrc`.
 - **Rust stable** with Cargo — Rust backend and native packaging.
 
@@ -64,7 +66,7 @@ curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | sh
 
 Install:
 
-- Node.js 20.19+ or 22.12+
+- Node.js 20.19+ below 21, or 22.12+
 - Rust via `rustup`, using the **MSVC** toolchain
 - Microsoft C++ Build Tools with **Desktop development with C++**
 - Microsoft Edge WebView2 Runtime if it is not already installed
@@ -202,8 +204,9 @@ Local builds are useful for testing, but public installers should be signed.
 
 For GitHub Releases, attach the platform installers as release assets. A user
 can then download the installer for their OS from the release page.
-The manual **Release Artifacts** GitHub workflow builds and uploads unsigned
-platform artifacts; production distribution still needs the platform signing
+The manual **Release Artifacts** GitHub workflow builds verification artifacts;
+macOS bundles are ad-hoc signed (`signingIdentity: "-"`) but not Developer ID
+signed or notarized, and production distribution still needs the platform
 credentials above.
 
 ### Optional Runtime Tools
@@ -225,7 +228,7 @@ These are not required to build Lyceum itself:
 ## Performance
 
 Startup stays fast because the heavy editors are code-split into lazy chunks and
-loaded only when first used — the verified **initial JS bundle is ~89 kB
+loaded only when first used — the verified **initial JS bundle is ~94 KiB
 gzipped**, while
 Monaco, PDF.js, image preview, xterm.js, and markdown-it live in separate chunks
 fetched on demand. There is no Electron (the app uses the OS-native WebView via Tauri), no
@@ -239,7 +242,7 @@ JavaScript/CSS gzip budgets against `dist/index.html`.
 # Frontend (Vitest + React Testing Library)
 npm test
 
-# Frontend typecheck + tests + production build + bundle budget
+# Manifest consistency + frontend typecheck/tests/build + bundle budget
 npm run check
 
 # Frontend dependency advisory gate

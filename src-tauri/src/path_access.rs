@@ -4,11 +4,35 @@ use std::sync::Mutex;
 
 use tauri::{AppHandle, Manager, State};
 
+use crate::workspace_paths::path_resolves_into_workspace_trash;
+
 /// Per-window filesystem access roots. The frontend must explicitly authorize a
 /// workspace root before Explorer/editor commands can read or write inside it.
 #[derive(Default)]
 pub struct PathAccessManager {
-    window_roots: Mutex<HashMap<String, HashSet<PathBuf>>>,
+    window_roots: Mutex<HashMap<String, WindowAccessRoots>>,
+}
+
+#[derive(Default)]
+struct WindowAccessRoots {
+    /// Grants requested directly by Explorer/editor/LSP commands. Repeated
+    /// authorization is set-like and watcher teardown must never remove it.
+    explicit: HashSet<PathBuf>,
+    /// Grants owned by the workspace watch lifecycle. These are revoked when a
+    /// watch fails, is replaced, or is explicitly stopped.
+    watcher: HashSet<PathBuf>,
+}
+
+impl WindowAccessRoots {
+    fn allows(&self, path: &Path) -> bool {
+        self.explicit.iter().chain(self.watcher.iter()).any(|root| {
+            is_same_or_descendant(path, root) && !path_resolves_into_workspace_trash(root, path)
+        })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.explicit.is_empty() && self.watcher.is_empty()
+    }
 }
 
 impl PathAccessManager {
@@ -16,7 +40,7 @@ impl PathAccessManager {
         let _ = app;
         let _removed = match self.window_roots.lock() {
             Ok(mut roots) => roots.remove(label).unwrap_or_default(),
-            Err(_) => HashSet::new(),
+            Err(_) => WindowAccessRoots::default(),
         };
     }
 }
@@ -53,6 +77,35 @@ pub fn authorize_workspace_root_impl(
     roots
         .entry(label.to_string())
         .or_default()
+        .explicit
+        .insert(root_path.clone());
+    Ok(root_path.to_string_lossy().into_owned())
+}
+
+/// Grant a root on behalf of the workspace watcher. Kept separate from direct
+/// command grants so an overlapping unwatch cannot revoke editor/LSP access.
+pub fn authorize_workspace_root_for_watcher_impl(
+    app: &AppHandle,
+    label: &str,
+    state: &State<'_, PathAccessManager>,
+    root_path: PathBuf,
+) -> Result<String, String> {
+    app.asset_protocol_scope()
+        .allow_directory(&root_path, true)
+        .map_err(|e| {
+            format!(
+                "failed to authorize {} for previews: {e}",
+                root_path.display()
+            )
+        })?;
+    let mut roots = state
+        .window_roots
+        .lock()
+        .map_err(|_| "path access lock poisoned".to_string())?;
+    roots
+        .entry(label.to_string())
+        .or_default()
+        .watcher
         .insert(root_path.clone());
     Ok(root_path.to_string_lossy().into_owned())
 }
@@ -81,14 +134,22 @@ pub fn revoke_workspace_root_impl(
         match root {
             None => roots.remove(label).unwrap_or_default(),
             Some(root) => {
-                let mut removed = HashSet::new();
+                let mut removed = WindowAccessRoots::default();
                 if let Some(window_roots) = roots.get_mut(label) {
                     let requested = Path::new(root).canonicalize().ok();
-                    window_roots.retain(|allowed| {
+                    window_roots.explicit.retain(|allowed| {
                         let matches = requested.as_ref().is_some_and(|path| path == allowed)
                             || path_equal_lexically(root, allowed);
                         if matches {
-                            removed.insert(allowed.clone());
+                            removed.explicit.insert(allowed.clone());
+                        }
+                        !matches
+                    });
+                    window_roots.watcher.retain(|allowed| {
+                        let matches = requested.as_ref().is_some_and(|path| path == allowed)
+                            || path_equal_lexically(root, allowed);
+                        if matches {
+                            removed.watcher.insert(allowed.clone());
                         }
                         !matches
                     });
@@ -106,6 +167,83 @@ pub fn revoke_workspace_root_impl(
     // docs/RISKS.md.
     let _ = (app, removed);
     Ok(())
+}
+
+/// Revoke only roots owned by the watcher lifecycle. Direct command grants for
+/// the same canonical root remain valid.
+pub fn revoke_workspace_root_for_watcher_impl(
+    app: &AppHandle,
+    label: &str,
+    state: &State<'_, PathAccessManager>,
+    canonical_root: Option<&Path>,
+) -> Result<(), String> {
+    let removed = {
+        let mut roots = state
+            .window_roots
+            .lock()
+            .map_err(|_| "path access lock poisoned".to_string())?;
+        let mut removed = HashSet::new();
+        if let Some(window_roots) = roots.get_mut(label) {
+            removed = remove_canonical_roots(&mut window_roots.watcher, canonical_root);
+            if window_roots.is_empty() {
+                roots.remove(label);
+            }
+        }
+        removed
+    };
+    // Tauri has no reversible asset-scope removal; IPC authorization above is
+    // the enforceable boundary. Keep the variable to document that asymmetry.
+    let _ = (app, removed);
+    Ok(())
+}
+
+/// Revoke every grant owner for an exact canonical workspace root. Workspace
+/// lifecycle completion (unwatch/root replacement) uses this; failed or stale
+/// watcher setup uses the watcher-only variant above.
+pub fn revoke_workspace_root_canonical_impl(
+    app: &AppHandle,
+    label: &str,
+    state: &State<'_, PathAccessManager>,
+    canonical_root: Option<&Path>,
+) -> Result<(), String> {
+    let removed = {
+        let mut roots = state
+            .window_roots
+            .lock()
+            .map_err(|_| "path access lock poisoned".to_string())?;
+        let mut removed = WindowAccessRoots::default();
+        if let Some(window_roots) = roots.get_mut(label) {
+            removed.explicit = remove_canonical_roots(&mut window_roots.explicit, canonical_root);
+            removed.watcher = remove_canonical_roots(&mut window_roots.watcher, canonical_root);
+            if window_roots.is_empty() {
+                roots.remove(label);
+            }
+        }
+        removed
+    };
+    let _ = (app, removed);
+    Ok(())
+}
+
+fn remove_canonical_roots(
+    roots: &mut HashSet<PathBuf>,
+    canonical_root: Option<&Path>,
+) -> HashSet<PathBuf> {
+    match canonical_root {
+        None => std::mem::take(roots),
+        Some(canonical_root) => {
+            let mut removed = HashSet::new();
+            roots.retain(|allowed| {
+                if allowed == canonical_root {
+                    removed.insert(allowed.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            removed
+        }
+    }
 }
 
 pub fn ensure_existing_allowed(
@@ -187,10 +325,10 @@ fn ensure_allowed_canonical(
         .window_roots
         .lock()
         .map_err(|_| "path access lock poisoned".to_string())?;
-    if roots.get(window.label()).is_some_and(|set| {
-        set.iter()
-            .any(|root| is_same_or_descendant(canonical, root))
-    }) {
+    if roots
+        .get(window.label())
+        .is_some_and(|roots| roots.allows(canonical))
+    {
         return Ok(());
     }
     Err(format!(
@@ -293,5 +431,73 @@ mod tests {
     fn lexical_normalization_removes_parent_segments_before_access_checks() {
         let path = normalize_lexically(Path::new("/tmp/root/new/../../outside.txt"));
         assert_eq!(path, PathBuf::from("/tmp/outside.txt"));
+    }
+
+    #[test]
+    fn watcher_revoke_preserves_an_explicit_same_root_grant() {
+        let root = PathBuf::from("/workspace");
+        let mut access = WindowAccessRoots::default();
+        access.explicit.insert(root.clone());
+        access.watcher.insert(root.clone());
+
+        let removed = remove_canonical_roots(&mut access.watcher, Some(&root));
+
+        assert_eq!(removed, HashSet::from([root.clone()]));
+        assert!(access.watcher.is_empty());
+        assert!(access.allows(&root.join("document.tex")));
+    }
+
+    #[test]
+    fn replacing_workspace_a_with_b_removes_only_a_grants() {
+        let old = PathBuf::from("/workspace-old");
+        let new = PathBuf::from("/workspace-new");
+        let mut access = WindowAccessRoots::default();
+        access.explicit.extend([old.clone(), new.clone()]);
+        access.watcher.extend([old.clone(), new.clone()]);
+
+        remove_canonical_roots(&mut access.watcher, Some(&old));
+        remove_canonical_roots(&mut access.explicit, Some(&old));
+
+        assert_eq!(access.watcher, HashSet::from([new.clone()]));
+        assert_eq!(access.explicit, HashSet::from([new]));
+    }
+
+    #[test]
+    fn watcher_revoke_uses_stored_canonical_identity_after_requested_link_disappears() {
+        // The requested spelling may have been `/link/workspace`, but cleanup
+        // already owns the canonical `/real/workspace`. Exact canonical removal
+        // must not depend on re-canonicalizing a now-missing symlink.
+        let canonical = PathBuf::from("/real/workspace");
+        let mut watcher = HashSet::from([canonical.clone()]);
+
+        let removed = remove_canonical_roots(&mut watcher, Some(&canonical));
+
+        assert_eq!(removed, HashSet::from([canonical]));
+        assert!(watcher.is_empty());
+    }
+
+    #[test]
+    fn full_revoke_semantics_clear_both_grant_owners() {
+        let root = PathBuf::from("/workspace");
+        let mut access = WindowAccessRoots::default();
+        access.explicit.insert(root.clone());
+        access.watcher.insert(root);
+
+        let explicit = remove_canonical_roots(&mut access.explicit, None);
+        let watcher = remove_canonical_roots(&mut access.watcher, None);
+
+        assert_eq!(explicit.len(), 1);
+        assert_eq!(watcher.len(), 1);
+        assert!(access.is_empty());
+    }
+
+    #[test]
+    fn workspace_grant_excludes_only_its_root_internal_trash() {
+        let root = PathBuf::from("/workspace");
+        let mut access = WindowAccessRoots::default();
+        access.explicit.insert(root.clone());
+
+        assert!(!access.allows(&root.join(".lyceum-trash/deleted.txt")));
+        assert!(access.allows(&root.join("docs/.lyceum-trash/visible.txt")));
     }
 }

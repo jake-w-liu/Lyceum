@@ -354,7 +354,7 @@ describe("Explorer", () => {
     await userEvent.click(screen.getByRole("button", { name: "New File" }));
     const input = screen.getByLabelText("New file name");
     await userEvent.type(input, "notes.txt{Enter}");
-    expect(createFile).toHaveBeenCalledWith("/ws/notes.txt");
+    expect(createFile).toHaveBeenCalledWith("/ws", "/ws/notes.txt");
   });
 
   it("creates a new file inside the selected folder", async () => {
@@ -366,7 +366,7 @@ describe("Explorer", () => {
     const input = screen.getByLabelText("New file name");
     await userEvent.type(input, "child.ts{Enter}");
 
-    expect(createFile).toHaveBeenCalledWith("/ws/src/child.ts");
+    expect(createFile).toHaveBeenCalledWith("/ws", "/ws/src/child.ts");
   });
 
   it("creates a new folder beside the selected file", async () => {
@@ -378,7 +378,10 @@ describe("Explorer", () => {
     const input = screen.getByLabelText("New folder name");
     await userEvent.type(input, "components{Enter}");
 
-    expect(createDirectory).toHaveBeenCalledWith("/ws/src/components");
+    expect(createDirectory).toHaveBeenCalledWith(
+      "/ws",
+      "/ws/src/components",
+    );
   });
 
   it("creates a new file in the selected directory even after Collapse All hides it", async () => {
@@ -394,7 +397,7 @@ describe("Explorer", () => {
     await userEvent.type(input, "child.ts{Enter}");
 
     // Must target src (the hidden selection's dir), NOT the workspace root.
-    expect(createFile).toHaveBeenCalledWith("/ws/src/child.ts");
+    expect(createFile).toHaveBeenCalledWith("/ws", "/ws/src/child.ts");
   });
 
   it("mounts the create input for a DEEPLY nested target after Collapse All", async () => {
@@ -420,7 +423,10 @@ describe("Explorer", () => {
     const input = await screen.findByLabelText("New file name");
     await userEvent.type(input, "child.ts{Enter}");
 
-    expect(createFile).toHaveBeenCalledWith("/ws/src/components/child.ts");
+    expect(createFile).toHaveBeenCalledWith(
+      "/ws",
+      "/ws/src/components/child.ts",
+    );
   });
 
   it("rejects create names that would escape the workspace", async () => {
@@ -467,7 +473,11 @@ describe("Explorer", () => {
     await userEvent.clear(input);
     await userEvent.type(input, "NOTES.md{Enter}");
 
-    expect(renamePath).toHaveBeenCalledWith("/ws/README.md", "/ws/NOTES.md");
+    expect(renamePath).toHaveBeenCalledWith(
+      "/ws",
+      "/ws/README.md",
+      "/ws/NOTES.md",
+    );
     expect(useEditorStore.getState().docs[0].path).toBe("/ws/NOTES.md");
     expect(useEditorStore.getState().activePath).toBe("/ws/NOTES.md");
   });
@@ -527,6 +537,198 @@ describe("Explorer", () => {
       expect(movePaths).toHaveBeenCalledWith(ROOT, ["/ws/README.md"], "/ws/src"),
     );
     expect(useEditorStore.getState().docs[0].path).toBe("/ws/src/README.md");
+  });
+
+  it("offers Replace for a structured drop conflict and removes the old destination tab", async () => {
+    vi.mocked(movePaths)
+      .mockRejectedValueOnce(
+        'destination conflict: already exists: ["/ws/src/README.md"]',
+      )
+      .mockResolvedValueOnce([
+        {
+          from: "/ws/README.md",
+          to: "/ws/src/README.md",
+          isDir: false,
+          replaced: true,
+          replacedPath: "/ws/src/README.md",
+        },
+      ]);
+    useEditorStore.getState().openDoc({
+      path: "/ws/src/README.md",
+      content: "old destination",
+      language: "markdown",
+    });
+    useEditorStore.getState().openDoc({
+      path: "/ws/README.md",
+      content: "incoming source",
+      language: "markdown",
+    });
+    render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await screen.findByText("README.md");
+    const readmeRow = screen.getByText("README.md").closest(".tree-row")!;
+    const srcRow = screen.getByText("src").closest(".tree-row")!;
+    const dataTransfer = createDataTransfer();
+
+    fireEvent.dragStart(readmeRow, { dataTransfer });
+    fireEvent.dragOver(srcRow, { dataTransfer });
+    fireEvent.drop(srcRow, { dataTransfer });
+
+    await waitFor(() => expect(movePaths).toHaveBeenCalledTimes(2));
+    expect(movePaths).toHaveBeenNthCalledWith(
+      1,
+      ROOT,
+      ["/ws/README.md"],
+      "/ws/src",
+    );
+    expect(movePaths).toHaveBeenNthCalledWith(
+      2,
+      ROOT,
+      ["/ws/README.md"],
+      "/ws/src",
+      true,
+      ["/ws/src/README.md"],
+    );
+    expect(ask).toHaveBeenCalledWith(
+      expect.stringContaining("Replace them?"),
+      expect.objectContaining({
+        title: "Replace Existing Items",
+        okLabel: "Replace",
+        cancelLabel: "Cancel",
+      }),
+    );
+    expect(useEditorStore.getState().docs).toEqual([
+      expect.objectContaining({
+        path: "/ws/src/README.md",
+        content: "incoming source",
+      }),
+    ]);
+  });
+
+  it("closes an approved destination tab when its conflict disappears before retry", async () => {
+    vi.mocked(movePaths)
+      .mockRejectedValueOnce(
+        'destination conflict: already exists: ["/ws/src/readme.md"]',
+      )
+      .mockResolvedValueOnce([
+        {
+          from: "/ws/README.md",
+          to: "/ws/src/README.md",
+          isDir: false,
+          // Another actor removed the destination after the initial conflict.
+          // The retry still succeeds, but no on-disk entry was displaced.
+          replaced: false,
+          replacedPath: null,
+        },
+      ]);
+    useEditorStore.getState().openDoc({
+      // A case-insensitive filesystem can report the existing entry with a
+      // different spelling from the incoming source name.
+      path: "/ws/src/readme.md",
+      content: "stale destination tab",
+      language: "markdown",
+    });
+    useEditorStore.getState().openDoc({
+      path: "/ws/README.md",
+      content: "incoming source",
+      language: "markdown",
+    });
+    render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await screen.findByText("README.md");
+    const dataTransfer = createDataTransfer();
+
+    fireEvent.dragStart(screen.getByText("README.md").closest(".tree-row")!, {
+      dataTransfer,
+    });
+    fireEvent.drop(screen.getByText("src").closest(".tree-row")!, {
+      dataTransfer,
+    });
+
+    await waitFor(() => expect(movePaths).toHaveBeenCalledTimes(2));
+    expect(useEditorStore.getState().docs).toEqual([
+      expect.objectContaining({
+        path: "/ws/src/README.md",
+        content: "incoming source",
+      }),
+    ]);
+  });
+
+  it("blocks only the affected editor move when a destination tab changes during retry", async () => {
+    vi.mocked(movePaths)
+      .mockRejectedValueOnce(
+        'destination conflict: already exists: ["/ws/src/README.md"]',
+      )
+      .mockImplementationOnce(async () => {
+        useEditorStore
+          .getState()
+          .updateContent("/ws/src/README.md", "edited during retry");
+        return [
+          {
+            from: "/ws/README.md",
+            to: "/ws/src/README.md",
+            isDir: false,
+            replaced: false,
+            replacedPath: null,
+          },
+        ];
+      });
+    vi.mocked(ask)
+      .mockResolvedValueOnce(true) // Replace.
+      .mockResolvedValueOnce(false); // Keep the newly edited destination tab.
+    useEditorStore.getState().openDoc({
+      path: "/ws/src/README.md",
+      content: "old destination",
+      language: "markdown",
+    });
+    useEditorStore.getState().openDoc({
+      path: "/ws/README.md",
+      content: "incoming source",
+      language: "markdown",
+    });
+    render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await screen.findByText("README.md");
+    const dataTransfer = createDataTransfer();
+
+    fireEvent.dragStart(screen.getByText("README.md").closest(".tree-row")!, {
+      dataTransfer,
+    });
+    fireEvent.drop(screen.getByText("src").closest(".tree-row")!, {
+      dataTransfer,
+    });
+
+    await waitFor(() => expect(movePaths).toHaveBeenCalledTimes(2));
+    expect(useEditorStore.getState().docs).toEqual([
+      expect.objectContaining({
+        path: "/ws/src/README.md",
+        content: "edited during retry",
+      }),
+      expect.objectContaining({
+        path: "/ws/README.md",
+        content: "incoming source",
+      }),
+    ]);
+    expect(message).toHaveBeenCalledWith(
+      expect.stringContaining("newly edited destination tabs were kept open"),
+    );
+  });
+
+  it("does not offer Replace for an unstructured move failure", async () => {
+    vi.mocked(movePaths).mockRejectedValueOnce(
+      "destination conflict: already exists: /ws/src/README.md",
+    );
+    render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await screen.findByText("README.md");
+    const dataTransfer = createDataTransfer();
+
+    fireEvent.dragStart(screen.getByText("README.md").closest(".tree-row")!, {
+      dataTransfer,
+    });
+    fireEvent.drop(screen.getByText("src").closest(".tree-row")!, {
+      dataTransfer,
+    });
+
+    await waitFor(() => expect(message).toHaveBeenCalled());
+    expect(ask).not.toHaveBeenCalled();
+    expect(movePaths).toHaveBeenCalledTimes(1);
   });
 
   it("clears a stale folder drop target when dragging over a non-droppable row", async () => {
@@ -642,6 +844,130 @@ describe("Explorer", () => {
         delete (window as unknown as { devicePixelRatio?: unknown })
           .devicePixelRatio;
       }
+    }
+  });
+
+  it("re-prompts when a new native-drop conflict appears before the replace retry", async () => {
+    vi.mocked(copyPaths)
+      .mockRejectedValueOnce(
+        'destination conflict: already exists: ["/ws/src/one.txt"]',
+      )
+      .mockRejectedValueOnce(
+        'destination conflict: already exists: ["/ws/src/one.txt","/ws/src/two.txt"]',
+      )
+      .mockResolvedValueOnce([
+        {
+          from: "/tmp/one.txt",
+          to: "/ws/src/one.txt",
+          isDir: false,
+          replaced: true,
+          replacedPath: "/ws/src/one.txt",
+        },
+        {
+          from: "/tmp/two.txt",
+          to: "/ws/src/two.txt",
+          isDir: false,
+          replaced: true,
+          replacedPath: "/ws/src/two.txt",
+        },
+      ]);
+    render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await screen.findByText("src");
+    await waitFor(() => expect(webviewMocks.onDragDropEvent).toHaveBeenCalled());
+    const hitTest = mockElementFromPoint(
+      screen.getByText("src").closest(".tree-row")!,
+    );
+
+    try {
+      const calls = webviewMocks.onDragDropEvent.mock
+        .calls as unknown as Array<[NativeDropHandler]>;
+      calls[0][0]({
+        payload: {
+          type: "drop",
+          paths: ["/tmp/one.txt", "/tmp/two.txt"],
+          position: { x: 10, y: 10 },
+        },
+      });
+
+      await waitFor(() => expect(copyPaths).toHaveBeenCalledTimes(3));
+      expect(copyPaths).toHaveBeenNthCalledWith(
+        2,
+        ROOT,
+        ["/tmp/one.txt", "/tmp/two.txt"],
+        "/ws/src",
+        true,
+        ["/ws/src/one.txt"],
+      );
+      expect(copyPaths).toHaveBeenNthCalledWith(
+        3,
+        ROOT,
+        ["/tmp/one.txt", "/tmp/two.txt"],
+        "/ws/src",
+        true,
+        ["/ws/src/one.txt", "/ws/src/two.txt"],
+      );
+      expect(ask).toHaveBeenCalledTimes(2);
+    } finally {
+      hitTest.restore();
+    }
+  });
+
+  it("re-approves a dirty destination edited while a later discard prompt is open", async () => {
+    const conflicts = ["/ws/src/one.txt", "/ws/src/two.txt"];
+    vi.mocked(copyPaths)
+      .mockRejectedValueOnce(
+        `destination conflict: already exists: ${JSON.stringify(conflicts)}`,
+      )
+      .mockResolvedValueOnce(
+        conflicts.map((path, index) => ({
+          from: `/tmp/${index === 0 ? "one" : "two"}.txt`,
+          to: path,
+          isDir: false,
+          replaced: true,
+          replacedPath: path,
+        })),
+      );
+    for (const path of conflicts) {
+      useEditorStore.getState().openDoc({
+        path,
+        content: "saved",
+        language: "plaintext",
+      });
+      useEditorStore.getState().updateContent(path, "dirty");
+    }
+    let askCount = 0;
+    vi.mocked(ask).mockImplementation(async () => {
+      askCount += 1;
+      // Replace is call 1, first discard is call 2, second discard is call 3.
+      // Editing the first doc here invalidates its earlier approval.
+      if (askCount === 3) {
+        useEditorStore.getState().updateContent(conflicts[0], "dirty again");
+      }
+      return true;
+    });
+    render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await screen.findByText("src");
+    await waitFor(() => expect(webviewMocks.onDragDropEvent).toHaveBeenCalled());
+    const hitTest = mockElementFromPoint(
+      screen.getByText("src").closest(".tree-row")!,
+    );
+
+    try {
+      const calls = webviewMocks.onDragDropEvent.mock
+        .calls as unknown as Array<[NativeDropHandler]>;
+      calls[0][0]({
+        payload: {
+          type: "drop",
+          paths: ["/tmp/one.txt", "/tmp/two.txt"],
+          position: { x: 10, y: 10 },
+        },
+      });
+
+      await waitFor(() => expect(copyPaths).toHaveBeenCalledTimes(2));
+      expect(ask).toHaveBeenCalledTimes(4);
+      expect(useEditorStore.getState().docs).toHaveLength(0);
+    } finally {
+      hitTest.restore();
     }
   });
 

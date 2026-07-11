@@ -20,6 +20,7 @@ mod search;
 mod terminal;
 mod walk;
 mod window_ops;
+mod workspace_paths;
 mod workspace_watch;
 
 use std::collections::HashMap;
@@ -52,9 +53,38 @@ fn first_dir_arg<I: IntoIterator<Item = String>>(args: I) -> Option<String> {
         .map(|p| p.to_string_lossy().into_owned())
 }
 
+fn first_dir_arg_from<I: IntoIterator<Item = String>>(
+    args: I,
+    launch_cwd: &std::path::Path,
+) -> Option<String> {
+    args.into_iter()
+        .map(std::path::PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                launch_cwd.join(path)
+            }
+        })
+        .find(|path| path.is_dir())
+        .and_then(|path| std::fs::canonicalize(path).ok())
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
 /// The launch folder for a cold start, resolved from this process's argv.
 fn launch_dir_from_args() -> Option<String> {
     first_dir_arg(std::env::args().skip(1))
+}
+
+/// Preserve the cross-manager teardown invariant for a destroyed window. The
+/// watcher tombstone must exist before its path grants are cleared, otherwise a
+/// previously claimed setup can recreate a grant and install in between.
+fn teardown_window_workspace_ownership(
+    invalidate_watcher: impl FnOnce(),
+    clear_path_access: impl FnOnce(),
+) {
+    invalidate_watcher();
+    clear_path_access();
 }
 
 /// Returns basic information about the running app and host platform.
@@ -78,10 +108,18 @@ pub fn run() {
         // Must be the first plugin: a second launch (double-click or `lyceum .`)
         // hands its argv to the already-running process and exits, so macOS keeps
         // one dock icon. We open a window for it and record any folder it carried.
-        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
             // Open the window first so we know its label, then record the folder
             // (if any) against that exact window — never a different one.
-            let dir = first_dir_arg(argv);
+            // Relative argv entries belong to the SECOND process's cwd, not the
+            // already-running GUI process's cwd. The plugin forwards that cwd
+            // explicitly; ignoring it makes `lyceum .` open the wrong folder (or
+            // none) whenever the first instance was launched elsewhere.
+            let dir = if cwd.is_empty() {
+                first_dir_arg(argv)
+            } else {
+                first_dir_arg_from(argv, std::path::Path::new(&cwd))
+            };
             match window_ops::open_new_window(app) {
                 Ok(window) => {
                     if let Some(dir) = dir {
@@ -133,12 +171,21 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
                 let label = window.label();
-                window
-                    .state::<path_access::PathAccessManager>()
-                    .remove_window(window.app_handle(), label);
-                window
-                    .state::<workspace_watch::WorkspaceWatchManager>()
-                    .remove_window(label);
+                teardown_window_workspace_ownership(
+                    || {
+                        window
+                            .state::<workspace_watch::WorkspaceWatchManager>()
+                            .remove_window(label);
+                    },
+                    || {
+                        // Once tombstoned, a previously claimed setup cannot
+                        // install; its stale-setup path revokes any grant it
+                        // happens to insert after this clear.
+                        window
+                            .state::<path_access::PathAccessManager>()
+                            .remove_window(window.app_handle(), label);
+                    },
+                );
                 window
                     .state::<terminal::TerminalManager>()
                     .close_sessions_for_window(label);
@@ -272,4 +319,38 @@ pub fn run() {
                 _ => {}
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{first_dir_arg_from, teardown_window_workspace_ownership};
+    use std::cell::RefCell;
+
+    #[test]
+    fn relative_second_instance_directory_uses_the_launching_process_cwd() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+
+        let resolved =
+            first_dir_arg_from(["lyceum".to_string(), "workspace".to_string()], tmp.path());
+
+        let expected = workspace.canonicalize().unwrap();
+        assert_eq!(
+            resolved.as_deref(),
+            Some(expected.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn destroyed_window_tombstones_watcher_before_clearing_path_access() {
+        let order = RefCell::new(Vec::new());
+
+        teardown_window_workspace_ownership(
+            || order.borrow_mut().push("watcher"),
+            || order.borrow_mut().push("access"),
+        );
+
+        assert_eq!(order.into_inner(), ["watcher", "access"]);
+    }
 }

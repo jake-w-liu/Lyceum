@@ -156,6 +156,7 @@ pub fn run_latex_build(
         julia::run_key(&window, &id),
         state.runs.clone(),
         state.pending_cancel.clone(),
+        state.teardowns.clone(),
         out_event,
         format!("build:exit:{id}"),
     );

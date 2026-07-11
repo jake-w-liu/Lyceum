@@ -10,16 +10,12 @@ use std::path::{Path, PathBuf};
 use tauri::{AppHandle, State};
 
 use crate::path_access::{self, PathAccessManager};
+use crate::workspace_paths::{
+    path_resolves_into_workspace_trash, path_resolves_through_workspace_names,
+};
 
 /// Directory names that are skipped entirely (not descended into).
-const SKIP_DIRS: [&str; 6] = [
-    ".git",
-    "node_modules",
-    "target",
-    "dist",
-    ".vite",
-    ".lyceum-trash",
-];
+const SKIP_DIRS: [&str; 4] = ["node_modules", "target", "dist", ".vite"];
 
 /// Recursively collect absolute file paths under `root`, skipping a fixed set of
 /// directories. Stops once `max` files have been collected, then sorts the
@@ -57,6 +53,11 @@ pub fn list_files(root: &Path, max: usize) -> Result<Vec<String>, String> {
                 continue;
             };
             let path = entry.path();
+            if path_resolves_into_workspace_trash(root, &path)
+                || path_resolves_through_workspace_names(root, &path, &[".git"], &SKIP_DIRS)
+            {
+                continue;
+            }
             // Resolve the REAL kind: file_type() reports a symlink as a symlink
             // (is_dir() == false), so a symlinked directory would otherwise be
             // recorded as a bogus "file" that fails to open. Follow the link.
@@ -69,10 +70,6 @@ pub fn list_files(root: &Path, max: usize) -> Result<Vec<String>, String> {
                 file_type.is_dir()
             };
             if is_dir {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if SKIP_DIRS.contains(&name.as_str()) {
-                    continue;
-                }
                 // Canonicalize before descending so a tree reachable via a
                 // symlink (or two paths) is walked at most once.
                 match path.canonicalize() {
@@ -170,6 +167,173 @@ mod tests {
 
         assert!(files.iter().any(|f| f.ends_with("keep.txt")));
         assert!(!files.iter().any(|f| f.contains(".lyceum-trash")));
+    }
+
+    #[test]
+    fn regular_file_named_like_a_heavy_directory_remains_visible() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        fs::write(root.join("target"), b"ordinary file").unwrap();
+
+        let files = list_files(root, 5000).expect("walk");
+
+        assert_eq!(files, [root.join("target").to_string_lossy().to_string()]);
+    }
+
+    #[test]
+    fn includes_nested_trash_named_directories() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let nested = root.join("docs").join(".lyceum-trash");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("visible.txt"), b"visible").unwrap();
+
+        let files = list_files(root, 5000).expect("walk");
+
+        assert!(files
+            .iter()
+            .any(|path| path_ends_with(path, &["docs", ".lyceum-trash", "visible.txt"])));
+    }
+
+    #[test]
+    fn excludes_a_case_aliased_root_trash_entry_when_the_filesystem_aliases_it() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let upper = root.join(".LYCEUM-TRASH");
+        fs::create_dir(&upper).unwrap();
+        fs::write(upper.join("internal.txt"), b"internal").unwrap();
+        if !root.join(".lyceum-trash").exists() {
+            return;
+        }
+
+        let files = list_files(root, 5000).expect("walk");
+
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn excludes_the_reserved_root_trash_name_even_when_it_is_a_file() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        fs::write(root.join(".lyceum-trash"), b"must stay internal").unwrap();
+
+        let files = list_files(root, 5000).expect("walk");
+
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn excludes_gitdir_pointer_files_before_kind_dispatch() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        fs::write(root.join(".git"), b"gitdir: ../metadata").unwrap();
+
+        assert!(list_files(root, 5000).unwrap().is_empty());
+    }
+
+    #[test]
+    fn case_aliased_git_and_heavy_directories_follow_filesystem_identity() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let upper_git = root.join(".GIT");
+        let upper_modules = root.join("NODE_MODULES");
+        fs::create_dir(&upper_git).unwrap();
+        fs::create_dir(&upper_modules).unwrap();
+        fs::write(upper_git.join("config"), b"git metadata").unwrap();
+        fs::write(upper_modules.join("dependency.js"), b"dependency").unwrap();
+        let aliases = root.join(".git").exists();
+
+        let files = list_files(root, 5000).unwrap();
+
+        if aliases {
+            assert!(files.is_empty());
+        } else {
+            assert_eq!(files.len(), 2);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_alias_to_git_metadata_is_not_listed() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join(".git").join("secret"), b"metadata").unwrap();
+        symlink(".git", root.join("git-link")).unwrap();
+        fs::create_dir(root.join("node_modules")).unwrap();
+        fs::write(
+            root.join("node_modules").join("dependency.js"),
+            b"dependency",
+        )
+        .unwrap();
+        symlink("node_modules", root.join("deps-link")).unwrap();
+        fs::create_dir(root.join("nested")).unwrap();
+        fs::create_dir(root.join("nested").join(".git")).unwrap();
+        fs::write(
+            root.join("nested").join(".git").join("cross-parent-secret"),
+            b"metadata",
+        )
+        .unwrap();
+        symlink("nested/.git", root.join("nested-git-link")).unwrap();
+        fs::create_dir(root.join("nested").join("node_modules")).unwrap();
+        fs::write(
+            root.join("nested")
+                .join("node_modules")
+                .join("cross-parent-dependency.js"),
+            b"dependency",
+        )
+        .unwrap();
+        symlink("nested/node_modules", root.join("nested-deps-link")).unwrap();
+
+        assert!(list_files(root, 5000).unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_symlinks_into_git_and_heavy_directories_are_not_listed() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join(".git").join("config"), b"metadata").unwrap();
+        fs::create_dir(root.join("node_modules")).unwrap();
+        fs::write(
+            root.join("node_modules").join("dependency.js"),
+            b"dependency",
+        )
+        .unwrap();
+        fs::create_dir(root.join("docs")).unwrap();
+        symlink("../.git/config", root.join("docs").join("config-link")).unwrap();
+        symlink(
+            "../node_modules/dependency.js",
+            root.join("docs").join("dependency-link"),
+        )
+        .unwrap();
+
+        assert!(list_files(root, 5000).unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn aliases_into_root_workspace_trash_are_not_listed() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        fs::create_dir(root.join(".lyceum-trash")).unwrap();
+        fs::write(root.join(".lyceum-trash").join("deleted.txt"), b"deleted").unwrap();
+        symlink(".lyceum-trash", root.join("trash-link")).unwrap();
+        fs::create_dir(root.join("docs")).unwrap();
+        symlink(
+            "../.lyceum-trash/deleted.txt",
+            root.join("docs").join("deleted-link"),
+        )
+        .unwrap();
+
+        assert!(list_files(root, 5000).unwrap().is_empty());
     }
 
     #[test]

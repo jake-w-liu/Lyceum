@@ -32,6 +32,9 @@ describe("resolveTerminalCwd", () => {
     expect(resolveTerminalCwd("currentFileDir", "C:\\w", "C:\\a.txt")).toBe(
       "C:\\",
     );
+    expect(resolveTerminalCwd("currentFileDir", "C:/w", "C:/a.txt")).toBe(
+      "C:/",
+    );
   });
 
   it("returns root for a file at the filesystem root", () => {

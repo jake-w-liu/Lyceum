@@ -4,27 +4,237 @@
 // for compatibility with older frontends, but still goes through the same backend
 // executable/cwd authorization discipline as the generic run command.
 //
-// Running children are tracked in `RunManager` (id -> pid) so a long-running or
-// hung run can be cancelled from the UI via `run_cancel`; entries are removed on
-// natural exit. This mirrors the terminal/LSP managers, which retain kill handles.
+// Running children are tracked in `RunManager` (id -> owned Child handle) so a
+// long-running or hung run can be cancelled from the UI via `run_cancel` without
+// a bare-PID reuse race; entries are removed on natural exit. This mirrors the
+// terminal/LSP managers, which also retain owned process handles.
 
 use std::collections::HashMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
-use std::io::Read;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::path_access::{self, PathAccessManager};
 
-/// id -> OS pid of the running child, so runs can be cancelled and cleaned up.
-pub(crate) type RunMap = Arc<Mutex<HashMap<String, u32>>>;
+struct OwnedChildState {
+    child: Child,
+    /// Once set, every later waiter returns this status without touching the OS
+    /// process id again. Recording the reap under the same lock as `Child` keeps
+    /// termination from ever signaling a pid that has already become reusable.
+    reaped: Option<ExitStatus>,
+}
+
+#[derive(Default)]
+struct TerminationResult {
+    done: bool,
+    status: Option<ExitStatus>,
+}
+
+#[derive(Default)]
+struct TerminationCompletion {
+    result: Mutex<TerminationResult>,
+    ready: Condvar,
+}
+
+impl TerminationCompletion {
+    fn finish(&self, status: Option<ExitStatus>) {
+        let mut result = self
+            .result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        result.status = status;
+        result.done = true;
+        self.ready.notify_all();
+    }
+
+    fn wait_until(&self, deadline: Option<Instant>) -> Option<ExitStatus> {
+        let mut result = self
+            .result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while !result.done {
+            result = match deadline {
+                Some(deadline) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return None;
+                    }
+                    let (next, timeout) = self
+                        .ready
+                        .wait_timeout(result, deadline.saturating_duration_since(now))
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if timeout.timed_out() && !next.done {
+                        return None;
+                    }
+                    next
+                }
+                None => self
+                    .ready
+                    .wait(result)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            };
+        }
+        result.status
+    }
+}
+
+/// Shared ownership of a spawned child plus its one-shot termination state.
+/// Waiters consult `termination` before calling `try_wait`, so once cancellation
+/// starts the leader remains unreaped (and its pid/process-group id cannot be
+/// reused) until the grace/escalation worker has signaled the owned group.
+pub(crate) struct OwnedChild {
+    state: Mutex<OwnedChildState>,
+    termination: Mutex<Option<Arc<TerminationCompletion>>>,
+    /// Set only by `own_child_in_new_process_group`, after the caller applied
+    /// `configure_process_group`. Plain owned children retain `None` and never
+    /// receive a negative-pid signal.
+    process_group: Option<u32>,
+}
+
+pub(crate) type OwnedRun = Arc<OwnedChild>;
+
+pub(crate) fn own_child(child: Child) -> OwnedRun {
+    Arc::new(OwnedChild {
+        state: Mutex::new(OwnedChildState {
+            child,
+            reaped: None,
+        }),
+        termination: Mutex::new(None),
+        process_group: None,
+    })
+}
+
+/// Own a child that was spawned from a command configured by
+/// `configure_process_group`. The group id is the leader pid by construction;
+/// recording `Child::id()` does not query an already-exited process.
+pub(crate) fn own_child_in_new_process_group(child: Child) -> OwnedRun {
+    let process_group = child.id();
+    let mut owned = own_child(child);
+    Arc::get_mut(&mut owned)
+        .expect("a newly-created OwnedChild has one strong reference")
+        .process_group = Some(process_group);
+    owned
+}
+
+/// id -> owned child handle, so runs can be cancelled and cleaned up without a
+/// bare-PID ownership race.
+pub(crate) type RunMap = Arc<Mutex<HashMap<String, OwnedRun>>>;
+
+#[derive(Default)]
+struct TeardownTrackerState {
+    jobs: Vec<TrackedTeardown>,
+    shutting_down: bool,
+}
+
+struct TrackedTeardown {
+    handle: std::thread::JoinHandle<()>,
+    done: Arc<AtomicBool>,
+}
+
+type TeardownJob = Box<dyn FnOnce() + Send + 'static>;
+
+/// Manager-owned detached cleanup jobs. Window destruction must return quickly,
+/// but app exit must still be able to join every kill/reap job after the active
+/// maps have already been drained by the window listener.
+#[derive(Clone, Default)]
+pub(crate) struct TeardownTracker {
+    state: Arc<Mutex<TeardownTrackerState>>,
+}
+
+impl TeardownTracker {
+    pub(crate) fn spawn(&self, job: impl FnOnce() + Send + 'static) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.shutting_down {
+            drop(state);
+            job();
+            return;
+        }
+
+        let mut finished = Vec::new();
+        let mut index = 0;
+        while index < state.jobs.len() {
+            if state.jobs[index].done.load(Ordering::Acquire) {
+                finished.push(state.jobs.swap_remove(index).handle);
+            } else {
+                index += 1;
+            }
+        }
+
+        // Hold the tracker lock across spawn + registration. shutdown_and_join
+        // cannot observe a gap where the worker exists but its JoinHandle does
+        // not, even if the new thread starts immediately.
+        let done = Arc::new(AtomicBool::new(false));
+        let done_for_worker = done.clone();
+        let job_slot = Arc::new(Mutex::new(Some(Box::new(job) as TeardownJob)));
+        let slot_for_worker = job_slot.clone();
+        let spawn_result = std::thread::Builder::new()
+            .name("lyceum-teardown".to_string())
+            .spawn(move || {
+                let job = slot_for_worker
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                if let Some(job) = job {
+                    job();
+                }
+                done_for_worker.store(true, Ordering::Release);
+            });
+        if let Ok(handle) = spawn_result {
+            state.jobs.push(TrackedTeardown { handle, done });
+            drop(state);
+        } else {
+            // Builder::spawn reports OS thread-creation failure without
+            // panicking. The shared slot keeps ownership of the closure so the
+            // cleanup can still run synchronously instead of being dropped.
+            let job = job_slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            drop(state);
+            if let Some(job) = job {
+                job();
+            }
+        }
+
+        for handle in finished {
+            let _ = handle.join();
+        }
+    }
+
+    pub(crate) fn shutdown_and_join(&self) {
+        let jobs = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.shutting_down = true;
+            std::mem::take(&mut state.jobs)
+        };
+        for job in jobs {
+            let _ = job.handle.join();
+        }
+    }
+
+    #[cfg(test)]
+    fn pending_count(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .jobs
+            .len()
+    }
+}
 
 /// Tauri-managed registry of in-flight code/build runs.
 #[derive(Default)]
@@ -36,6 +246,7 @@ pub struct RunManager {
     /// instead of being silently lost.
     pub(crate) pending_cancel: Arc<Mutex<HashMap<String, u64>>>,
     pub(crate) pending_cancel_seq: Arc<AtomicU64>,
+    pub(crate) teardowns: TeardownTracker,
 }
 
 impl RunManager {
@@ -44,13 +255,26 @@ impl RunManager {
     /// Entries are drained under the lock, but the (blocking) kills happen
     /// after the guard is dropped so reaper threads are never blocked on it.
     pub fn shutdown_all(&self) {
-        let pids: Vec<u32> = match self.runs.lock() {
-            Ok(mut runs) => runs.drain().map(|(_id, pid)| pid).collect(),
-            Err(_) => return,
+        let children: Vec<OwnedRun> = {
+            let mut runs = self
+                .runs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            runs.drain().map(|(_id, child)| child).collect()
         };
-        for pid in pids {
-            kill_pid(pid);
+        for child in &children {
+            terminate_owned_child(child);
         }
+        // App exit is the one lifecycle path that must wait: returning from the
+        // exit event can terminate this process immediately, so detached reapers
+        // would not get a chance to prevent orphaned grandchildren.
+        for child in children {
+            if wait_owned_child_until(&child, Duration::from_secs(3)).is_none() {
+                force_kill_owned_child(&child);
+                let _ = wait_owned_child_until(&child, Duration::from_secs(1));
+            }
+        }
+        self.teardowns.shutdown_and_join();
     }
 
     /// Cancel every in-flight run belonging to one window (called when it is
@@ -60,26 +284,32 @@ impl RunManager {
     /// guard is dropped.
     pub fn cancel_runs_for_window(&self, label: &str) {
         let prefix = format!("{label}:");
-        let mut pids = Vec::new();
-        match self.runs.lock() {
-            Ok(mut runs) => runs.retain(|key, pid| {
+        let mut children = Vec::new();
+        self.runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|key, child| {
                 if key.starts_with(&prefix) {
-                    pids.push(*pid);
+                    children.push(child.clone());
                     false
                 } else {
                     true
                 }
-            }),
-            Err(_) => return,
-        }
+            });
         // Drop any pending-cancel tombstones for this window so they don't linger
         // after the window is gone (e.g. a cancel that raced a spawn which then
         // errored before registering).
-        if let Ok(mut pending) = self.pending_cancel.lock() {
-            pending.retain(|key, _token| !key.starts_with(&prefix));
-        }
-        for pid in pids {
-            kill_pid(pid);
+        self.pending_cancel
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|key, _token| !key.starts_with(&prefix));
+        if !children.is_empty() {
+            self.teardowns.spawn(move || {
+                for child in children {
+                    terminate_owned_child(&child);
+                    let _ = wait_owned_child(&child);
+                }
+            });
         }
     }
 }
@@ -192,9 +422,21 @@ fn dedup_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 }
 
 pub(crate) fn find_program_in_path(program: &str, path: &OsStr) -> Option<PathBuf> {
+    find_program_in_path_for_platform(program, path, cfg!(windows), is_executable_file)
+}
+
+fn find_program_in_path_for_platform(
+    program: &str,
+    path: &OsStr,
+    windows: bool,
+    is_executable: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
     let program_path = Path::new(program);
     if program_path.components().count() > 1 {
-        return is_executable_file(program_path).then(|| program_path.to_path_buf());
+        return program_path_candidates(program, windows, true)
+            .into_iter()
+            .map(PathBuf::from)
+            .find(|candidate| is_executable(candidate));
     }
     for dir in env::split_paths(path) {
         // Skip empty PATH entries: `dir.join(program)` for an empty dir is the
@@ -203,19 +445,52 @@ pub(crate) fn find_program_in_path(program: &str, path: &OsStr) -> Option<PathBu
         if dir.as_os_str().is_empty() {
             continue;
         }
-        let candidate = dir.join(program);
-        if is_executable_file(&candidate) {
-            return Some(candidate);
-        }
-        #[cfg(windows)]
-        {
-            let candidate = dir.join(format!("{program}.exe"));
-            if is_executable_file(&candidate) {
+        // Preserve PATH directory priority, but on Windows prefer runnable
+        // executable/batch forms within each directory. npm installs both an
+        // extensionless POSIX shell shim and a `.cmd` shim; choosing the former
+        // first makes the language server unlaunchable through CreateProcess.
+        for name in program_path_candidates(program, windows, false) {
+            let candidate = dir.join(name);
+            if is_executable(&candidate) {
                 return Some(candidate);
             }
         }
     }
     None
+}
+
+fn program_path_candidates(
+    program: &str,
+    windows: bool,
+    include_extensionless: bool,
+) -> Vec<OsString> {
+    if !windows {
+        return vec![OsString::from(program)];
+    }
+
+    let known_extension = Path::new(program)
+        .extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "exe" | "com" | "cmd" | "bat"
+            )
+        });
+    if known_extension {
+        return vec![OsString::from(program)];
+    }
+
+    let mut candidates = Vec::with_capacity(if include_extensionless { 5 } else { 4 });
+    for extension in [".exe", ".com", ".cmd", ".bat"] {
+        let mut candidate = OsString::from(program);
+        candidate.push(extension);
+        candidates.push(candidate);
+    }
+    if include_extensionless {
+        candidates.push(OsString::from(program));
+    }
+    candidates
 }
 
 #[cfg(unix)]
@@ -454,76 +729,13 @@ pub(crate) fn configure_process_group(command: &mut Command) {
     }
 }
 
-/// Send a terminating signal to a process by pid (best-effort, cross-platform).
-pub(crate) fn kill_pid(pid: u32) {
-    #[cfg(windows)]
-    {
-        let _ = Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-    #[cfg(not(windows))]
-    {
-        let Some(raw_pid) = to_pid_t(pid) else {
-            return;
-        };
-        // Children spawned by code runs / latex builds are placed in a process
-        // group whose id is their pid. Only send a group signal after verifying
-        // that relationship; otherwise a stale or unrelated process group with
-        // the same numeric id could receive SIGTERM.
-        let signalled_group = process_group_id(raw_pid) == Some(raw_pid);
-        if signalled_group {
-            // Run/build children are placed in their own process group
-            // (configure_process_group). Signal the whole group so grandchildren
-            // (e.g. latexmk's pdflatex) holding the output pipes die too; this
-            // also covers the leader, so no separate bare signal is needed.
-            send_signal(-raw_pid, libc::SIGTERM);
-        } else if process_group_id(raw_pid).is_some() {
-            // Not our own group leader, but the pid still EXISTS: a child not
-            // placed in its own group (e.g. a language server). Signal it directly.
-            // The guard is the fix for the reaped/reused-pid race: after a run is
-            // reaped its pid is freed and getpgid returns ESRCH (None) — a late
-            // run_cancel racing the reaper must NOT then SIGTERM a pid the OS may
-            // have reused for an unrelated process. (The delayed SIGKILL is
-            // likewise guarded; see sigkill_escalation_targets.)
-            send_signal(raw_pid, libc::SIGTERM);
-        }
-        schedule_sigkill_escalation(raw_pid, signalled_group);
-    }
-}
-
-/// Signal only the process GROUP of `pid` (negative pid on Unix), NOT the bare
-/// pid. Safe to call after the leader child has already been reaped: the group
-/// keeps existing as long as a lingering grandchild (which inherited the pipe)
-/// is alive, whereas the bare leader pid may have been reused by an unrelated
-/// process. Used to unblock the output pumps on a natural exit whose grandchild
-/// is holding the stdout/stderr pipe open.
-fn kill_process_group(pid: u32) {
-    #[cfg(windows)]
-    {
-        let _ = Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-    #[cfg(not(windows))]
-    {
-        if let Some(raw_pid) = to_pid_t(pid) {
-            send_signal(-raw_pid, libc::SIGTERM);
-        }
-    }
-}
-
 #[cfg(not(windows))]
 fn to_pid_t(pid: u32) -> Option<libc::pid_t> {
     let raw_pid = libc::pid_t::try_from(pid).ok()?;
     (raw_pid > 0).then_some(raw_pid)
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), test))]
 fn process_group_id(pid: libc::pid_t) -> Option<libc::pid_t> {
     // SAFETY: getpgid is called with a positive pid obtained from a live child
     // or a caller-validated pid. It returns -1 on error; no memory is touched.
@@ -540,29 +752,423 @@ fn send_signal(pid: libc::pid_t, signal: libc::c_int) {
     }
 }
 
-#[cfg(not(windows))]
-fn schedule_sigkill_escalation(pid: libc::pid_t, signalled_group: bool) {
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(2));
-        for target in sigkill_escalation_targets(pid, signalled_group, process_group_id) {
-            send_signal(target, libc::SIGKILL);
+/// Observe leader exit without reaping it. Retaining the process handle/zombie
+/// keeps its pid/process-group identity unavailable for reuse while output
+/// pipes are given a bounded chance to drain.
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "linux",
+    target_os = "android"
+))]
+fn child_has_exited_without_reaping(child: &Child) -> io::Result<bool> {
+    let pid = to_pid_t(child.id())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid child pid"))?;
+    loop {
+        let mut information = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+        // SAFETY: information points to writable siginfo_t storage. WNOWAIT
+        // explicitly leaves the child waitable, and no pointer is retained.
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                information.as_mut_ptr(),
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result == 0 {
+            // SAFETY: successful waitid initializes the siginfo_t. POSIX sets
+            // si_pid to zero when WNOHANG finds no pending child state.
+            return Ok(unsafe { information.assume_init().si_pid() } != 0);
         }
-    });
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
 }
 
-#[cfg(not(windows))]
-fn sigkill_escalation_targets(
-    pid: libc::pid_t,
-    signalled_group: bool,
-    process_group_id: impl Fn(libc::pid_t) -> Option<libc::pid_t>,
-) -> Vec<libc::pid_t> {
-    // Never send delayed SIGKILL to the bare pid: after the initial SIGTERM the
-    // child may exit and the OS may reuse that pid for an unrelated process.
-    if signalled_group && process_group_id(pid) == Some(pid) {
-        vec![-pid]
-    } else {
-        Vec::new()
+#[cfg(windows)]
+fn child_has_exited_without_reaping(child: &Child) -> io::Result<bool> {
+    use std::os::windows::io::AsRawHandle;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn WaitForSingleObject(handle: *mut std::ffi::c_void, milliseconds: u32) -> u32;
     }
+    const WAIT_OBJECT_0: u32 = 0;
+    const WAIT_TIMEOUT: u32 = 258;
+    const WAIT_FAILED: u32 = u32::MAX;
+    // SAFETY: Child owns a live process handle; a zero timeout only observes
+    // its signaled state and the API retains no handle or pointer.
+    match unsafe { WaitForSingleObject(child.as_raw_handle(), 0) } {
+        WAIT_OBJECT_0 => Ok(true),
+        WAIT_TIMEOUT => Ok(false),
+        WAIT_FAILED => Err(io::Error::last_os_error()),
+        value => Err(io::Error::other(format!(
+            "unexpected WaitForSingleObject result: {value}"
+        ))),
+    }
+}
+
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "linux",
+    target_os = "android",
+    windows
+)))]
+fn child_has_exited_without_reaping(_child: &Child) -> io::Result<bool> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "non-reaping child-exit observation is unavailable",
+    ))
+}
+
+enum OwnedChildPoll {
+    Running,
+    ExitedUnreaped,
+    Reaped(ExitStatus),
+    Terminating(Arc<TerminationCompletion>),
+}
+
+fn poll_owned_child_without_reaping(child: &OwnedRun) -> io::Result<OwnedChildPoll> {
+    // Match every waiter/terminator's lock ordering: termination -> state.
+    let termination = child
+        .termination
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(completion) = termination.as_ref() {
+        return Ok(OwnedChildPoll::Terminating(completion.clone()));
+    }
+    let owned = child
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(status) = owned.reaped {
+        return Ok(OwnedChildPoll::Reaped(status));
+    }
+    if child_has_exited_without_reaping(&owned.child)? {
+        Ok(OwnedChildPoll::ExitedUnreaped)
+    } else {
+        Ok(OwnedChildPoll::Running)
+    }
+}
+
+/// Start one asynchronous termination job for this owned child. Once the job is
+/// published, every waiter observes it instead of calling `try_wait`; this keeps
+/// the leader unreaped through the Unix TERM grace window, so its pid/pgid cannot
+/// be reused before the job escalates the owned process group.
+pub(crate) fn terminate_owned_child(child: &OwnedRun) {
+    let (completion, start) = {
+        let mut termination = child
+            .termination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(completion) = termination.as_ref() {
+            (completion.clone(), false)
+        } else {
+            let completion = Arc::new(TerminationCompletion::default());
+            *termination = Some(completion.clone());
+            (completion, true)
+        }
+    };
+    if !start {
+        return;
+    }
+
+    let job = Arc::new(Mutex::new(Some((child.clone(), completion))));
+    let job_for_worker = job.clone();
+    let spawned = std::thread::Builder::new()
+        .name("lyceum-child-termination".to_string())
+        .spawn(move || {
+            if let Some((child, completion)) = job_for_worker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                let status = terminate_and_reap_owned_child(&child);
+                completion.finish(status);
+            }
+        });
+    if spawned.is_err() {
+        // Never leave a published completion permanently unfinished if the OS
+        // cannot create the worker. The shared slot retains the cleanup job so
+        // this caller can perform the same owned termination synchronously.
+        if let Some((child, completion)) = job
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            let status = terminate_and_reap_owned_child(&child);
+            completion.finish(status);
+        }
+    }
+}
+
+fn terminate_and_reap_owned_child(child: &OwnedRun) -> Option<ExitStatus> {
+    #[cfg(windows)]
+    {
+        let mut owned = child
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(status) = owned.reaped {
+            return Some(status);
+        }
+        let pid = owned.child.id();
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        // taskkill may be unavailable or fail. The retained Child handle makes
+        // this direct fallback ownership-safe and prevents waiters hanging.
+        let _ = owned.child.kill();
+        let status = owned.child.wait().ok();
+        owned.reaped = status;
+        status
+    }
+    #[cfg(not(windows))]
+    {
+        let (pid, signalled_group) = {
+            let mut owned = child
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(status) = owned.reaped {
+                return Some(status);
+            }
+            let Some(pid) = to_pid_t(owned.child.id()) else {
+                let status = owned.child.wait().ok();
+                owned.reaped = status;
+                return status;
+            };
+            let process_group = child.process_group.and_then(to_pid_t);
+            if let Some(group) = process_group {
+                send_signal(-group, libc::SIGTERM);
+            } else {
+                send_signal(pid, libc::SIGTERM);
+            }
+            (pid, process_group)
+        };
+
+        // Do not call try_wait during the grace period: it would reap a leader
+        // that exits on TERM and make its numeric process-group id reusable while
+        // a TERM-ignoring grandchild is still alive.
+        std::thread::sleep(Duration::from_secs(2));
+        let mut owned = child
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(status) = owned.reaped {
+            return Some(status);
+        }
+        if let Some(group) = signalled_group {
+            send_signal(-group, libc::SIGKILL);
+        } else {
+            send_signal(pid, libc::SIGKILL);
+        }
+        // Always finish with the handle-owned direct kill, then reap only after
+        // all numeric signaling is complete. No post-reap pid/pgid lookup occurs.
+        let _ = owned.child.kill();
+        let status = owned.child.wait().ok();
+        owned.reaped = status;
+        status
+    }
+}
+
+pub(crate) fn wait_owned_child(child: &OwnedRun) -> Option<ExitStatus> {
+    loop {
+        let completion = {
+            // Lock ordering is always termination -> child state. Holding the
+            // termination guard across try_wait closes the race where a waiter
+            // could reap between job publication and the worker's first signal.
+            let termination = child
+                .termination
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(completion) = termination.as_ref() {
+                Some(completion.clone())
+            } else {
+                let mut owned = child
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(status) = owned.reaped {
+                    return Some(status);
+                }
+                match owned.child.try_wait() {
+                    Ok(Some(status)) => {
+                        owned.reaped = Some(status);
+                        return Some(status);
+                    }
+                    Ok(None) => None,
+                    Err(_) => return None,
+                }
+            }
+        };
+        if let Some(completion) = completion {
+            return completion.wait_until(None);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn wait_owned_child_until(child: &OwnedRun, timeout: Duration) -> Option<ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let completion = {
+            let termination = child
+                .termination
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(completion) = termination.as_ref() {
+                Some(completion.clone())
+            } else {
+                let mut owned = child
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(status) = owned.reaped {
+                    return Some(status);
+                }
+                match owned.child.try_wait() {
+                    Ok(Some(status)) => {
+                        owned.reaped = Some(status);
+                        return Some(status);
+                    }
+                    Ok(None) => None,
+                    Err(_) => return None,
+                }
+            }
+        };
+        if let Some(completion) = completion {
+            return completion.wait_until(Some(deadline));
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn wait_for_owned_child_and_output_drain(
+    child: &OwnedRun,
+    drained: &std::sync::mpsc::Receiver<()>,
+    drain_timeout: Duration,
+) -> (Option<ExitStatus>, bool) {
+    let mut output_drained = false;
+    loop {
+        if !output_drained {
+            output_drained = match drained.try_recv() {
+                Ok(()) | Err(std::sync::mpsc::TryRecvError::Disconnected) => true,
+                Err(std::sync::mpsc::TryRecvError::Empty) => false,
+            };
+        }
+
+        match poll_owned_child_without_reaping(child) {
+            Ok(OwnedChildPoll::Running) => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(OwnedChildPoll::Terminating(completion)) => {
+                let status = completion.wait_until(None);
+                if !output_drained {
+                    output_drained = !matches!(
+                        drained.recv_timeout(drain_timeout),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                    );
+                }
+                return (status, output_drained);
+            }
+            Ok(OwnedChildPoll::Reaped(status)) => {
+                // Another owned waiter already reaped it. Never signal a numeric
+                // pid now; only give the pumps their bounded drain window.
+                if !output_drained {
+                    output_drained = !matches!(
+                        drained.recv_timeout(drain_timeout),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                    );
+                }
+                return (Some(status), output_drained);
+            }
+            Ok(OwnedChildPoll::ExitedUnreaped) => {
+                if !output_drained {
+                    output_drained = !matches!(
+                        drained.recv_timeout(drain_timeout),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                    );
+                }
+                let status = if output_drained {
+                    // All inherited pipes closed naturally. It is now safe to
+                    // reap the leader without any later numeric group signal.
+                    wait_owned_child(child)
+                } else {
+                    // A same-group descendant retained a pipe. Publish owned
+                    // termination before reaping so TERM/KILL targets the still-
+                    // reserved pgid, then let the worker perform the sole reap.
+                    terminate_owned_child(child);
+                    wait_owned_child(child)
+                };
+                if !output_drained {
+                    output_drained = !matches!(
+                        drained.recv_timeout(drain_timeout),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                    );
+                }
+                return (status, output_drained);
+            }
+            Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+                // Unsupported targets retain the historical safe fallback: reap
+                // via the owned handle and never signal a numeric pid afterward.
+                let status = wait_owned_child(child);
+                if !output_drained {
+                    output_drained = !matches!(
+                        drained.recv_timeout(drain_timeout),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                    );
+                }
+                return (status, output_drained);
+            }
+            Err(_) => {
+                // On supported targets, losing the ability to observe a child
+                // without reaping also loses the natural-exit invariant. Fail
+                // closed by terminating through the still-owned handle/group.
+                terminate_owned_child(child);
+                let status = wait_owned_child(child);
+                if !output_drained {
+                    output_drained = !matches!(
+                        drained.recv_timeout(drain_timeout),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                    );
+                }
+                return (status, output_drained);
+            }
+        }
+    }
+}
+
+fn force_kill_owned_child(child: &OwnedRun) {
+    // Keep the termination guard through the child-state lookup so a natural
+    // waiter cannot race this final owned signal and reap first.
+    let _termination = child
+        .termination
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut owned = child
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if owned.reaped.is_some() {
+        return;
+    }
+    #[cfg(not(windows))]
+    if let Some(group) = child.process_group.and_then(to_pid_t) {
+        send_signal(-group, libc::SIGKILL);
+    }
+    // The handle-owned direct kill is a final fallback (and the Windows
+    // implementation). It cannot target a reused pid while the child is unreaped.
+    let _ = owned.child.kill();
 }
 
 /// Run a configured process profile, streaming output to the frontend.
@@ -617,6 +1223,7 @@ pub fn run_process(
         run_key(&window, &id),
         state.runs.clone(),
         state.pending_cancel.clone(),
+        state.teardowns.clone(),
         format!("run:output:{id}"),
         format!("run:exit:{id}"),
     );
@@ -675,6 +1282,7 @@ pub fn run_julia(
         run_key(&window, &id),
         state.runs.clone(),
         state.pending_cancel.clone(),
+        state.teardowns.clone(),
         format!("julia:output:{id}"),
         format!("julia:exit:{id}"),
     );
@@ -693,32 +1301,10 @@ pub(crate) fn stream_child(
     key: String,
     runs: RunMap,
     pending_cancel: Arc<Mutex<HashMap<String, u64>>>,
+    teardowns: TeardownTracker,
     out_event: String,
     exit_event: String,
 ) {
-    let pid = child.id();
-    // Register the child, but honor a cancel that arrived during the spawn window
-    // (before this insert). Both this check and `run_cancel`'s tombstone insert
-    // happen while holding the `runs` lock, so they cannot interleave into a gap
-    // where neither side acts: either we observe the tombstone here, or
-    // `run_cancel` observes our registration there.
-    let (cancelled_during_spawn, replaced_pid) = {
-        let mut runs = runs.lock().unwrap();
-        if pending_cancel.lock().unwrap().remove(&key).is_some() {
-            (true, None)
-        } else {
-            (false, runs.insert(key.clone(), pid))
-        }
-    };
-    if let Some(old_pid) = replaced_pid {
-        kill_pid(old_pid);
-    }
-    if cancelled_during_spawn {
-        // Don't register; kill now. The pumps/reaper below still run so the child
-        // is reaped (no zombie) and the exit event still fires for the UI.
-        kill_pid(pid);
-    }
-
     let out_handle = child.stdout.take().map(|stdout| {
         let app = app.clone();
         let label = label.clone();
@@ -731,27 +1317,40 @@ pub(crate) fn stream_child(
         let event = out_event.clone();
         std::thread::spawn(move || pump(stderr, &app, &label, &event, "stderr"))
     });
-    std::thread::spawn(move || {
-        let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
-        // Remove the run from the registry as soon as the child is reaped: its OS
-        // pid is now eligible for reuse, so it must not remain visible to a late
-        // `run_cancel` (which would otherwise signal an unrelated process that
-        // reused the pid). Draining the pumps below can block (e.g. if a grandchild
-        // holds the pipe open), so this must happen before the joins, not after.
-        // Only remove the entry if it still maps to OUR pid — a new run that
-        // reused the key must not lose its (live) registration.
+    let child = own_child_in_new_process_group(child);
+    // Register the child, but honor a cancel that arrived during the spawn window
+    // (before this insert). Both this check and `run_cancel`'s tombstone insert
+    // happen while holding the `runs` lock, so they cannot interleave into a gap
+    // where neither side acts: either we observe the tombstone here, or
+    // `run_cancel` observes our registration there.
+    let (cancelled_during_spawn, replaced_child) = {
+        let mut runs = runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pending_cancel
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&key)
+            .is_some()
         {
-            let mut runs = runs.lock().unwrap();
-            if runs.get(&key).copied() == Some(pid) {
-                runs.remove(&key);
-            }
+            (true, None)
+        } else {
+            (false, runs.insert(key.clone(), child.clone()))
         }
-        // Drain output before signaling exit so the frontend (which tears down
-        // its output listener on exit) does not lose trailing lines — but bound
-        // the wait. A grandchild that inherited the pipe (e.g. latexmk forking
-        // pdflatex into the background) can hold it open after the leader exits;
-        // the exit event must still fire so the UI never hangs "running" forever.
-        let (tx, rx) = std::sync::mpsc::channel::<()>();
+    };
+    if let Some(old_child) = replaced_child {
+        terminate_owned_child(&old_child);
+    }
+    if cancelled_during_spawn {
+        // Don't register; kill now. The pumps/reaper below still run so the child
+        // is reaped (no zombie) and the exit event still fires for the UI.
+        terminate_owned_child(&child);
+    }
+    teardowns.spawn(move || {
+        // Join both output pumps concurrently with leader observation. The
+        // child stays registered and unreaped while a natural-exit leader gives
+        // inherited pipes a bounded drain window.
+        let (drained_tx, drained_rx) = std::sync::mpsc::channel::<()>();
         std::thread::spawn(move || {
             if let Some(handle) = out_handle {
                 let _ = handle.join();
@@ -759,33 +1358,43 @@ pub(crate) fn stream_child(
             if let Some(handle) = err_handle {
                 let _ = handle.join();
             }
-            let _ = tx.send(());
+            let _ = drained_tx.send(());
         });
-        if rx.recv_timeout(std::time::Duration::from_secs(2)).is_err() {
-            // The pumps did not finish draining within the timeout: a grandchild
-            // inherited the pipe and is keeping it open after the leader exited.
-            // On the natural-exit path nothing else will ever close it, so the
-            // pump threads (blocked in read()) and this drain thread would leak
-            // forever. Signal the leader's process group to close the pipe so they
-            // can terminate. Group-only (never the bare, possibly-reused pid).
-            kill_process_group(pid);
+        let (status, _output_drained) =
+            wait_for_owned_child_and_output_drain(&child, &drained_rx, Duration::from_secs(2));
+        let code = status.and_then(|status| status.code()).unwrap_or(-1);
+        // Remove only after coordinated drain/termination has completed. A late
+        // run_cancel that sees an already-reaped OwnedChild is harmless: the
+        // state guard returns its stored status and never signals the old pid.
+        // Only remove the entry if it still maps to OUR child handle — a new run
+        // that reused the key must not lose its live registration.
+        {
+            let mut runs = runs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if runs
+                .get(&key)
+                .is_some_and(|registered| Arc::ptr_eq(registered, &child))
+            {
+                runs.remove(&key);
+            }
         }
         let _ = app.emit_to(label.as_str(), &exit_event, code);
-        if let Ok(mut pending) = pending_cancel.lock() {
-            pending.remove(&key);
-        }
+        // Do not clear `pending_cancel[key]` here. Once this reaper removed its
+        // own child above, a same-key successor may enter its spawn window and
+        // install a newer cancellation token while these pumps drain. This old
+        // generation owns no such token; the registering successor or the
+        // token-checked expiry worker is responsible for removing it.
+        release_pending_cancel_if_owned(&pending_cancel, &key, None);
     });
 }
 
 /// Cancel an in-flight Julia run by id, killing its whole process group.
-/// Idempotent. The entry is removed while the `runs` lock is held, so removal
-/// is serialized against the reaper thread: whichever thread removes the id
-/// first owns it, and the other observes a miss and does nothing — only one
-/// `kill_pid` can ever fire for a given run. The kill itself (which spawns a
-/// blocking `kill` subprocess) happens AFTER the guard is dropped so it never
-/// stalls other run commands. Killing the process group (negative pid) further
-/// bounds blast radius if the leader pid were ever reused before the entry is
-/// dropped.
+/// Idempotent. The registry entry owns a shared `Child` handle, and both the
+/// reaper and cancellation check it under one mutex. A child that was already
+/// reaped is never signaled; a live child cannot have had its pid reused. The
+/// potentially slow termination happens after the registry guard is dropped so
+/// it never stalls other run commands.
 #[tauri::command]
 pub fn run_cancel(
     window: tauri::Window,
@@ -798,24 +1407,30 @@ pub fn run_cancel(
     // races the spawn cannot slip through a gap: if the child isn't registered
     // yet, we leave a tombstone that `stream_child` will honor on registration.
     let mut pending_expiry: Option<u64> = None;
-    let pid = {
-        let mut runs = state.runs.lock().unwrap();
+    let child = {
+        let mut runs = state
+            .runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         match runs.remove(&key) {
-            Some(pid) => Some(pid),
+            Some(child) => Some(child),
             None => {
                 let token = state.pending_cancel_seq.fetch_add(1, Ordering::Relaxed);
                 state
                     .pending_cancel
                     .lock()
-                    .unwrap()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .insert(key.clone(), token);
                 pending_expiry = Some(token);
                 None
             }
         }
     };
-    if let Some(pid) = pid {
-        kill_pid(pid);
+    if let Some(child) = child {
+        state.teardowns.spawn(move || {
+            terminate_owned_child(&child);
+            let _ = wait_owned_child(&child);
+        });
     } else if let Some(token) = pending_expiry {
         expire_pending_cancel(state.pending_cancel.clone(), key, token);
     }
@@ -829,12 +1444,24 @@ fn expire_pending_cancel(
 ) {
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(5));
-        if let Ok(mut pending) = pending_cancel.lock() {
-            if pending.get(&key).copied() == Some(token) {
-                pending.remove(&key);
-            }
-        }
+        release_pending_cancel_if_owned(&pending_cancel, &key, Some(token));
     });
+}
+
+fn release_pending_cancel_if_owned(
+    pending_cancel: &Arc<Mutex<HashMap<String, u64>>>,
+    key: &str,
+    owned_token: Option<u64>,
+) {
+    let Some(owned_token) = owned_token else {
+        return;
+    };
+    let mut pending = pending_cancel
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if pending.get(key).copied() == Some(owned_token) {
+        pending.remove(key);
+    }
 }
 
 #[cfg(test)]
@@ -979,6 +1606,87 @@ mod tests {
     }
 
     #[test]
+    fn windows_path_resolution_prefers_npm_cmd_shim_over_extensionless_shell_shim() {
+        let root = tempfile::tempdir().expect("create resolver fixture");
+        let bin = root.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        std::fs::write(bin.join("typescript-language-server"), b"#!/bin/sh").unwrap();
+        std::fs::write(bin.join("typescript-language-server.cmd"), b"@node cli.js").unwrap();
+        let path = env::join_paths([bin.as_path()]).unwrap();
+
+        let resolved = find_program_in_path_for_platform(
+            "typescript-language-server",
+            &path,
+            true,
+            Path::is_file,
+        );
+
+        assert_eq!(
+            resolved.as_deref(),
+            Some(bin.join("typescript-language-server.cmd").as_path())
+        );
+    }
+
+    #[test]
+    fn windows_path_resolution_preserves_path_directory_priority() {
+        let root = tempfile::tempdir().expect("create resolver fixture");
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        std::fs::write(first.join("server.cmd"), b"@node first.js").unwrap();
+        std::fs::write(second.join("server.exe"), b"MZ").unwrap();
+        let path = env::join_paths([first.as_path(), second.as_path()]).unwrap();
+
+        let resolved = find_program_in_path_for_platform("server", &path, true, Path::is_file);
+
+        assert_eq!(
+            resolved.as_deref(),
+            Some(first.join("server.cmd").as_path())
+        );
+    }
+
+    #[test]
+    fn windows_path_resolution_skips_earlier_extensionless_shell_shim() {
+        let root = tempfile::tempdir().expect("create resolver fixture");
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        std::fs::write(first.join("server"), b"#!/bin/sh").unwrap();
+        std::fs::write(second.join("server.cmd"), b"@node second.js").unwrap();
+        let path = env::join_paths([first.as_path(), second.as_path()]).unwrap();
+
+        let resolved = find_program_in_path_for_platform("server", &path, true, Path::is_file);
+
+        assert_eq!(
+            resolved.as_deref(),
+            Some(second.join("server.cmd").as_path())
+        );
+    }
+
+    #[test]
+    fn windows_explicit_path_can_omit_exe_but_known_extensions_are_not_duplicated() {
+        let root = tempfile::tempdir().expect("create resolver fixture");
+        let runtime = root.path().join("runtime");
+        let executable = runtime.with_extension("exe");
+        std::fs::write(&executable, b"MZ").unwrap();
+        let empty_path = OsStr::new("");
+
+        let resolved = find_program_in_path_for_platform(
+            runtime.to_string_lossy().as_ref(),
+            empty_path,
+            true,
+            Path::is_file,
+        );
+        assert_eq!(resolved.as_deref(), Some(executable.as_path()));
+        assert_eq!(
+            program_path_candidates("SERVER.CMD", true, false),
+            vec![OsString::from("SERVER.CMD")]
+        );
+    }
+
+    #[test]
     fn run_profile_validation_accepts_matching_runtime_names() {
         assert!(validate_run_profile_programs("python", "/opt/python/bin/python3", &[]).is_ok());
         assert!(validate_run_profile_programs("python", "/opt/python/bin/python3.12", &[]).is_ok());
@@ -1034,6 +1742,75 @@ mod tests {
     }
 
     #[test]
+    fn teardown_tracker_joins_work_after_the_active_map_is_drained() {
+        let tracker = TeardownTracker::default();
+        let mut active = HashMap::from([("main:child".to_string(), ())]);
+        let removed: Vec<()> = active.drain().map(|(_, child)| child).collect();
+        assert!(active.is_empty());
+
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let barrier_for_job = barrier.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let cleaned = Arc::new(AtomicBool::new(false));
+        let cleaned_for_job = cleaned.clone();
+        tracker.spawn(move || {
+            drop(removed);
+            let _ = started_tx.send(());
+            barrier_for_job.wait();
+            cleaned_for_job.store(true, Ordering::Release);
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("teardown job started");
+        assert_eq!(tracker.pending_count(), 1);
+
+        let tracker_for_shutdown = tracker.clone();
+        let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
+        let shutdown = std::thread::spawn(move || {
+            tracker_for_shutdown.shutdown_and_join();
+            let _ = shutdown_tx.send(());
+        });
+        assert!(matches!(
+            shutdown_rx.recv_timeout(Duration::from_millis(100)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+
+        barrier.wait();
+        shutdown_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("shutdown joined teardown");
+        shutdown.join().unwrap();
+        assert!(cleaned.load(Ordering::Acquire));
+        assert_eq!(tracker.pending_count(), 0);
+    }
+
+    #[test]
+    fn teardown_tracker_recovers_poison_and_keeps_registered_jobs_joinable() {
+        let tracker = TeardownTracker::default();
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_for_job = completed.clone();
+        tracker.spawn(move || completed_for_job.store(true, Ordering::Release));
+        while !completed.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        assert_eq!(tracker.pending_count(), 1);
+
+        let state = tracker.state.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = state.lock().unwrap();
+            panic!("poison teardown tracker for recovery test");
+        })
+        .join();
+
+        tracker.shutdown_and_join();
+        assert_eq!(tracker.pending_count(), 0);
+        let ran_synchronously = Arc::new(AtomicBool::new(false));
+        let ran_for_job = ran_synchronously.clone();
+        tracker.spawn(move || ran_for_job.store(true, Ordering::Release));
+        assert!(ran_synchronously.load(Ordering::Acquire));
+    }
+
+    #[test]
     fn force_flush_at_max_line_does_not_split_multibyte_utf8() {
         let mut s = LineSplitter::default();
         // Fill to one byte short of the cap, then push the first byte of a 2-byte
@@ -1055,52 +1832,119 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn sigkill_escalation_never_targets_bare_pid_after_delay() {
-        assert_eq!(
-            sigkill_escalation_targets(123, false, |_| Some(123)),
-            Vec::<libc::pid_t>::new()
-        );
-        assert_eq!(
-            sigkill_escalation_targets(123, true, |_| Some(456)),
-            Vec::<libc::pid_t>::new()
-        );
-        assert_eq!(
-            sigkill_escalation_targets(123, true, |_| Some(123)),
-            vec![-123]
-        );
+    fn owned_run_termination_uses_the_live_child_handle_and_reaps() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "trap '' TERM; while :; do sleep 1; done"]);
+        configure_process_group(&mut command);
+        let child = own_child_in_new_process_group(command.spawn().expect("spawn owned run"));
+        std::thread::sleep(Duration::from_millis(100));
+
+        terminate_owned_child(&child);
+        let status = wait_owned_child_until(&child, Duration::from_secs(4))
+            .expect("owned child should terminate and reap");
+
+        assert!(!status.success());
     }
 
     #[cfg(unix)]
     #[test]
-    fn kill_pid_terminates_a_running_child() {
-        let mut child = Command::new("sh")
-            .args(["-c", "sleep 30"])
+    fn owned_termination_recovers_poisoned_lifecycle_mutexes() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "trap '' TERM; while :; do sleep 1; done"]);
+        configure_process_group(&mut command);
+        let child = own_child_in_new_process_group(command.spawn().expect("spawn owned run"));
+
+        let termination_for_poison = child.clone();
+        assert!(std::thread::spawn(move || {
+            let _guard = termination_for_poison.termination.lock().unwrap();
+            panic!("poison termination publication mutex");
+        })
+        .join()
+        .is_err());
+        let state_for_poison = child.clone();
+        assert!(std::thread::spawn(move || {
+            let _guard = state_for_poison.state.lock().unwrap();
+            panic!("poison owned child state mutex");
+        })
+        .join()
+        .is_err());
+
+        terminate_owned_child(&child);
+        let status = wait_owned_child_until(&child, Duration::from_secs(4))
+            .expect("poison recovery must still terminate and reap the owned child");
+        assert!(!status.success());
+    }
+
+    #[test]
+    fn stream_child_reap_coordinator_is_manager_tracked() {
+        let source = include_str!("julia.rs");
+        let body = source
+            .split_once("pub(crate) fn stream_child(")
+            .expect("stream_child source")
+            .1
+            .split_once("/// Cancel an in-flight Julia run")
+            .expect("stream_child end")
+            .0;
+        assert!(body.contains("teardowns: TeardownTracker"));
+        assert!(body.contains("teardowns.spawn(move ||"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plain_owned_child_does_not_infer_process_group_ownership() {
+        let child = Command::new("sh")
+            .args(["-c", "exit 0"])
             .spawn()
-            .expect("spawn sleep");
-        let pid = child.id();
-        kill_pid(pid);
-        // Should be reaped promptly (signalled) rather than after 30s.
-        let status = child.wait().expect("wait child");
-        assert!(
-            !status.success(),
-            "killed child should not exit successfully"
-        );
+            .expect("spawn ungrouped child");
+        let child = own_child(child);
+        assert_eq!(child.process_group, None);
+        assert!(wait_owned_child(&child).is_some_and(|status| status.success()));
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "linux",
+        target_os = "android"
+    ))]
+    #[test]
+    fn instant_exit_retains_configured_group_id_by_construction() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "exit 0"]);
+        configure_process_group(&mut command);
+        let child = command.spawn().expect("spawn instant-exit group leader");
+        let leader_pid = child.id();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !child_has_exited_without_reaping(&child).expect("observe child without reaping") {
+            assert!(Instant::now() < deadline, "instant child did not exit");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        // Deliberately establish OwnedChild only after the leader has exited.
+        // This remains race-free because the configured pgid is the known pid;
+        // own_child_in_new_process_group never asks getpgid about the zombie.
+        let child = own_child_in_new_process_group(child);
+        assert_eq!(child.process_group, Some(leader_pid));
+        assert!(wait_owned_child(&child).is_some_and(|status| status.success()));
     }
 
     #[cfg(unix)]
     #[test]
-    fn kill_pid_terminates_whole_process_group() {
+    fn owned_termination_escalates_before_reaping_the_group_leader() {
         // A leader spawned in its own process group that forks a background
-        // grandchild (mirrors `latexmk` forking `pdflatex`). Killing the group
-        // must reap the grandchild too, not just the leader — the regression
-        // this guards is "cancel reports done while the compiler keeps running".
+        // grandchild which ignores TERM (mirrors a compiler that traps the soft
+        // cancellation). The leader itself exits on TERM. Reaping that leader
+        // before the grace-period SIGKILL would make its pgid reusable and leave
+        // the grandchild alive; termination must retain ownership through KILL.
         let mut command = Command::new("sh");
         command
-            .args(["-c", "sleep 30 & echo $!; wait"])
+            .args([
+                "-c",
+                "sh -c 'trap \"\" TERM; while :; do sleep 1; done' & echo $!; wait",
+            ])
             .stdout(Stdio::piped());
         configure_process_group(&mut command);
         let mut child = command.spawn().expect("spawn group leader");
-        let leader_pid = child.id();
 
         // Read the backgrounded grandchild's pid (printed by `echo $!`).
         let mut stdout = child.stdout.take().expect("capture stdout");
@@ -1123,8 +1967,9 @@ mod tests {
             .parse()
             .expect("parse grandchild pid");
 
-        kill_pid(leader_pid);
-        let _ = child.wait();
+        let child = own_child_in_new_process_group(child);
+        terminate_owned_child(&child);
+        let _ = wait_owned_child(&child);
 
         // The grandchild must be gone (a signal-0 probe fails) within a moment.
         let mut alive = true;
@@ -1146,5 +1991,88 @@ mod tests {
             !alive,
             "backgrounded grandchild {grandchild_pid} survived the group kill"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn natural_leader_exit_does_not_leave_a_pipe_inheriting_group_member() {
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                "sh -c 'trap \"\" HUP TERM; while :; do sleep 1; done' & echo $!; exit 0",
+            ])
+            .stdout(Stdio::piped());
+        configure_process_group(&mut command);
+        let mut child = command.spawn().expect("spawn natural-exit leader");
+        let leader_pid = to_pid_t(child.id()).expect("leader pid");
+
+        let mut stdout = child.stdout.take().expect("capture stdout");
+        let mut line = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            stdout.read_exact(&mut byte).expect("read grandchild pid");
+            if byte[0] == b'\n' {
+                break;
+            }
+            line.push(byte[0]);
+        }
+        let grandchild_pid: libc::pid_t = String::from_utf8(line)
+            .expect("pid is utf-8")
+            .trim()
+            .parse()
+            .expect("parse grandchild pid");
+
+        let (drained_tx, drained_rx) = std::sync::mpsc::channel();
+        let pump_finished = Arc::new(AtomicBool::new(false));
+        let pump_finished_for_thread = pump_finished.clone();
+        let pump = std::thread::spawn(move || {
+            let mut sink = Vec::new();
+            let _ = stdout.read_to_end(&mut sink);
+            pump_finished_for_thread.store(true, Ordering::Release);
+            let _ = drained_tx.send(());
+        });
+        let child = own_child_in_new_process_group(child);
+
+        let (status, output_drained) =
+            wait_for_owned_child_and_output_drain(&child, &drained_rx, Duration::from_millis(100));
+
+        // Fail-safe cleanup for an assertion failure. The test owns the exact
+        // captured grandchild, and signals the group only while that child still
+        // proves it has the original leader's pgid.
+        if !output_drained {
+            if process_group_id(grandchild_pid) == Some(leader_pid) {
+                send_signal(-leader_pid, libc::SIGKILL);
+            } else if process_group_id(grandchild_pid).is_some() {
+                send_signal(grandchild_pid, libc::SIGKILL);
+            }
+            let _ = drained_rx.recv_timeout(Duration::from_secs(2));
+        }
+        let _ = pump.join();
+
+        assert!(status.is_some_and(|status| status.success()));
+        assert!(
+            output_drained && pump_finished.load(Ordering::Acquire),
+            "natural leader exit left a same-group grandchild holding the output pipe"
+        );
+    }
+
+    #[test]
+    fn old_reaper_cannot_remove_a_newer_pending_cancel_token() {
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let key = "main:run-1";
+        pending.lock().unwrap().insert(key.to_string(), 42);
+
+        // A completed run owns no token. This is the exact ownership passed by
+        // its post-output-drain cleanup, after a successor may have installed 42.
+        release_pending_cancel_if_owned(&pending, key, None);
+        assert_eq!(pending.lock().unwrap().get(key), Some(&42));
+
+        // Even an older generation cannot clear the successor; only its exact
+        // token-owning expiry/registration path may remove it.
+        release_pending_cancel_if_owned(&pending, key, Some(41));
+        assert_eq!(pending.lock().unwrap().get(key), Some(&42));
+        release_pending_cancel_if_owned(&pending, key, Some(42));
+        assert!(!pending.lock().unwrap().contains_key(key));
     }
 }

@@ -1,7 +1,7 @@
 {
   "name": "lyceum",
   "private": true,
-  "version": "0.5.29",
+  "version": "0.5.83",
   "type": "module",
   "description": "A lightweight, VS Code-inspired research IDE built with Tauri.",
   "license": "MIT",
@@ -14,18 +14,21 @@
     "url": "https://github.com/jake-w-liu/Lyceum/issues"
   },
   "engines": {
-    "node": ">=20.19.0 || >=22.12.0"
+    "node": "^20.19.0 || >=22.12.0"
   },
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "check": "npm run typecheck && npm test && npm run build && npm run check:bundle",
+    "check": "npm run check:versions && npm run typecheck && npm run test:all && npm run build && npm run check:bundle",
     "check:bundle": "node scripts/check-bundle-size.mjs",
+    "check:versions": "node scripts/check-version-consistency.mjs",
     "audit": "npm audit --audit-level=moderate",
     "preview": "vite preview",
     "tauri": "node scripts/run-tauri.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:all": "npm test && npm run test:scripts",
+    "test:scripts": "node --test scripts/release-gates.test.mjs",
     "test:watch": "vitest"
   },
   "dependencies": {

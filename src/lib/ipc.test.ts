@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import packageMetadata from "../../package.json";
 
 const invokeMock = vi.fn();
 const openMock = vi.fn();
@@ -10,16 +11,22 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 }));
 
 import {
+  createDirectory,
+  createFile,
   getAppInfo,
   movePaths,
   pickFolder,
   quitApp,
+  readDirectory,
   readFileBytes,
+  renamePath,
 } from "./ipc";
+import { useWorkspaceStore } from "../state/workspaceStore";
 
 beforeEach(() => {
   invokeMock.mockReset();
   openMock.mockReset();
+  useWorkspaceStore.getState().closeWorkspace();
 });
 
 describe("getAppInfo", () => {
@@ -32,7 +39,7 @@ describe("getAppInfo", () => {
     invokeMock.mockRejectedValue(new Error("no tauri"));
     expect(await getAppInfo()).toEqual({
       name: "lyceum",
-      version: "0.2.0",
+      version: packageMetadata.version,
       os: "web",
       arch: "unknown",
     });
@@ -74,6 +81,27 @@ describe("readFileBytes", () => {
   });
 });
 
+describe("readDirectory", () => {
+  it("passes the workspace root so only root-internal trash is hidden", async () => {
+    useWorkspaceStore.getState().openWorkspace("/workspace");
+    invokeMock
+      .mockResolvedValueOnce("/workspace")
+      .mockResolvedValueOnce([{ name: ".lyceum-trash" }]);
+
+    await expect(readDirectory("/workspace/subdirectory")).resolves.toEqual([
+      { name: ".lyceum-trash" },
+    ]);
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "authorize_workspace_root", {
+      root: "/workspace",
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "read_directory", {
+      root: "/workspace",
+      path: "/workspace/subdirectory",
+    });
+  });
+});
+
 describe("quitApp", () => {
   it("invokes the backend quit command", async () => {
     invokeMock.mockResolvedValue(undefined);
@@ -97,6 +125,44 @@ describe("movePaths", () => {
       root: "/w",
       paths: ["/w/a.txt"],
       destinationDir: "/w/src",
+    });
+  });
+
+  it("adds the replace flag only for an explicit overwrite retry", async () => {
+    invokeMock.mockResolvedValue([]);
+
+    await movePaths("/w", ["/w/a.txt"], "/w/src", true, ["/w/src/a.txt"]);
+
+    expect(invokeMock).toHaveBeenCalledWith("move_paths", {
+      root: "/w",
+      paths: ["/w/a.txt"],
+      destinationDir: "/w/src",
+      replaceExisting: true,
+      expectedConflictPaths: ["/w/src/a.txt"],
+    });
+  });
+});
+
+describe("root-scoped Explorer mutations", () => {
+  it("passes the workspace root for create and rename validation", async () => {
+    invokeMock.mockResolvedValue(undefined);
+
+    await createFile("/w", "/w/note.txt");
+    await createDirectory("/w", "/w/folder");
+    await renamePath("/w", "/w/note.txt", "/w/renamed.txt");
+
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "create_file", {
+      root: "/w",
+      path: "/w/note.txt",
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(4, "create_directory", {
+      root: "/w",
+      path: "/w/folder",
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(6, "rename_path", {
+      root: "/w",
+      from: "/w/note.txt",
+      to: "/w/renamed.txt",
     });
   });
 });
