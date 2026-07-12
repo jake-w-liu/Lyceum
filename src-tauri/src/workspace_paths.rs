@@ -595,7 +595,8 @@ mod tests {
     #[test]
     fn windows_identity_source_uses_non_following_file_ids() {
         let source = include_str!("workspace_paths.rs").replace('\r', "");
-        let non_test_source = source[..source.find("#[cfg(test)]").expect("test module boundary")].to_string();
+        let non_test_source =
+            source[..source.find("#[cfg(test)]").expect("test module boundary")].to_string();
         let identity_start = source
             .find("fn entry_identity(path: &Path)")
             .expect("entry identity helper");
