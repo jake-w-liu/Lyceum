@@ -1,4 +1,9 @@
 fn main() {
+    // Make non-tauri build paths aware of platform-specific cfg flags that are
+    // otherwise injected by tauri_build so -D warnings checks do not fail on
+    // CI lint/test jobs that intentionally skip build-script execution.
+    println!("cargo:rustc-check-cfg=cfg(mobile)");
+
     let ci = std::env::var("CI").is_ok_and(|value| value == "true");
     // Keep CI checks moving in environments where the Windows resource compiler is
     // unavailable or slow to install (e.g. clippy/test lint jobs on
