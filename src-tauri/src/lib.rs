@@ -273,7 +273,17 @@ pub fn run() {
             lsp::lsp_send,
             lsp::lsp_stop
         ])
-        .build(tauri::generate_context!())
+        .build({
+            #[cfg(target_os = "macos")]
+            {
+                tauri::generate_context!()
+            }
+
+            #[cfg(not(target_os = "macos"))]
+            {
+                tauri::generate_context!(test = true)
+            }
+        })
         .expect("error while building tauri application")
         .run(|app, event| {
             match event {
