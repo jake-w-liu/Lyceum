@@ -35,6 +35,13 @@ jobs:
         os: [ubuntu-24.04, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+      - name: Install LLVM for Windows resource compilation
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command llvm-rc -ErrorAction SilentlyContinue)) {
+            choco install llvm -y --no-progress --accept-package-agreements --accept-source-agreements
+          }
       - name: Install Linux Tauri dependencies
         if: runner.os == 'Linux'
         run: |
