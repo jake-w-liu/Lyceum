@@ -39,9 +39,38 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          function Resolve-LlvmRcPath {
+            if ($env:ProgramFiles) {
+              $p = Join-Path $env:ProgramFiles "LLVM\bin\llvm-rc.exe"
+              if (Test-Path $p) { return $p }
+            }
+            if ($env:ProgramFilesX86) {
+              $p = Join-Path $env:ProgramFilesX86 "LLVM\bin\llvm-rc.exe"
+              if (Test-Path $p) { return $p }
+            }
+            return $null
+          }
+
           if (-not (Get-Command llvm-rc -ErrorAction SilentlyContinue)) {
             choco install llvm -y --no-progress --accept-package-agreements --accept-source-agreements
           }
+
+          $llvmRc = Resolve-LlvmRcPath
+          if (-not $llvmRc) {
+            $llvmRcCmd = Get-Command llvm-rc -ErrorAction SilentlyContinue
+            if ($llvmRcCmd) {
+              $llvmRc = $llvmRcCmd.Source
+            }
+          }
+
+          if (-not $llvmRc) {
+            throw "llvm-rc was not found after attempting Chocolatey install."
+          }
+
+          $llvmDir = Split-Path -Parent $llvmRc
+          "$llvmDir" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "RC=$llvmRc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RC_x86_64_pc_windows_msvc=$llvmRc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Install Linux Tauri dependencies
         if: runner.os == 'Linux'
         run: |
