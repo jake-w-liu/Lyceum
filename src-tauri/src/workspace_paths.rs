@@ -595,6 +595,7 @@ mod tests {
     #[test]
     fn windows_identity_source_uses_non_following_file_ids() {
         let source = include_str!("workspace_paths.rs").replace('\r', "");
+        let non_test_source = source[..source.find("#[cfg(test)]").expect("test module boundary")].to_string();
         let identity_start = source
             .find("fn entry_identity(path: &Path)")
             .expect("entry identity helper");
@@ -619,8 +620,8 @@ mod tests {
         assert!(source.contains("windows_file_identity(&file)"));
         assert!(source.contains("FILE_FLAG_OPEN_REPARSE_POINT"));
         assert!(!implementation.contains("std::fs::metadata(left)"));
-        assert!(!source.contains("volume_serial_number()"));
-        assert!(!source.contains("file_index()"));
+        assert!(!non_test_source.contains("volume_serial_number()"));
+        assert!(!non_test_source.contains("file_index()"));
         assert!(source.contains("access_mode(GENERIC_WRITE | DELETE)"));
         assert!(source.contains("delete_file: u8"));
         assert!(source.contains("SetFileInformationByHandle"));
