@@ -422,7 +422,14 @@ fn dedup_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 }
 
 pub(crate) fn find_program_in_path(program: &str, path: &OsStr) -> Option<PathBuf> {
-    find_program_in_path_for_platform(program, path, cfg!(windows), is_executable_file)
+    find_program_in_path_for_platform(program, path, cfg!(windows), is_executable_file, false)
+}
+
+pub(crate) fn find_program_in_path_with_extensionless_fallback(
+    program: &str,
+    path: &OsStr,
+) -> Option<PathBuf> {
+    find_program_in_path_for_platform(program, path, cfg!(windows), is_executable_file, true)
 }
 
 fn find_program_in_path_for_platform(
@@ -430,6 +437,7 @@ fn find_program_in_path_for_platform(
     path: &OsStr,
     windows: bool,
     is_executable: impl Fn(&Path) -> bool,
+    include_extensionless_fallback: bool,
 ) -> Option<PathBuf> {
     let program_path = Path::new(program);
     if program_path.components().count() > 1 {
@@ -438,13 +446,13 @@ fn find_program_in_path_for_platform(
             .map(PathBuf::from)
             .find(|candidate| is_executable(candidate));
     }
-    for dir in env::split_paths(path) {
+    let dirs: Vec<PathBuf> = env::split_paths(path)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .collect();
+    for dir in &dirs {
         // Skip empty PATH entries: `dir.join(program)` for an empty dir is the
         // bare relative program name, which would resolve against the CWD (a
         // confused-deputy risk if a planted executable shares the name).
-        if dir.as_os_str().is_empty() {
-            continue;
-        }
         // Preserve PATH directory priority, but on Windows prefer runnable
         // executable/batch forms within each directory. npm installs both an
         // extensionless POSIX shell shim and a `.cmd` shim; choosing the former
@@ -453,6 +461,26 @@ fn find_program_in_path_for_platform(
             let candidate = dir.join(name);
             if is_executable(&candidate) {
                 return Some(candidate);
+            }
+        }
+    }
+
+    if include_extensionless_fallback && windows {
+        let has_known_windows_extension = Path::new(program)
+            .extension()
+            .and_then(OsStr::to_str)
+            .is_some_and(|extension| {
+                matches!(
+                    extension.to_ascii_lowercase().as_str(),
+                    "exe" | "com" | "cmd" | "bat"
+                )
+            });
+        if !has_known_windows_extension {
+            for dir in &dirs {
+                let candidate = dir.join(program);
+                if is_executable(&candidate) {
+                    return Some(candidate);
+                }
             }
         }
     }
@@ -1619,6 +1647,7 @@ mod tests {
             &path,
             true,
             Path::is_file,
+            false,
         );
 
         assert_eq!(
@@ -1638,7 +1667,8 @@ mod tests {
         std::fs::write(second.join("server.exe"), b"MZ").unwrap();
         let path = env::join_paths([first.as_path(), second.as_path()]).unwrap();
 
-        let resolved = find_program_in_path_for_platform("server", &path, true, Path::is_file);
+        let resolved =
+            find_program_in_path_for_platform("server", &path, true, Path::is_file, false);
 
         assert_eq!(
             resolved.as_deref(),
@@ -1657,7 +1687,8 @@ mod tests {
         std::fs::write(second.join("server.cmd"), b"@node second.js").unwrap();
         let path = env::join_paths([first.as_path(), second.as_path()]).unwrap();
 
-        let resolved = find_program_in_path_for_platform("server", &path, true, Path::is_file);
+        let resolved =
+            find_program_in_path_for_platform("server", &path, true, Path::is_file, false);
 
         assert_eq!(
             resolved.as_deref(),
@@ -1678,6 +1709,7 @@ mod tests {
             empty_path,
             true,
             Path::is_file,
+            false,
         );
         assert_eq!(resolved.as_deref(), Some(executable.as_path()));
         assert_eq!(

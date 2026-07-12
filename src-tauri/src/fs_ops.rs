@@ -2567,7 +2567,7 @@ mod tests {
         // This host-independent guard covers the Windows-only cfg branch in
         // local macOS/Linux runs; Windows CI additionally executes the behavior
         // test above.
-        let source = include_str!("fs_ops.rs");
+        let source = include_str!("fs_ops.rs").replace('\r', "");
         let start = source
             .find("#[cfg(windows)]\npub(crate) fn rename_noreplace")
             .expect("Windows no-replace branch");
@@ -2625,7 +2625,7 @@ mod tests {
 
     #[test]
     fn windows_symlink_kind_source_reads_the_source_reparse_type() {
-        let source = include_str!("fs_ops.rs");
+        let source = include_str!("fs_ops.rs").replace('\r', "");
         let start = source
             .find("#[cfg(windows)]\nfn copied_symlink_kind")
             .expect("Windows symlink-kind branch");
@@ -2646,7 +2646,7 @@ mod tests {
         // Host-independent coverage for the Windows-only branch. Windows CI's
         // runtime test below verifies the actual filesystem behavior whenever
         // the runner permits creating symlinks.
-        let source = include_str!("fs_ops.rs");
+        let source = include_str!("fs_ops.rs").replace('\r', "");
         let start = source
             .find("fn remove_entry(path: &Path)")
             .expect("remove-entry implementation");

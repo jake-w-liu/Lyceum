@@ -176,7 +176,7 @@ fn resolve_latex_tools_impl(path: &OsStr) -> Vec<LatexToolDto> {
     let mut seen = HashSet::new();
 
     for tool in LATEX_TOOL_ORDER {
-        if let Some(program) = julia::find_program_in_path(tool, path) {
+        if let Some(program) = julia::find_program_in_path_with_extensionless_fallback(tool, path) {
             let program = program.to_string_lossy().to_string();
             if seen.insert((tool.to_string(), program.clone())) {
                 out.push(LatexToolDto {
