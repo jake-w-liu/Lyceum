@@ -98,9 +98,13 @@ jobs:
         run: cargo fmt --check
       - name: Clippy
         working-directory: src-tauri
+        env:
+          CI_SKIP_TAURI_BUILD: ${{ matrix.os == 'windows-latest' && '1' || '0' }}
         run: cargo clippy --all-targets -- -D warnings
       - name: Tests
         working-directory: src-tauri
+        env:
+          CI_SKIP_TAURI_BUILD: ${{ matrix.os == 'windows-latest' && '1' || '0' }}
         run: cargo test
 
   rust-advisories:
