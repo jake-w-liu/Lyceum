@@ -1090,6 +1090,7 @@ fn make_path_owner_writable(path: &Path, metadata: &std::fs::Metadata) -> std::i
 fn make_path_owner_writable(path: &Path, metadata: &std::fs::Metadata) -> std::io::Result<()> {
     let mut permissions = metadata.permissions();
     if permissions.readonly() {
+        #[allow(clippy::permissions_set_readonly_false)]
         permissions.set_readonly(false);
         std::fs::set_permissions(path, permissions)?;
     }

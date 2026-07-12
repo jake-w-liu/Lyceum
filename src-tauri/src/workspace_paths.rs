@@ -372,16 +372,72 @@ fn metadata_identity(metadata: &std::fs::Metadata) -> Option<ExistingEntryIdenti
 
 #[cfg(windows)]
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct ExistingEntryIdentity(u32, u64);
+struct ExistingEntryIdentity {
+    volume: u32,
+    index: u64,
+    size: u64,
+    attributes: u32,
+    last_write: u64,
+}
 
 #[cfg(windows)]
-fn metadata_identity(metadata: &std::fs::Metadata) -> Option<ExistingEntryIdentity> {
-    use std::os::windows::fs::MetadataExt;
+#[repr(C)]
+#[allow(non_snake_case)]
+struct WindowsFileTime {
+    dwLowDateTime: u32,
+    dwHighDateTime: u32,
+}
 
-    Some(ExistingEntryIdentity(
-        metadata.volume_serial_number()?,
-        metadata.file_index()?,
-    ))
+#[cfg(windows)]
+#[repr(C)]
+#[allow(non_snake_case)]
+struct ByHandleFileInformation {
+    dwFileAttributes: u32,
+    ftCreationTime: WindowsFileTime,
+    ftLastAccessTime: WindowsFileTime,
+    ftLastWriteTime: WindowsFileTime,
+    dwVolumeSerialNumber: u32,
+    nFileSizeHigh: u32,
+    nFileSizeLow: u32,
+    nNumberOfLinks: u32,
+    nFileIndexHigh: u32,
+    nFileIndexLow: u32,
+}
+
+#[cfg(windows)]
+fn windows_file_identity(file: &std::fs::File) -> std::io::Result<ExistingEntryIdentity> {
+    use std::os::windows::io::AsRawHandle;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetFileInformationByHandle(
+            handle: *mut std::ffi::c_void,
+            information: *mut ByHandleFileInformation,
+        ) -> i32;
+    }
+
+    let mut information = std::mem::MaybeUninit::<ByHandleFileInformation>::uninit();
+    // SAFETY: `file` owns a valid kernel handle and `information` points to
+    // writable storage of the exact BY_HANDLE_FILE_INFORMATION layout.
+    let succeeded =
+        unsafe { GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr()) };
+    if succeeded == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: a successful call initializes every field.
+    let information = unsafe { information.assume_init() };
+    let index =
+        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
+    let size = (u64::from(information.nFileSizeHigh) << 32) | u64::from(information.nFileSizeLow);
+    let last_write = (u64::from(information.ftLastWriteTime.dwHighDateTime) << 32)
+        | u64::from(information.ftLastWriteTime.dwLowDateTime);
+    Ok(ExistingEntryIdentity {
+        volume: information.dwVolumeSerialNumber,
+        index,
+        size,
+        attributes: information.dwFileAttributes,
+        last_write,
+    })
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -393,12 +449,38 @@ fn metadata_identity(_metadata: &std::fs::Metadata) -> Option<ExistingEntryIdent
     None
 }
 
+#[cfg(not(windows))]
 fn entry_identity(path: &Path) -> Option<ExistingEntryIdentity> {
     metadata_identity(&std::fs::symlink_metadata(path).ok()?)
 }
 
+#[cfg(windows)]
+fn entry_identity(path: &Path) -> Option<ExistingEntryIdentity> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const FILE_SHARE_DELETE: u32 = 0x0000_0004;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+    std::fs::OpenOptions::new()
+        .access_mode(0)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .ok()
+        .and_then(|file| windows_file_identity(&file).ok())
+}
+
+#[cfg(not(windows))]
 fn file_identity(file: &std::fs::File) -> Option<ExistingEntryIdentity> {
     metadata_identity(&file.metadata().ok()?)
+}
+
+#[cfg(windows)]
+fn file_identity(file: &std::fs::File) -> Option<ExistingEntryIdentity> {
+    windows_file_identity(file).ok()
 }
 
 #[cfg(unix)]
@@ -438,9 +520,12 @@ fn same_existing_entry(left: &Path, right: &Path) -> bool {
 mod tests {
     use super::{
         directory_is_case_sensitive, directory_is_case_sensitive_with_hook,
-        path_resolves_into_workspace_trash, path_would_be_workspace_trash, LYCEUM_TRASH_DIR,
+        path_would_be_workspace_trash,
     };
     use std::path::PathBuf;
+
+    #[cfg(unix)]
+    use super::{path_resolves_into_workspace_trash, LYCEUM_TRASH_DIR};
 
     #[test]
     fn absent_trash_case_alias_follows_the_directory_lookup_semantics() {
@@ -506,6 +591,7 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
     fn windows_identity_source_uses_non_following_file_ids() {
         let source = include_str!("workspace_paths.rs");
@@ -526,12 +612,15 @@ mod tests {
             .expect("end of Windows identity branch");
         let implementation = &source[start..end];
 
-        assert!(entry_identity.contains("symlink_metadata"));
+        assert!(entry_identity.contains("OpenOptionsExt"));
         assert!(implementation.contains("entry_identity(left)"));
         assert!(implementation.contains("entry_identity(right)"));
-        assert!(source.contains("volume_serial_number()?"));
-        assert!(source.contains("file_index()?"));
+        assert!(source.contains("GetFileInformationByHandle"));
+        assert!(source.contains("windows_file_identity(&file)"));
+        assert!(source.contains("FILE_FLAG_OPEN_REPARSE_POINT"));
         assert!(!implementation.contains("std::fs::metadata(left)"));
+        assert!(!source.contains("volume_serial_number()"));
+        assert!(!source.contains("file_index()"));
         assert!(source.contains("access_mode(GENERIC_WRITE | DELETE)"));
         assert!(source.contains("delete_file: u8"));
         assert!(source.contains("SetFileInformationByHandle"));
