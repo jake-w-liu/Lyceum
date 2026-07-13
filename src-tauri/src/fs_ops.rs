@@ -83,7 +83,7 @@ struct EntryIdentity {
     mode: u32,
     // Keep the inode allocated while the rollback token is live. This closes
     // the otherwise-theoretical unlink + inode-reuse hole in a dev/inode token.
-    _handle: Option<std::fs::File>,
+    handle: std::sync::Mutex<Option<std::fs::File>>,
 }
 
 #[cfg(unix)]
@@ -104,7 +104,7 @@ impl EntryIdentity {
             modified_seconds: metadata.mtime(),
             modified_nanoseconds: metadata.mtime_nsec(),
             mode: metadata.mode(),
-            _handle: handle,
+            handle: std::sync::Mutex::new(handle),
         })
     }
 
@@ -120,6 +120,20 @@ impl EntryIdentity {
                     && metadata.mtime_nsec() == self.modified_nanoseconds
                     && metadata.mode() == self.mode
             })
+            .unwrap_or(false)
+    }
+
+    fn release_pin(&self) {
+        if let Ok(mut handle) = self.handle.lock() {
+            *handle = None;
+        }
+    }
+
+    #[cfg(test)]
+    fn is_pinned(&self) -> bool {
+        self.handle
+            .lock()
+            .map(|handle| handle.is_some())
             .unwrap_or(false)
     }
 }
@@ -175,7 +189,7 @@ struct EntryIdentity {
     size: u64,
     attributes: u32,
     last_write: u64,
-    _handle: Option<std::fs::File>,
+    handle: std::sync::Mutex<Option<std::fs::File>>,
 }
 
 #[cfg(windows)]
@@ -201,7 +215,7 @@ impl EntryIdentity {
             size,
             attributes,
             last_write,
-            _handle: pin.then_some(handle),
+            handle: std::sync::Mutex::new(pin.then_some(handle)),
         })
     }
 
@@ -214,6 +228,20 @@ impl EntryIdentity {
                     && current.attributes == self.attributes
                     && current.last_write == self.last_write
             })
+            .unwrap_or(false)
+    }
+
+    fn release_pin(&self) {
+        if let Ok(mut handle) = self.handle.lock() {
+            *handle = None;
+        }
+    }
+
+    #[cfg(test)]
+    fn is_pinned(&self) -> bool {
+        self.handle
+            .lock()
+            .map(|handle| handle.is_some())
             .unwrap_or(false)
     }
 }
@@ -294,6 +322,13 @@ impl EntryIdentity {
     fn still_at(&self, _path: &Path) -> bool {
         false
     }
+
+    fn release_pin(&self) {}
+
+    #[cfg(test)]
+    fn is_pinned(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug)]
@@ -343,6 +378,15 @@ impl OwnedEntry {
                         path.join(&node.relative)
                     })
         })
+    }
+
+    fn release_root_pin(&self) {
+        if let Some(root) = self.tree.as_ref().and_then(|tree| {
+            tree.iter()
+                .find(|node| node.relative.as_os_str().is_empty())
+        }) {
+            root.identity.release_pin();
+        }
     }
 }
 
@@ -1574,6 +1618,11 @@ fn quarantine_owned_entry(owned: &OwnedEntry) -> std::io::Result<PathBuf> {
         match rename_noreplace(&owned.path, &quarantined) {
             Ok(()) => {
                 if owned.is_still_owned_at(&quarantined) {
+                    // The root descriptor prevents inode reuse until the
+                    // atomically quarantined tree has been verified. Its job is
+                    // complete after this check, so do not retain it while the
+                    // verified tree is made removable and deleted.
+                    owned.release_root_pin();
                     return Ok(quarantined);
                 }
                 restore_quarantined_entry(&quarantined, &owned.path);
@@ -2825,8 +2874,8 @@ mod tests {
         let tree = owned.tree.as_ref().expect("complete ownership tree");
 
         assert_eq!(tree.len(), 1_025);
-        assert!(tree[0].identity._handle.is_some());
-        assert!(tree[1..].iter().all(|node| node.identity._handle.is_none()));
+        assert!(tree[0].identity.is_pinned());
+        assert!(tree[1..].iter().all(|node| !node.identity.is_pinned()));
     }
 
     #[test]
