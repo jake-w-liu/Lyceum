@@ -236,14 +236,6 @@ impl EntryIdentity {
             *handle = None;
         }
     }
-
-    #[cfg(test)]
-    fn is_pinned(&self) -> bool {
-        self.handle
-            .lock()
-            .map(|handle| handle.is_some())
-            .unwrap_or(false)
-    }
 }
 
 #[cfg(windows)]
@@ -324,11 +316,6 @@ impl EntryIdentity {
     }
 
     fn release_pin(&self) {}
-
-    #[cfg(test)]
-    fn is_pinned(&self) -> bool {
-        false
-    }
 }
 
 #[derive(Debug)]
