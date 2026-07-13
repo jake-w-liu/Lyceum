@@ -80,7 +80,7 @@ struct EntryIdentity {
     size: u64,
     modified_seconds: i64,
     modified_nanoseconds: i64,
-    mode: u32,
+    mode: std::sync::atomic::AtomicU32,
     // Keep the inode allocated while the rollback token is live. This closes
     // the otherwise-theoretical unlink + inode-reuse hole in a dev/inode token.
     handle: std::sync::Mutex<Option<std::fs::File>>,
@@ -103,7 +103,7 @@ impl EntryIdentity {
             size: metadata.size(),
             modified_seconds: metadata.mtime(),
             modified_nanoseconds: metadata.mtime_nsec(),
-            mode: metadata.mode(),
+            mode: std::sync::atomic::AtomicU32::new(metadata.mode()),
             handle: std::sync::Mutex::new(handle),
         })
     }
@@ -118,9 +118,81 @@ impl EntryIdentity {
                     && metadata.size() == self.size
                     && metadata.mtime() == self.modified_seconds
                     && metadata.mtime_nsec() == self.modified_nanoseconds
-                    && metadata.mode() == self.mode
+                    && metadata.mode() == self.mode.load(Ordering::Relaxed)
             })
             .unwrap_or(false)
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    fn make_directory_owner_accessible(&self, path: &Path) -> std::io::Result<Option<u32>> {
+        use std::os::fd::AsRawFd;
+
+        let metadata = std::fs::symlink_metadata(path)?;
+        if !metadata.is_dir() {
+            return Ok(None);
+        }
+        if !self.still_at(path) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "rollback root changed before permission preparation",
+            ));
+        }
+
+        let old_mode = self.mode.load(Ordering::Relaxed);
+        let old_permissions = old_mode & 0o7777;
+        let new_permissions = old_permissions | 0o700;
+        if new_permissions == old_permissions {
+            return Ok(None);
+        }
+
+        let handle = self
+            .handle
+            .lock()
+            .map_err(|_| std::io::Error::other("rollback root handle lock is poisoned"))?;
+        let handle = handle.as_ref().ok_or_else(|| {
+            std::io::Error::other("rollback root handle was released before quarantine")
+        })?;
+        // SAFETY: the ownership token retains this valid descriptor. fchmod
+        // affects the pinned inode rather than whichever entry may later
+        // occupy the original pathname.
+        if unsafe { libc::fchmod(handle.as_raw_fd(), new_permissions as libc::mode_t) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let new_mode = (old_mode & !0o7777) | new_permissions;
+        self.mode.store(new_mode, Ordering::Relaxed);
+
+        if self.still_at(path) {
+            Ok(Some(old_mode))
+        } else {
+            // SAFETY: the same retained descriptor remains valid. Best-effort
+            // restoration is followed by an error so the pathname is not
+            // quarantined or deleted.
+            let _ = unsafe { libc::fchmod(handle.as_raw_fd(), old_permissions as libc::mode_t) };
+            self.mode.store(old_mode, Ordering::Relaxed);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "rollback root changed during permission preparation",
+            ))
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    fn restore_mode(&self, mode: u32) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd;
+
+        let handle = self
+            .handle
+            .lock()
+            .map_err(|_| std::io::Error::other("rollback root handle lock is poisoned"))?;
+        let handle = handle.as_ref().ok_or_else(|| {
+            std::io::Error::other("rollback root handle was released before mode restoration")
+        })?;
+        // SAFETY: the ownership token retains this valid descriptor.
+        if unsafe { libc::fchmod(handle.as_raw_fd(), (mode & 0o7777) as libc::mode_t) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        self.mode.store(mode, Ordering::Relaxed);
+        Ok(())
     }
 
     fn release_pin(&self) {
@@ -374,6 +446,51 @@ impl OwnedEntry {
         }) {
             root.identity.release_pin();
         }
+    }
+
+    fn prepare_root_for_quarantine(&self) -> std::io::Result<Option<u32>> {
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        {
+            if !self.is_still_owned_at(&self.path) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "rollback path no longer contains the owned entry tree",
+                ));
+            }
+            let root = self
+                .tree
+                .as_ref()
+                .and_then(|tree| {
+                    tree.iter()
+                        .find(|node| node.relative.as_os_str().is_empty())
+                })
+                .ok_or_else(|| std::io::Error::other("rollback root identity is missing"))?;
+            root.identity.make_directory_owner_accessible(&self.path)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+        {
+            Ok(None)
+        }
+    }
+
+    fn restore_root_mode(&self, mode: Option<u32>) -> std::io::Result<()> {
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        {
+            if let Some(mode) = mode {
+                let root = self
+                    .tree
+                    .as_ref()
+                    .and_then(|tree| {
+                        tree.iter()
+                            .find(|node| node.relative.as_os_str().is_empty())
+                    })
+                    .ok_or_else(|| std::io::Error::other("rollback root identity is missing"))?;
+                root.identity.restore_mode(mode)?;
+            }
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+        let _ = mode;
+        Ok(())
     }
 }
 
@@ -1590,6 +1707,7 @@ fn quarantine_owned_entry(owned: &OwnedEntry) -> std::io::Result<PathBuf> {
             "rollback ownership could not be captured",
         ));
     }
+    let original_root_mode = owned.prepare_root_for_quarantine()?;
     let parent = owned
         .path
         .parent()
@@ -1613,13 +1731,30 @@ fn quarantine_owned_entry(owned: &OwnedEntry) -> std::io::Result<PathBuf> {
                     return Ok(quarantined);
                 }
                 restore_quarantined_entry(&quarantined, &owned.path);
+                if let Err(restore_error) = owned.restore_root_mode(original_root_mode) {
+                    return Err(std::io::Error::other(format!(
+                        "rollback ownership changed and the original mode could not be restored: {restore_error}"
+                    )));
+                }
                 return Err(std::io::Error::other(
                     "rollback path no longer contains the owned entry tree",
                 ));
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
+            Err(error) => {
+                if let Err(restore_error) = owned.restore_root_mode(original_root_mode) {
+                    return Err(std::io::Error::other(format!(
+                        "{error}; the original mode could not be restored: {restore_error}"
+                    )));
+                }
+                return Err(error);
+            }
         }
+    }
+    if let Err(restore_error) = owned.restore_root_mode(original_root_mode) {
+        return Err(std::io::Error::other(format!(
+            "could not claim a unique rollback quarantine path; the original mode could not be restored: {restore_error}"
+        )));
     }
     Err(std::io::Error::new(
         std::io::ErrorKind::AlreadyExists,
@@ -2785,9 +2920,7 @@ mod tests {
 
         copy_recursive(&source, &destination).expect("complete directory copy");
         let completed = OwnedEntry::capture(destination.clone());
-        let quarantined = quarantine_owned_entry(&completed)
-            .expect("quarantine completed read-only copy for rollback");
-        remove_owned_copy(&quarantined).expect("remove quarantined read-only copy");
+        rollback_copies(std::slice::from_ref(&completed));
 
         // Restore source permissions for TempDir cleanup.
         fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
