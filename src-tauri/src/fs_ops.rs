@@ -2785,7 +2785,9 @@ mod tests {
 
         copy_recursive(&source, &destination).expect("complete directory copy");
         let completed = OwnedEntry::capture(destination.clone());
-        rollback_copies(std::slice::from_ref(&completed));
+        let quarantined = quarantine_owned_entry(&completed)
+            .expect("quarantine completed read-only copy for rollback");
+        remove_owned_copy(&quarantined).expect("remove quarantined read-only copy");
 
         // Restore source permissions for TempDir cleanup.
         fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
