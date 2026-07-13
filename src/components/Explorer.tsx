@@ -1654,7 +1654,10 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
         geometryRefresh = refresh;
         void refresh.then((nextGeometry) => {
           if (disposed || geometryRefresh !== refresh) return;
-          geometry = nextGeometry;
+          // A transient IPC failure must not discard geometry that has already
+          // been used successfully. Native drag-over delivery can continue
+          // while this refresh is pending, so it must never gate hit-testing.
+          if (nextGeometry) geometry = nextGeometry;
           geometryRefresh = null;
           if (latestOverPosition) targetAt(latestOverPosition, geometry);
         });
@@ -1683,28 +1686,32 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
           latestOverPosition = null;
           const pendingGeometry = geometryRefresh;
           geometryRefresh = null;
-          if (pendingGeometry) {
+          // Use the last valid geometry immediately. Waiting for window IPC
+          // here can stall until AppKit's native drag session has completed.
+          if (geometry) {
+            importAt(payload.paths, payload.position, geometry);
+          } else if (pendingGeometry) {
             void pendingGeometry.then((nextGeometry) => {
               if (disposed) return;
-              geometry = nextGeometry;
+              if (nextGeometry) geometry = nextGeometry;
               importAt(payload.paths, payload.position, geometry);
             });
-          } else if (geometry) {
-            importAt(payload.paths, payload.position, geometry);
           } else {
             void loadGeometry().then((nextGeometry) => {
               if (disposed) return;
-              geometry = nextGeometry;
+              if (nextGeometry) geometry = nextGeometry;
               importAt(payload.paths, payload.position, geometry);
             });
           }
         } else if (payload.type === "enter" || payload.type === "over") {
           latestOverPosition = payload.position;
+          // Match VS Code's drag-over model: every cursor update immediately
+          // resolves and paints the row beneath it. A background geometry
+          // refresh may improve subsequent hit tests but must never freeze the
+          // current target at the row where the drag first entered.
+          targetAt(payload.position, geometry);
           if (payload.type === "enter") {
-            targetAt(payload.position, geometry);
             startDragGeometryRefresh();
-          } else if (!geometryRefresh) {
-            targetAt(payload.position, geometry);
           }
         } else {
           latestOverPosition = null;

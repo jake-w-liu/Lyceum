@@ -944,20 +944,32 @@ describe("Explorer", () => {
     }
   });
 
-  it("shows the current macOS native target immediately during scale refresh", async () => {
+  it("tracks each macOS native target and drops there during scale refresh", async () => {
     const originalPlatform = Object.getOwnPropertyDescriptor(navigator, "platform");
     Object.defineProperty(navigator, "platform", {
       configurable: true,
       value: "MacIntel",
     });
     const refreshedOuterSize = deferred<{ width: number; height: number }>();
+    vi.mocked(readDirectory).mockImplementation(async (path: string) => {
+      if (path === ROOT) return [dir("src"), dir("docs"), file("README.md")];
+      return [];
+    });
 
     try {
       render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
       await screen.findByText("src");
       await waitFor(() => expect(webviewMocks.onDragDropEvent).toHaveBeenCalled());
       const srcRow = screen.getByText("src").closest(".tree-row")!;
-      const hitTest = mockElementFromPoint(srcRow);
+      const docsRow = screen.getByText("docs").closest(".tree-row")!;
+      const originalElementFromPoint = document.elementFromPoint;
+      const elementFromPoint = vi.fn((_x: number, y: number) =>
+        y < 100 ? srcRow : docsRow,
+      );
+      Object.defineProperty(document, "elementFromPoint", {
+        configurable: true,
+        value: elementFromPoint,
+      });
       webviewMocks.outerSize.mockReturnValueOnce(refreshedOuterSize.promise);
       webviewMocks.scaleFactor.mockResolvedValueOnce(2);
 
@@ -970,20 +982,46 @@ describe("Explorer", () => {
             payload: {
               type: "enter",
               paths: ["/tmp/from-finder.txt"],
-              position: { x: 131, y: 111 },
+              position: { x: 131, y: 80 },
             },
           });
           handler({
-            payload: { type: "over", position: { x: 131, y: 111 } },
+            payload: { type: "over", position: { x: 131, y: 151 } },
           });
         });
-        expect(srcRow).toHaveClass("drop-target");
+        expect(srcRow).not.toHaveClass("drop-target");
+        expect(docsRow).toHaveClass("drop-target");
+        expect(elementFromPoint).toHaveBeenLastCalledWith(131, 151);
+
+        act(() => {
+          handler({
+            payload: {
+              type: "drop",
+              paths: ["/tmp/from-finder.txt"],
+              position: { x: 131, y: 151 },
+            },
+          });
+        });
+        expect(docsRow).not.toHaveClass("drop-target");
+        await waitFor(() =>
+          expect(copyPaths).toHaveBeenCalledWith(
+            ROOT,
+            ["/tmp/from-finder.txt"],
+            "/ws/docs",
+          ),
+        );
 
         refreshedOuterSize.resolve({ width: 2048, height: 1600 });
-        await waitFor(() => expect(srcRow).toHaveClass("drop-target"));
-        expect(hitTest.elementFromPoint).toHaveBeenLastCalledWith(131, 79);
       } finally {
-        hitTest.restore();
+        if (originalElementFromPoint) {
+          Object.defineProperty(document, "elementFromPoint", {
+            configurable: true,
+            value: originalElementFromPoint,
+          });
+        } else {
+          delete (document as unknown as { elementFromPoint?: unknown })
+            .elementFromPoint;
+        }
       }
     } finally {
       if (originalPlatform) {
