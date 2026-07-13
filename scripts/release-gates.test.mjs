@@ -222,6 +222,32 @@ describe("test command routing", () => {
   });
 });
 
+describe("GitHub Actions determinism", () => {
+  it("pins actions, runners, toolchains, and locked Rust gates", () => {
+    for (const workflow of [
+      "../.github/workflows/ci.yml",
+      "../.github/workflows/release.yml",
+    ]) {
+      const source = readFileSync(new URL(workflow, import.meta.url), "utf8");
+      assert.doesNotMatch(source, /runs-on:\s+[^\n]*latest/);
+      assert.doesNotMatch(source, /uses:\s+[^\s@]+@v\d/);
+      assert.doesNotMatch(source, /dtolnay\/rust-toolchain@stable/);
+      assert.match(source, /cargo clippy --locked --all-targets -- -D warnings/);
+      assert.match(source, /cargo test --locked -- --test-threads=1/);
+    }
+  });
+
+  it("keeps the release Windows resource compiler setup aligned with CI", () => {
+    const source = readFileSync(
+      new URL("../.github/workflows/release.yml", import.meta.url),
+      "utf8",
+    );
+    assert.match(source, /Install LLVM for Windows resource compilation/);
+    assert.match(source, /RC_x86_64_pc_windows_msvc/);
+    assert.match(source, /CI_SKIP_TAURI_BUILD/);
+  });
+});
+
 function temporaryDirectory(name) {
   const root = mkdtempSync(join(tmpdir(), `lyceum-${name}-`));
   temporaryRoots.push(root);

@@ -61,7 +61,6 @@ vi.mock("../lib/ipc", () => ({
   restoreTrashBatch: vi.fn(async () => {}),
   redoTrashBatch: vi.fn(async () => {}),
   gitStatus: vi.fn(async () => ({ isRepo: false, files: {} })),
-  nativeWindowContentInset: vi.fn(async () => ({ x: 0, y: 0 })),
 }));
 import {
   createDirectory,
@@ -69,7 +68,6 @@ import {
   movePathsToTrash,
   copyPaths,
   movePaths,
-  nativeWindowContentInset,
   readDirectory,
   redoTrashBatch,
   gitStatus,
@@ -164,8 +162,6 @@ beforeEach(() => {
     onDragDropEvent: webviewMocks.onDragDropEvent,
   });
   vi.mocked(readDirectory).mockReset();
-  vi.mocked(nativeWindowContentInset).mockReset();
-  vi.mocked(nativeWindowContentInset).mockResolvedValue({ x: 0, y: 0 });
   vi.mocked(readDirectory).mockImplementation(async (p: string) => {
     if (p === ROOT) return [dir("src"), file("README.md")];
     if (p === "/ws/src") return [file("main.tsx", "/ws/src")];
@@ -860,7 +856,7 @@ describe("Explorer", () => {
           "/ws/src",
         ),
       );
-      expect(hitTest.elementFromPoint).toHaveBeenCalledWith(120, 40);
+      expect(hitTest.elementFromPoint).toHaveBeenCalledWith(240, 80);
     } finally {
       hitTest.restore();
       if (originalDpr) {
@@ -877,7 +873,7 @@ describe("Explorer", () => {
     }
   });
 
-  it("removes the native macOS frame inset for folder feedback and drop", async () => {
+  it("uses webview-local macOS points unchanged at non-default window zoom", async () => {
     const originalPlatform = Object.getOwnPropertyDescriptor(navigator, "platform");
     const originalDpr = Object.getOwnPropertyDescriptor(window, "devicePixelRatio");
     Object.defineProperty(navigator, "platform", {
@@ -888,9 +884,6 @@ describe("Explorer", () => {
       configurable: true,
       value: 2.4,
     });
-    // The native inner origin is 64 physical pixels below the outer window
-    // origin, which is a 32 AppKit-point title bar at scale factor 2.
-    vi.mocked(nativeWindowContentInset).mockResolvedValueOnce({ x: 0, y: 32 });
     webviewMocks.scaleFactor.mockResolvedValueOnce(2);
 
     try {
@@ -931,10 +924,7 @@ describe("Explorer", () => {
             "/ws/src",
           ),
         );
-        expect(hitTest.elementFromPoint).toHaveBeenCalledWith(
-          131 / 1.2,
-          79 / 1.2,
-        );
+        expect(hitTest.elementFromPoint).toHaveBeenCalledWith(131, 111);
       } finally {
         hitTest.restore();
       }
@@ -959,7 +949,6 @@ describe("Explorer", () => {
       configurable: true,
       value: "MacIntel",
     });
-    const refreshedInset = deferred<{ x: number; y: number }>();
     vi.mocked(readDirectory).mockImplementation(async (path: string) => {
       if (path === ROOT) return [dir("src"), dir("docs"), file("README.md")];
       return [];
@@ -979,9 +968,6 @@ describe("Explorer", () => {
         configurable: true,
         value: elementFromPoint,
       });
-      vi.mocked(nativeWindowContentInset).mockReturnValueOnce(
-        refreshedInset.promise,
-      );
       webviewMocks.scaleFactor.mockResolvedValueOnce(2);
 
       try {
@@ -1021,8 +1007,6 @@ describe("Explorer", () => {
             "/ws/docs",
           ),
         );
-
-        refreshedInset.resolve({ x: 0, y: 0 });
       } finally {
         if (originalElementFromPoint) {
           Object.defineProperty(document, "elementFromPoint", {
@@ -1043,11 +1027,11 @@ describe("Explorer", () => {
     }
   });
 
-  it("refuses a macOS native drop when native frame geometry is unavailable", async () => {
+  it("refuses a non-macOS native drop when display geometry is unavailable", async () => {
     const originalPlatform = Object.getOwnPropertyDescriptor(navigator, "platform");
     Object.defineProperty(navigator, "platform", {
       configurable: true,
-      value: "MacIntel",
+      value: "Linux x86_64",
     });
     webviewMocks.scaleFactor.mockRejectedValue(new Error("unavailable"));
 

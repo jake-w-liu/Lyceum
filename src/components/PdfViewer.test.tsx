@@ -332,6 +332,29 @@ describe("PdfViewer", () => {
     expect(pdfMocks.getDestination).toHaveBeenCalledWith("sec");
     expect(pdfMocks.getPageIndex).toHaveBeenCalledWith(destinationRef);
     expect(scroll.scrollLeft).toBe(0);
+
+    // A destination page lookup can finish after the reader has already
+    // resumed scrolling. The stale completion must not jump back.
+    const destinationPage = await pdfMocks.getPage(3);
+    let resolveDestination!: (page: typeof destinationPage) => void;
+    const delayedDestination = new Promise<typeof destinationPage>((resolve) => {
+      resolveDestination = resolve;
+    });
+    pdfMocks.getPage.mockReturnValueOnce(delayedDestination);
+    const callsBeforeDelayedJump = pdfMocks.getPage.mock.calls.length;
+    scroll.scrollTop = 77;
+    fireEvent.click(container.querySelector(".pdf-annotation-layer a")!);
+    await waitFor(() =>
+      expect(pdfMocks.getPage.mock.calls.length).toBe(
+        callsBeforeDelayedJump + 1,
+      ),
+    );
+    fireEvent.wheel(scroll, { deltaY: 12 });
+    resolveDestination(destinationPage);
+    await delayedDestination;
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(scroll.scrollTop).toBe(77);
   });
 
   it("finds text and navigates matches via the find bar", async () => {

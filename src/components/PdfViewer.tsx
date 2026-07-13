@@ -44,10 +44,7 @@ import {
   type PdfMatch,
   type PdfPageIndex,
 } from "../lib/pdfSearch";
-import {
-  correctPdfTextLayerMinimumFontSize,
-  registerPdfTextSelection,
-} from "../lib/pdfTextSelection";
+import { registerPdfTextSelection } from "../lib/pdfTextSelection";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -398,7 +395,6 @@ function PdfPage({
   searchQuery,
   highlights,
   initialSize,
-  onResized,
 }: {
   doc: PDFDocumentProxy;
   pageNumber: number;
@@ -409,10 +405,6 @@ function PdfPage({
   searchQuery: string;
   highlights: PageHighlight[] | undefined;
   initialSize: PageSize;
-  /** Called when this page's measured box size changes (i.e. it rendered to its
-   *  real intrinsic size). Lets the parent re-pin a pending jump once the pages
-   *  above the target settle, so the target lands at the viewport top. */
-  onResized?: (pageNumber: number) => void;
 }) {
   const elRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -449,13 +441,6 @@ function PdfPage({
       map.delete(pageNumber);
     };
   }, [pageNumber, pageRefs]);
-
-  // Notify the parent when the measured box size changes — i.e. when a real
-  // render replaces the placeholder size. The parent uses this to re-pin a
-  // pending far-jump once the pages above the target report their real heights.
-  useEffect(() => {
-    onResized?.(pageNumber);
-  }, [size, pageNumber, onResized]);
 
   useEffect(() => {
     if (!visible) {
@@ -557,7 +542,6 @@ function PdfPage({
         const renderTextLayer = async (): Promise<void> => {
           await textLayer!.render();
           if (!cancelled) {
-            correctPdfTextLayerMinimumFontSize(textLayerElement);
             unregisterTextSelection =
               registerPdfTextSelection(textLayerElement);
           }
@@ -728,11 +712,9 @@ export default function PdfViewer({ path }: { path: string }) {
   const pendingDestinationRef = useRef<{
     pageNumber: number;
     destArray: PdfDestArray | null;
+    requestId: number;
   } | null>(null);
-  // Target page of an in-progress programmatic jump. While set, page-size
-  // changes above/at the target re-pin the scroll so the target stays at the
-  // viewport top as not-yet-rendered pages settle from placeholder to real size.
-  const pendingScrollRef = useRef<number | null>(null);
+  const navigationRequestRef = useRef(0);
   const pageStateRef = useRef(saved?.page ?? 1);
 
   const [doc, setDoc] = useState<PDFDocumentProxy | null>(null);
@@ -774,6 +756,8 @@ export default function PdfViewer({ path }: { path: string }) {
 
   const scrollToPage = useCallback(
     (target: number) => {
+      navigationRequestRef.current += 1;
+      pendingDestinationRef.current = null;
       const pageNumber = clampPage(target, numPages);
       const wrap = scrollRef.current;
       const pageEl = pageRefs.current.get(pageNumber);
@@ -783,29 +767,9 @@ export default function PdfViewer({ path }: { path: string }) {
       const padding = scrollPadding(wrap);
       const offset = pageOffset(wrap, pageEl);
       wrap.scrollTop = Math.max(0, offset.top - padding.top);
-      // Pages above the target may still be placeholder-sized; record the target
-      // so handlePageResized re-pins once those pages render to their real size.
-      pendingScrollRef.current = pageNumber;
     },
     [numPages],
   );
-
-  // Re-pin a pending far-jump: when a page at or above the target reports a new
-  // (real) size, the target's top may have shifted, so re-scroll it to the
-  // viewport top. Clear the pending jump once the target itself has rendered, so
-  // later resizes (e.g. the user scrolling up) never yank the view back.
-  const handlePageResized = useCallback((resizedPage: number) => {
-    const target = pendingScrollRef.current;
-    if (target === null || resizedPage > target) return;
-    const wrap = scrollRef.current;
-    const pageEl = pageRefs.current.get(target);
-    if (wrap && pageEl) {
-      const padding = scrollPadding(wrap);
-      const offset = pageOffset(wrap, pageEl);
-      wrap.scrollTop = Math.max(0, offset.top - padding.top);
-    }
-    if (resizedPage === target) pendingScrollRef.current = null;
-  }, []);
 
   const updateCurrentPageFromScroll = useCallback(() => {
     const wrap = scrollRef.current;
@@ -902,11 +866,15 @@ export default function PdfViewer({ path }: { path: string }) {
   );
 
   const performDestinationScroll = useCallback(
-    async (pageNumber: number, destArray: PdfDestArray | null) => {
+    async (
+      pageNumber: number,
+      destArray: PdfDestArray | null,
+      requestId: number,
+    ) => {
       const wrap = scrollRef.current;
       const pageEl = pageRefs.current.get(pageNumber);
       const pdf = docRef.current;
-      if (!wrap || !pageEl) return;
+      if (!wrap || !pageEl || navigationRequestRef.current !== requestId) return;
 
       let left = 0;
       let top = 0;
@@ -956,6 +924,10 @@ export default function PdfViewer({ path }: { path: string }) {
         }
       }
 
+      // PDF page lookup is asynchronous. A wheel/pointer/key gesture or a newer
+      // navigation while it was pending owns the viewport and must win.
+      if (navigationRequestRef.current !== requestId) return;
+
       const padding = scrollPadding(wrap);
       const offset = pageOffset(wrap, pageEl);
       wrap.scrollTop = Math.max(0, offset.top + top - padding.top);
@@ -979,15 +951,16 @@ export default function PdfViewer({ path }: { path: string }) {
   const scrollToDestination = useCallback(
     (target: number, destArray: PdfDestArray | null) => {
       const pageNumber = clampPage(target, numPages);
+      const requestId = ++navigationRequestRef.current;
       setVisiblePages((prev) => new Set(prev).add(pageNumber));
       setPage(pageNumber);
       const nextZoom = destinationZoom(pageNumber, destArray);
       if (nextZoom !== null && nextZoom !== zoom) {
-        pendingDestinationRef.current = { pageNumber, destArray };
+        pendingDestinationRef.current = { pageNumber, destArray, requestId };
         setZoom(nextZoom);
         return;
       }
-      void performDestinationScroll(pageNumber, destArray);
+      void performDestinationScroll(pageNumber, destArray, requestId);
     },
     [destinationZoom, numPages, performDestinationScroll, zoom],
   );
@@ -1158,20 +1131,20 @@ export default function PdfViewer({ path }: { path: string }) {
         updateCurrentPageFromScroll();
       });
     };
-    // A user gesture cancels any in-progress jump re-pin, so handlePageResized
-    // can never yank the view away from where the user just scrolled. These fire
-    // only on real input, never on programmatic scrollTop writes.
-    const cancelPendingScroll = () => {
-      pendingScrollRef.current = null;
+    // A real user gesture owns the viewport. Invalidate any asynchronous PDF
+    // destination lookup so it cannot complete later and jump back.
+    const cancelPendingNavigation = () => {
+      navigationRequestRef.current += 1;
+      pendingDestinationRef.current = null;
     };
     wrap.addEventListener("scroll", scheduleUpdate, { passive: true });
-    wrap.addEventListener("wheel", cancelPendingScroll, { passive: true });
-    wrap.addEventListener("pointerdown", cancelPendingScroll, { passive: true });
+    wrap.addEventListener("wheel", cancelPendingNavigation, { passive: true });
+    wrap.addEventListener("pointerdown", cancelPendingNavigation, { passive: true });
     scheduleUpdate();
     return () => {
       wrap.removeEventListener("scroll", scheduleUpdate);
-      wrap.removeEventListener("wheel", cancelPendingScroll);
-      wrap.removeEventListener("pointerdown", cancelPendingScroll);
+      wrap.removeEventListener("wheel", cancelPendingNavigation);
+      wrap.removeEventListener("pointerdown", cancelPendingNavigation);
       if (frame) cancelFrame(frame);
     };
   }, [numPages, updateCurrentPageFromScroll]);
@@ -1200,7 +1173,11 @@ export default function PdfViewer({ path }: { path: string }) {
     const pending = pendingDestinationRef.current;
     if (!pending) return;
     pendingDestinationRef.current = null;
-    void performDestinationScroll(pending.pageNumber, pending.destArray);
+    void performDestinationScroll(
+      pending.pageNumber,
+      pending.destArray,
+      pending.requestId,
+    );
   }, [zoom, performDestinationScroll]);
 
   // Persist current page + zoom for restore-on-reopen.
@@ -1319,11 +1296,8 @@ export default function PdfViewer({ path }: { path: string }) {
 
   // Cmd/Ctrl+F opens find when focus is anywhere inside the viewer.
   const handleRootKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    // A keyboard SCROLL in the document view (PageUp/Down, arrows, Home/End,
-    // space) cancels a pending far-jump re-pin so keyboard scrolling isn't yanked
-    // back to the target (wheel/pointerdown already cancel it). Gate on actual
-    // scroll keys AND a non-text-entry origin so typing in the find box or the
-    // page-number input does NOT cancel an in-flight jump-to-match / restore.
+    // Keyboard scrolling has the same ownership rule as wheel/pointer input.
+    // Text-entry keys do not cancel navigation from a PDF link.
     const target = event.target as HTMLElement;
     const isTextEntry =
       target.tagName === "INPUT" || target.tagName === "TEXTAREA";
@@ -1338,7 +1312,8 @@ export default function PdfViewer({ path }: { path: string }) {
       event.key === "End" ||
       event.key === " ";
     if (isScrollKey && !isTextEntry) {
-      pendingScrollRef.current = null;
+      navigationRequestRef.current += 1;
+      pendingDestinationRef.current = null;
     }
     if ((event.metaKey || event.ctrlKey) && (event.key === "f" || event.key === "F")) {
       event.preventDefault();
@@ -1519,9 +1494,8 @@ export default function PdfViewer({ path }: { path: string }) {
               pageRefs={pageRefs}
               linkService={linkService}
             searchQuery={searchQuery}
-            highlights={highlightsByPage.get(n)}
-            initialSize={pageSizes[n - 1] ?? FALLBACK_SIZE}
-            onResized={handlePageResized}
+              highlights={highlightsByPage.get(n)}
+              initialSize={pageSizes[n - 1] ?? FALLBACK_SIZE}
             />
           ))}
       </div>

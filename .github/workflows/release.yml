@@ -9,20 +9,54 @@ permissions:
 jobs:
   build:
     name: Build ${{ matrix.os }}
+    timeout-minutes: 60
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-latest, windows-latest]
+        os: [ubuntu-24.04, macos-15, windows-2025]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version-file: .nvmrc
           cache: npm
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy,rustfmt
+      - name: Install LLVM for Windows resource compilation
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          function Resolve-LlvmRcPath {
+            if ($env:ProgramFiles) {
+              $p = Join-Path $env:ProgramFiles "LLVM\bin\llvm-rc.exe"
+              if (Test-Path $p) { return $p }
+            }
+            if ($env:ProgramFilesX86) {
+              $p = Join-Path $env:ProgramFilesX86 "LLVM\bin\llvm-rc.exe"
+              if (Test-Path $p) { return $p }
+            }
+            return $null
+          }
+
+          if (-not (Get-Command llvm-rc -ErrorAction SilentlyContinue)) {
+            choco install llvm -y --no-progress --accept-package-agreements --accept-source-agreements
+          }
+
+          $llvmRc = Resolve-LlvmRcPath
+          if (-not $llvmRc) {
+            $llvmRcCmd = Get-Command llvm-rc -ErrorAction SilentlyContinue
+            if ($llvmRcCmd) {
+              $llvmRc = $llvmRcCmd.Source
+            }
+          }
+
+          if (-not $llvmRc) {
+            throw "llvm-rc was not found after attempting Chocolatey install."
+          }
+
+          $llvmDir = Split-Path -Parent $llvmRc
+          "$llvmDir" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "RC=$llvmRc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "RC_x86_64_pc_windows_msvc=$llvmRc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Install Linux Tauri dependencies
         if: runner.os == 'Linux'
         run: |
@@ -37,6 +71,13 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libxdo-dev \
             wget
+      - uses: dtolnay/rust-toolchain@1a3a6d54512beeaffd394f8d516ca16f2c506a20
+        with:
+          components: clippy,rustfmt
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: src-tauri
       - run: npm ci
       - run: npm run check:versions
       - run: npm run typecheck
@@ -45,20 +86,27 @@ jobs:
       - run: npm run build
       - run: npm run check:bundle
       - name: Rust format
+        if: runner.os == 'Linux'
         working-directory: src-tauri
         run: cargo fmt --check
       - name: Rust clippy
         working-directory: src-tauri
-        run: cargo clippy --all-targets -- -D warnings
+        env:
+          CI_SKIP_TAURI_BUILD: ${{ matrix.os == 'windows-2025' && '1' || '0' }}
+        run: cargo clippy --locked --all-targets -- -D warnings
       - name: Rust tests
         working-directory: src-tauri
-        run: cargo test
-      - run: cargo install cargo-audit --locked
+        env:
+          CI_SKIP_TAURI_BUILD: ${{ matrix.os == 'windows-2025' && '1' || '0' }}
+        run: cargo test --locked -- --test-threads=1
+      - if: runner.os == 'Linux'
+        run: cargo install cargo-audit --locked
       - name: Rust advisories
+        if: runner.os == 'Linux'
         working-directory: src-tauri
         run: cargo audit
       - run: npm run tauri build
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: lyceum-${{ runner.os }}
           path: src-tauri/target/release/bundle/**

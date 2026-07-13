@@ -6,52 +6,6 @@
 
 import { normalizeUnicode } from "pdfjs-dist";
 
-let measuredMinimumFontSize: number | null = null;
-
-function measureMinimumFontSize(): number {
-  if (measuredMinimumFontSize !== null) return measuredMinimumFontSize;
-
-  const probe = document.createElement("div");
-  probe.style.opacity = "0";
-  probe.style.lineHeight = "1";
-  probe.style.fontSize = "1px";
-  probe.style.position = "absolute";
-  probe.textContent = "X";
-  document.body.append(probe);
-  measuredMinimumFontSize = probe.getBoundingClientRect().height;
-  probe.remove();
-  return measuredMinimumFontSize;
-}
-
-/**
- * PDF.js compensates when a browser rounds a 1px font probe above 1px, but its
- * TextLayer currently also multiplies by probe values below 1 without applying
- * the inverse transform. WKWebView can report 0.8333px on scaled displays,
- * shrinking selection geometry while the canvas remains correctly sized.
- */
-export function correctPdfTextLayerMinimumFontSize(
-  textLayer: HTMLDivElement,
-  minimumFontSize = measureMinimumFontSize(),
-): void {
-  if (
-    !Number.isFinite(minimumFontSize) ||
-    minimumFontSize <= 0 ||
-    minimumFontSize >= 1
-  ) {
-    return;
-  }
-
-  const correction = 1 / minimumFontSize;
-  for (const span of textLayer.querySelectorAll<HTMLElement>(
-    'span[role="presentation"]',
-  )) {
-    if (!span.style.fontSize || span.dataset.lyceumMinFontCorrected) continue;
-    const transform = span.style.transform.trim();
-    span.style.transform = `${transform ? `${transform} ` : ""}scale(${correction})`;
-    span.dataset.lyceumMinFontCorrected = "true";
-  }
-}
-
 type TextLayerRegistration = {
   endOfContent: HTMLDivElement;
   onCopy: (event: ClipboardEvent) => void;
