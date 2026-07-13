@@ -13,8 +13,8 @@ jobs:
     name: Frontend
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -32,9 +32,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-latest, windows-latest]
+        os: [ubuntu-24.04, macos-15, windows-2025]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Install LLVM for Windows resource compilation
         if: runner.os == 'Windows'
         shell: pwsh
@@ -85,11 +85,12 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libxdo-dev \
             wget
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1a3a6d54512beeaffd394f8d516ca16f2c506a20
         with:
+          toolchain: 1.97.0
           components: clippy,rustfmt
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: src-tauri
       - name: Format
@@ -99,22 +100,24 @@ jobs:
       - name: Clippy
         working-directory: src-tauri
         env:
-          CI_SKIP_TAURI_BUILD: ${{ matrix.os == 'windows-latest' && '1' || '0' }}
-        run: cargo clippy --all-targets -- -D warnings
+          CI_SKIP_TAURI_BUILD: ${{ matrix.os == 'windows-2025' && '1' || '0' }}
+        run: cargo clippy --locked --all-targets -- -D warnings
       - name: Tests
         working-directory: src-tauri
         env:
-          CI_SKIP_TAURI_BUILD: ${{ matrix.os == 'windows-latest' && '1' || '0' }}
-        run: cargo test
+          CI_SKIP_TAURI_BUILD: ${{ matrix.os == 'windows-2025' && '1' || '0' }}
+        run: cargo test --locked -- --test-threads=1
 
   rust-advisories:
     name: Rust Advisories
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: dtolnay/rust-toolchain@1a3a6d54512beeaffd394f8d516ca16f2c506a20
+        with:
+          toolchain: 1.97.0
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: src-tauri
       - run: cargo install cargo-audit --locked

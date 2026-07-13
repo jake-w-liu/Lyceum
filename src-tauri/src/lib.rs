@@ -112,10 +112,10 @@ struct NativeWindowContentInset {
 /// WKWebView extends beneath the title bar, while DOM hit-testing starts at the
 /// AppKit content-layout rectangle.
 #[tauri::command]
-fn native_window_content_inset(window: tauri::Window) -> Result<NativeWindowContentInset, String> {
+fn native_window_content_inset(_window: tauri::Window) -> Result<NativeWindowContentInset, String> {
     #[cfg(target_os = "macos")]
     {
-        let pointer = window.ns_window().map_err(|error| error.to_string())?;
+        let pointer = _window.ns_window().map_err(|error| error.to_string())?;
         // SAFETY: Tauri owns this NSWindow for the duration of the command and
         // `ns_window` returns its valid AppKit object pointer on the main thread.
         let ns_window = unsafe { &*pointer.cast::<objc2_app_kit::NSWindow>() };
