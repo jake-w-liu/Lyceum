@@ -1555,13 +1555,17 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
 
   // Tauri intercepts native file drops, so the destination folder is resolved by
   // hit-testing the DOM under the cursor rather than via web dragover events.
-  // On macOS Wry obtains an NSPoint (already in logical/CSS points) but Tauri
-  // wraps it as PhysicalPosition without scaling. Windows/Linux positions are
-  // physical pixels and must still be converted to CSS pixels.
+  // On macOS Wry forwards an NSPoint in desktop coordinates (already logical
+  // points), so it must be translated by the webview's logical desktop origin.
+  // Windows/Linux positions are webview-relative physical pixels and only need
+  // conversion to CSS pixels.
+  let nativeDropOrigin = { x: 0, y: 0 };
   function resolveImportDir(position: { x: number; y: number }): string | null {
     const isMacOS = navigator.platform.startsWith("Mac");
     const scale = isMacOS ? 1 : window.devicePixelRatio || 1;
-    const el = document.elementFromPoint(position.x / scale, position.y / scale);
+    const clientX = position.x / scale - nativeDropOrigin.x;
+    const clientY = position.y / scale - nativeDropOrigin.y;
+    const el = document.elementFromPoint(clientX, clientY);
     if (!el || !explorerRef.current?.contains(el)) return null;
     const row = el.closest<HTMLElement>("[data-row-path], [data-path]");
     if (!row) return rootPath; // inside the explorer but not on a row → root
@@ -1582,8 +1586,23 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
       // simply isn't wired; the explorer still renders and works normally.
       return;
     }
-    void webview
-      .onDragDropEvent((event) => {
+    void (async () => {
+      if (navigator.platform.startsWith("Mac")) {
+        try {
+          const [physicalOrigin, scaleFactor] = await Promise.all([
+            webview.position(),
+            webview.window.scaleFactor(),
+          ]);
+          nativeDropOrigin = {
+            x: physicalOrigin.x / scaleFactor,
+            y: physicalOrigin.y / scaleFactor,
+          };
+        } catch {
+          // Browser tests and older Tauri runtimes may not expose geometry.
+          // A zero origin retains their already-client-relative behavior.
+        }
+      }
+      return webview.onDragDropEvent((event) => {
         const payload = event.payload;
         if (payload.type === "drop") {
           setDropTargetPath(null);
@@ -1594,7 +1613,8 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
         } else {
           setDropTargetPath(null); // leave
         }
-      })
+      });
+    })()
       .then((fn) => {
         if (disposed) fn();
         else unlisten = fn;

@@ -14,9 +14,17 @@ import {
 
 const webviewMocks = vi.hoisted(() => {
   const onDragDropEvent = vi.fn(async () => vi.fn());
+  const position = vi.fn(async () => ({ x: 0, y: 0 }));
+  const scaleFactor = vi.fn(async () => 1);
   return {
-    getCurrentWebview: vi.fn(() => ({ onDragDropEvent })),
+    getCurrentWebview: vi.fn(() => ({
+      onDragDropEvent,
+      position,
+      window: { scaleFactor },
+    })),
     onDragDropEvent,
+    position,
+    scaleFactor,
   };
 });
 
@@ -140,9 +148,15 @@ beforeEach(() => {
   useWorkspaceStore.setState(initialWorkspaceData, false);
   webviewMocks.onDragDropEvent.mockReset();
   webviewMocks.onDragDropEvent.mockResolvedValue(vi.fn());
+  webviewMocks.position.mockReset();
+  webviewMocks.position.mockResolvedValue({ x: 0, y: 0 });
+  webviewMocks.scaleFactor.mockReset();
+  webviewMocks.scaleFactor.mockResolvedValue(1);
   webviewMocks.getCurrentWebview.mockReset();
   webviewMocks.getCurrentWebview.mockReturnValue({
     onDragDropEvent: webviewMocks.onDragDropEvent,
+    position: webviewMocks.position,
+    window: { scaleFactor: webviewMocks.scaleFactor },
   });
   vi.mocked(readDirectory).mockReset();
   vi.mocked(readDirectory).mockImplementation(async (p: string) => {
@@ -849,6 +863,56 @@ describe("Explorer", () => {
         delete (window as unknown as { devicePixelRatio?: unknown })
           .devicePixelRatio;
       }
+      if (originalPlatform) {
+        Object.defineProperty(navigator, "platform", originalPlatform);
+      } else {
+        delete (navigator as unknown as { platform?: unknown }).platform;
+      }
+    }
+  });
+
+  it("translates macOS desktop drag coordinates to the webview origin", async () => {
+    const originalPlatform = Object.getOwnPropertyDescriptor(navigator, "platform");
+    Object.defineProperty(navigator, "platform", {
+      configurable: true,
+      value: "MacIntel",
+    });
+    // Retina physical webview origin (252, 174) => logical origin (126, 87).
+    webviewMocks.position.mockResolvedValueOnce({ x: 252, y: 174 });
+    webviewMocks.scaleFactor.mockResolvedValueOnce(2);
+
+    try {
+      render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+      await screen.findByText("src");
+      await waitFor(() => expect(webviewMocks.onDragDropEvent).toHaveBeenCalled());
+      const srcRow = screen.getByText("src").closest(".tree-row")!;
+      const hitTest = mockElementFromPoint(srcRow);
+
+      try {
+        const calls = webviewMocks.onDragDropEvent.mock
+          .calls as unknown as Array<[NativeDropHandler]>;
+        act(() => {
+          calls[0][0]({
+            payload: {
+              type: "drop",
+              paths: ["/tmp/from-finder.txt"],
+              position: { x: 281, y: 284 },
+            },
+          });
+        });
+
+        await waitFor(() =>
+          expect(copyPaths).toHaveBeenCalledWith(
+            ROOT,
+            ["/tmp/from-finder.txt"],
+            "/ws/src",
+          ),
+        );
+        expect(hitTest.elementFromPoint).toHaveBeenCalledWith(155, 197);
+      } finally {
+        hitTest.restore();
+      }
+    } finally {
       if (originalPlatform) {
         Object.defineProperty(navigator, "platform", originalPlatform);
       } else {
