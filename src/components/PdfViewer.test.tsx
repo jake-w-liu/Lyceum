@@ -147,6 +147,42 @@ describe("PdfViewer", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
+  it("reserves exact page dimensions before mounting the scroll stack", async () => {
+    mockPdfDocument(2);
+    pdfMocks.getPage.mockImplementation(async (pageNumber: number) => {
+      const width = pageNumber === 1 ? 400 : 800;
+      const height = pageNumber === 1 ? 200 : 300;
+      const getViewport = ({ scale }: { scale: number }) => ({
+        width: width * scale,
+        height: height * scale,
+        clone: vi.fn(
+          ({ scale: nextScale }: { scale?: number } = {}) =>
+            getViewport({ scale: nextScale ?? scale }),
+        ),
+        convertToViewportPoint: vi.fn((x: number, y: number) => [
+          x * scale,
+          (height - y) * scale,
+        ]),
+      });
+      return {
+        cleanup: pdfMocks.pageCleanup,
+        getAnnotations: pdfMocks.getAnnotations,
+        getTextContent: pdfMocks.getTextContent,
+        getViewport,
+        render: pdfMocks.pageRender,
+      };
+    });
+
+    const { container } = render(<PdfViewer path="/w/mixed.pdf" />);
+    await screen.findByLabelText("Page number");
+
+    const pages = container.querySelectorAll<HTMLElement>(".pdf-page-layer");
+    expect(pages[0].style.width).toBe("400px");
+    expect(pages[0].style.height).toBe("200px");
+    expect(pages[1].style.width).toBe("800px");
+    expect(pages[1].style.height).toBe("300px");
+  });
+
   it("registers and cleans up text-layer selection geometry", async () => {
     mockPdfDocument(1);
 
@@ -281,6 +317,13 @@ describe("PdfViewer", () => {
     await waitFor(() =>
       expect(container.querySelector(".pdf-annotation-layer a")).not.toBeNull(),
     );
+    const scroll = container.querySelector(".pdf-scroll") as HTMLDivElement;
+    const targetPage = container.querySelector(
+      '[data-page="3"]',
+    ) as HTMLDivElement;
+    Object.defineProperty(scroll, "clientWidth", { value: 900 });
+    Object.defineProperty(targetPage, "offsetWidth", { value: 600 });
+    scroll.scrollLeft = 120;
     fireEvent.click(container.querySelector(".pdf-annotation-layer a")!);
 
     await waitFor(() =>
@@ -288,6 +331,7 @@ describe("PdfViewer", () => {
     );
     expect(pdfMocks.getDestination).toHaveBeenCalledWith("sec");
     expect(pdfMocks.getPageIndex).toHaveBeenCalledWith(destinationRef);
+    expect(scroll.scrollLeft).toBe(0);
   });
 
   it("finds text and navigates matches via the find bar", async () => {

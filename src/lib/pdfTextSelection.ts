@@ -141,29 +141,40 @@ function ensureSelectionListeners(): void {
         previousRange !== null &&
         (range.compareBoundaryPoints(Range.END_TO_END, previousRange) === 0 ||
           range.compareBoundaryPoints(Range.START_TO_END, previousRange) === 0);
-      let anchor: Node | null = modifyStart
+      const boundaryContainer = modifyStart
         ? range.startContainer
         : range.endContainer;
+      const boundaryOffset = modifyStart ? range.startOffset : range.endOffset;
+      let anchor: Node | null = boundaryContainer;
       if (anchor.nodeType === Node.TEXT_NODE) anchor = anchor.parentNode;
       if (!(anchor instanceof Element)) return;
 
-      // Match PDF.js's insertion point: the sentinel belongs beside the span
-      // at the moving edge, including when that span is inside marked content.
-      const parentTextLayer = anchor.parentElement?.closest(
+      // PDF.js normally receives a text-span boundary here. WebKit can instead
+      // place the moving edge directly on the text-layer/marked-content
+      // container when the pointer crosses blank space between positioned
+      // spans. Preserve that container boundary rather than abandoning the
+      // sentinel, otherwise selection gets stuck at the preceding span.
+      const parentTextLayer = anchor.closest(
         ".pdf-text-layer",
       ) as HTMLDivElement | null;
       const registration = parentTextLayer
         ? textLayers.get(parentTextLayer)
         : undefined;
-      const insertionParent = anchor.parentNode;
+      let insertionParent: Node | null;
+      let insertionBefore: Node | null;
+      if (boundaryContainer instanceof Element) {
+        insertionParent = boundaryContainer;
+        insertionBefore =
+          boundaryContainer.childNodes.item(boundaryOffset) ?? null;
+      } else {
+        insertionParent = anchor.parentNode;
+        insertionBefore = modifyStart ? anchor : anchor.nextSibling;
+      }
       if (registration && insertionParent && parentTextLayer) {
         const { endOfContent } = registration;
         endOfContent.style.width = parentTextLayer.style.width;
         endOfContent.style.height = parentTextLayer.style.height;
-        insertionParent.insertBefore(
-          endOfContent,
-          modifyStart ? anchor : anchor.nextSibling,
-        );
+        insertionParent.insertBefore(endOfContent, insertionBefore);
       }
       previousRange = range.cloneRange();
     },

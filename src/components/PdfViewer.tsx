@@ -72,6 +72,48 @@ type PageHighlight = { occurrence: number; active: boolean };
 // A4-ish fallback so a not-yet-rendered page reserves plausible scroll space;
 // replaced by the page's real size the moment it first renders.
 const FALLBACK_SIZE = { w: 612, h: 792 };
+const PAGE_SIZE_LOAD_CONCURRENCY = 8;
+
+type PageSize = { w: number; h: number };
+
+async function loadPageSizes(pdf: PDFDocumentProxy): Promise<PageSize[]> {
+  const sizes = Array.from({ length: pdf.numPages }, () => ({
+    ...FALLBACK_SIZE,
+  }));
+  let nextPage = 1;
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const pageNumber = nextPage;
+      nextPage += 1;
+      if (pageNumber > pdf.numPages) return;
+      try {
+        const page = await pdf.getPage(pageNumber);
+        const viewport = page.getViewport({ scale: 1 });
+        if (
+          Number.isFinite(viewport.width) &&
+          Number.isFinite(viewport.height) &&
+          viewport.width > 0 &&
+          viewport.height > 0
+        ) {
+          sizes[pageNumber - 1] = {
+            w: viewport.width,
+            h: viewport.height,
+          };
+        }
+      } catch {
+        // Keep the stable fallback for a malformed page. Its normal lazy render
+        // will surface the page-specific error without blocking the document.
+      }
+    }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(PAGE_SIZE_LOAD_CONCURRENCY, pdf.numPages) },
+      () => worker(),
+    ),
+  );
+  return sizes;
+}
 
 const DEFAULT_SCROLL_PADDING = 12;
 
@@ -352,6 +394,7 @@ function PdfPage({
   linkService,
   searchQuery,
   highlights,
+  initialSize,
   onResized,
 }: {
   doc: PDFDocumentProxy;
@@ -362,6 +405,7 @@ function PdfPage({
   linkService: LocalPdfLinkService;
   searchQuery: string;
   highlights: PageHighlight[] | undefined;
+  initialSize: PageSize;
   /** Called when this page's measured box size changes (i.e. it rendered to its
    *  real intrinsic size). Lets the parent re-pin a pending jump once the pages
    *  above the target settle, so the target lands at the viewport top. */
@@ -374,11 +418,22 @@ function PdfPage({
   const highlightLayerRef = useRef<HTMLDivElement | null>(null);
   const pageRef = useRef<PDFPageProxy | null>(null);
   // Intrinsic page size (scale 1); drives the placeholder box before render.
-  const [size, setSize] = useState(FALLBACK_SIZE);
+  const [size, setSize] = useState(initialSize);
   const [renderError, setRenderError] = useState<string | null>(null);
   // True once this page's text layer is in the DOM, so search highlights can be
   // measured against it. Reset whenever the page re-renders or is released.
   const [textReady, setTextReady] = useState(false);
+
+  // A path can change without remounting the viewer component. Apply the new
+  // document's preloaded dimensions before paint so stale page boxes never
+  // flash or move the scroll position.
+  useLayoutEffect(() => {
+    setSize((prev) =>
+      prev.w === initialSize.w && prev.h === initialSize.h
+        ? prev
+        : initialSize,
+    );
+  }, [initialSize]);
 
   // Register the element so the parent can observe it and scroll to it. Runs
   // before the parent's observer effect (child effects fire first), so the map
@@ -471,7 +526,13 @@ function PdfPage({
           outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : undefined;
 
         task = pdfPage.render({ canvasContext, viewport, transform });
-        const textContent = await pdfPage.getTextContent();
+        // Match PDF.js's full viewer text path. Marked-content boundaries keep
+        // the DOM reading order intact for selection across separately emitted
+        // spans, while normalization is deferred until copy time.
+        const textContent = await pdfPage.getTextContent({
+          includeMarkedContent: true,
+          disableNormalization: true,
+        });
         if (cancelled) return;
         textLayer = new pdfjsLib.TextLayer({
           container: textLayerElement,
@@ -672,6 +733,7 @@ export default function PdfViewer({ path }: { path: string }) {
 
   const [doc, setDoc] = useState<PDFDocumentProxy | null>(null);
   const [numPages, setNumPages] = useState(0);
+  const [pageSizes, setPageSizes] = useState<PageSize[]>([]);
   const [page, setPage] = useState(saved?.page ?? 1);
   const [zoom, setZoom] = useState(saved?.zoom ?? 1);
   const [visiblePages, setVisiblePages] = useState<Set<number>>(new Set());
@@ -717,7 +779,6 @@ export default function PdfViewer({ path }: { path: string }) {
       const padding = scrollPadding(wrap);
       const offset = pageOffset(wrap, pageEl);
       wrap.scrollTop = Math.max(0, offset.top - padding.top);
-      wrap.scrollLeft = Math.max(0, offset.left - padding.left);
       // Pages above the target may still be placeholder-sized; record the target
       // so handlePageResized re-pins once those pages render to their real size.
       pendingScrollRef.current = pageNumber;
@@ -738,7 +799,6 @@ export default function PdfViewer({ path }: { path: string }) {
       const padding = scrollPadding(wrap);
       const offset = pageOffset(wrap, pageEl);
       wrap.scrollTop = Math.max(0, offset.top - padding.top);
-      wrap.scrollLeft = Math.max(0, offset.left - padding.left);
     }
     if (resizedPage === target) pendingScrollRef.current = null;
   }, []);
@@ -895,7 +955,18 @@ export default function PdfViewer({ path }: { path: string }) {
       const padding = scrollPadding(wrap);
       const offset = pageOffset(wrap, pageEl);
       wrap.scrollTop = Math.max(0, offset.top + top - padding.top);
-      wrap.scrollLeft = Math.max(0, offset.left + left - padding.left);
+      const availableWidth = Math.max(
+        1,
+        wrap.clientWidth - padding.left * 2,
+      );
+      // A narrow page is centered by its auto margins and has no meaningful
+      // horizontal destination. Applying its centered offset as scrollLeft
+      // shifts it to the left and leaves a blank strip on the right. Only honor
+      // destination x-coordinates when the page genuinely overflows the pane.
+      wrap.scrollLeft =
+        offset.width > availableWidth
+          ? Math.max(0, offset.left + left - padding.left)
+          : 0;
       setPage(pageNumber);
     },
     [zoom],
@@ -988,16 +1059,23 @@ export default function PdfViewer({ path }: { path: string }) {
   // Load the document.
   useEffect(() => {
     let cancelled = false;
+    let loadingPdf: PDFDocumentProxy | null = null;
     setLoadError(null);
     (async () => {
       try {
         const data = await readFileBytes(path);
         const pdf = await pdfjsLib.getDocument({ data }).promise;
+        loadingPdf = pdf;
         if (cancelled) {
           void pdf.destroy();
           return;
         }
+        // Reserve every page's exact box before mounting the scroll stack.
+        // Canvas/text/annotation rendering remains virtualized below.
+        const sizes = await loadPageSizes(pdf);
+        if (cancelled) return;
         docRef.current = pdf;
+        setPageSizes(sizes);
         setNumPages(pdf.numPages);
         setDoc(pdf);
       } catch (e) {
@@ -1008,7 +1086,7 @@ export default function PdfViewer({ path }: { path: string }) {
     })();
     return () => {
       cancelled = true;
-      void docRef.current?.destroy();
+      void loadingPdf?.destroy();
       docRef.current = null;
     };
   }, [path]);
@@ -1436,9 +1514,10 @@ export default function PdfViewer({ path }: { path: string }) {
               visible={visiblePages.has(n)}
               pageRefs={pageRefs}
               linkService={linkService}
-              searchQuery={searchQuery}
-              highlights={highlightsByPage.get(n)}
-              onResized={handlePageResized}
+            searchQuery={searchQuery}
+            highlights={highlightsByPage.get(n)}
+            initialSize={pageSizes[n - 1] ?? FALLBACK_SIZE}
+            onResized={handlePageResized}
             />
           ))}
       </div>

@@ -811,9 +811,14 @@ describe("Explorer", () => {
     const srcRow = screen.getByText("src").closest(".tree-row")!;
     const hitTest = mockElementFromPoint(srcRow);
     const originalDpr = Object.getOwnPropertyDescriptor(window, "devicePixelRatio");
+    const originalPlatform = Object.getOwnPropertyDescriptor(navigator, "platform");
     Object.defineProperty(window, "devicePixelRatio", {
       configurable: true,
       value: 2,
+    });
+    Object.defineProperty(navigator, "platform", {
+      configurable: true,
+      value: "MacIntel",
     });
 
     try {
@@ -835,7 +840,7 @@ describe("Explorer", () => {
           "/ws/src",
         ),
       );
-      expect(hitTest.elementFromPoint).toHaveBeenCalledWith(120, 40);
+      expect(hitTest.elementFromPoint).toHaveBeenCalledWith(240, 80);
     } finally {
       hitTest.restore();
       if (originalDpr) {
@@ -843,6 +848,11 @@ describe("Explorer", () => {
       } else {
         delete (window as unknown as { devicePixelRatio?: unknown })
           .devicePixelRatio;
+      }
+      if (originalPlatform) {
+        Object.defineProperty(navigator, "platform", originalPlatform);
+      } else {
+        delete (navigator as unknown as { platform?: unknown }).platform;
       }
     }
   });

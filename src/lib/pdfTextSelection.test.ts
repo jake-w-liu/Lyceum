@@ -61,6 +61,35 @@ describe("PDF text selection geometry", () => {
     }
   });
 
+  it("moves the sentinel when WebKit reports a container boundary", () => {
+    const { layer, spans } = makeTextLayer();
+    const unregister = registerPdfTextSelection(layer);
+    const endOfContent = layer.querySelector(
+      ".endOfContent",
+    ) as HTMLDivElement;
+
+    try {
+      const selection = document.getSelection()!;
+      const range = document.createRange();
+      range.setStart(spans[0].firstChild!, 0);
+      range.setEnd(layer, 2);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      document.dispatchEvent(new Event("selectionchange"));
+
+      expect(Array.from(layer.children)).toEqual([
+        spans[0],
+        spans[1],
+        endOfContent,
+        spans[2],
+      ]);
+      expect(endOfContent.style.width).toBe("600px");
+      expect(endOfContent.style.height).toBe("800px");
+    } finally {
+      unregister();
+    }
+  });
+
   it("restores the sentinel and selection state when the drag ends", () => {
     const { layer, spans } = makeTextLayer();
     const unregister = registerPdfTextSelection(layer);

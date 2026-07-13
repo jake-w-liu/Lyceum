@@ -1554,11 +1554,14 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
   }
 
   // Tauri intercepts native file drops, so the destination folder is resolved by
-  // hit-testing the DOM under the (physical-pixel) cursor rather than via web
-  // dragover events. Returns null when the cursor is outside the explorer.
+  // hit-testing the DOM under the cursor rather than via web dragover events.
+  // On macOS Wry obtains an NSPoint (already in logical/CSS points) but Tauri
+  // wraps it as PhysicalPosition without scaling. Windows/Linux positions are
+  // physical pixels and must still be converted to CSS pixels.
   function resolveImportDir(position: { x: number; y: number }): string | null {
-    const dpr = window.devicePixelRatio || 1;
-    const el = document.elementFromPoint(position.x / dpr, position.y / dpr);
+    const isMacOS = navigator.platform.startsWith("Mac");
+    const scale = isMacOS ? 1 : window.devicePixelRatio || 1;
+    const el = document.elementFromPoint(position.x / scale, position.y / scale);
     if (!el || !explorerRef.current?.contains(el)) return null;
     const row = el.closest<HTMLElement>("[data-row-path], [data-path]");
     if (!row) return rootPath; // inside the explorer but not on a row → root
