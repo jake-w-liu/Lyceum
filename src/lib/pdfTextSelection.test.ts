@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { registerPdfTextSelection } from "./pdfTextSelection";
+import {
+  correctPdfTextLayerMinimumFontSize,
+  registerPdfTextSelection,
+} from "./pdfTextSelection";
 
 function makeTextLayer(): {
   layer: HTMLDivElement;
@@ -36,6 +39,40 @@ afterEach(() => {
   document.body.replaceChildren();
 });
 
+describe("correctPdfTextLayerMinimumFontSize", () => {
+  it("adds PDF.js's missing inverse scale for sub-pixel WebKit probes", () => {
+    const layer = document.createElement("div");
+    const span = document.createElement("span");
+    span.setAttribute("role", "presentation");
+    span.style.fontSize = "7.47px";
+    span.style.transform = "scaleX(0.98)";
+    layer.append(span);
+
+    correctPdfTextLayerMinimumFontSize(layer, 5 / 6);
+    correctPdfTextLayerMinimumFontSize(layer, 5 / 6);
+
+    expect(span.style.transform).toBe("scaleX(0.98) scale(1.2)");
+    expect(span.dataset.lyceumMinFontCorrected).toBe("true");
+  });
+
+  it.each([0, 1, 1.25, Number.NaN])(
+    "does not alter spans for a minimum font size of %s",
+    (minimumFontSize) => {
+      const layer = document.createElement("div");
+      const span = document.createElement("span");
+      span.setAttribute("role", "presentation");
+      span.style.fontSize = "9px";
+      span.style.transform = "scaleX(0.9)";
+      layer.append(span);
+
+      correctPdfTextLayerMinimumFontSize(layer, minimumFontSize);
+
+      expect(span.style.transform).toBe("scaleX(0.9)");
+      expect(span.dataset.lyceumMinFontCorrected).toBeUndefined();
+    },
+  );
+});
+
 describe("PDF text selection geometry", () => {
   it("moves a full-layer sentinel beside the active selection edge", () => {
     const { layer, spans } = makeTextLayer();
@@ -61,7 +98,7 @@ describe("PDF text selection geometry", () => {
     }
   });
 
-  it("moves the sentinel when WebKit reports a container boundary", () => {
+  it("does not mutate a WebKit range whose boundary is the text layer", () => {
     const { layer, spans } = makeTextLayer();
     const unregister = registerPdfTextSelection(layer);
     const endOfContent = layer.querySelector(
@@ -80,11 +117,13 @@ describe("PDF text selection geometry", () => {
       expect(Array.from(layer.children)).toEqual([
         spans[0],
         spans[1],
-        endOfContent,
         spans[2],
+        endOfContent,
       ]);
-      expect(endOfContent.style.width).toBe("600px");
-      expect(endOfContent.style.height).toBe("800px");
+      expect(range.endContainer).toBe(layer);
+      expect(range.endOffset).toBe(2);
+      expect(endOfContent.style.width).toBe("");
+      expect(endOfContent.style.height).toBe("");
     } finally {
       unregister();
     }

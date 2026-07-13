@@ -12,6 +12,7 @@ import {
   createFile,
   movePaths,
   movePathsToTrash,
+  nativeWindowContentInset,
   readDirectory,
   redoTrashBatch,
   renamePath,
@@ -156,14 +157,14 @@ function nativeDropClientPoint(
   );
   if (!geometry) return null;
   if (isMac) {
-    // WKWebView/Wry reports logical coordinates relative to the native window,
-    // including its frame. elementFromPoint is relative to the DOM viewport,
-    // so remove the client inset derived from native outer size and the live
-    // viewport size. Position APIs cannot provide this inset for full-size
-    // WKWebViews because they report a zero webview origin.
+    // Wry reports AppKit logical points. WKWebView hit-testing uses CSS pixels,
+    // which differ when WebKit applies page scaling (devicePixelRatio is then
+    // larger than the native display scale factor).
+    const cssScale = window.devicePixelRatio / geometry.scaleFactor;
+    if (!Number.isFinite(cssScale) || cssScale <= 0) return null;
     return {
-      x: position.x - geometry.clientInset.x,
-      y: position.y - geometry.clientInset.y,
+      x: (position.x - geometry.clientInset.x) / cssScale,
+      y: (position.y - geometry.clientInset.y) / cssScale,
     };
   }
   // Other Wry backends report physical pixels relative to the webview.
@@ -1619,18 +1620,23 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     void (async () => {
       const loadGeometry = async (): Promise<NativeDropGeometry | null> => {
         try {
-          const [outerSize, scaleFactor] = await Promise.all([
-            appWindow.outerSize(),
+          const [clientInset, scaleFactor] = await Promise.all([
+            nativeWindowContentInset(),
             appWindow.scaleFactor(),
           ]);
-          if (!Number.isFinite(scaleFactor) || scaleFactor <= 0) return null;
-          const outerWidth = outerSize.width / scaleFactor;
-          const outerHeight = outerSize.height / scaleFactor;
+          if (
+            !Number.isFinite(scaleFactor) ||
+            scaleFactor <= 0 ||
+            !Number.isFinite(clientInset.x) ||
+            !Number.isFinite(clientInset.y)
+          ) {
+            return null;
+          }
           return {
             scaleFactor,
             clientInset: {
-              x: Math.max(0, (outerWidth - window.innerWidth) / 2),
-              y: Math.max(0, outerHeight - window.innerHeight),
+              x: Math.max(0, clientInset.x),
+              y: Math.max(0, clientInset.y),
             },
           };
         } catch {

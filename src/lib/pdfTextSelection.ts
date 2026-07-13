@@ -6,6 +6,52 @@
 
 import { normalizeUnicode } from "pdfjs-dist";
 
+let measuredMinimumFontSize: number | null = null;
+
+function measureMinimumFontSize(): number {
+  if (measuredMinimumFontSize !== null) return measuredMinimumFontSize;
+
+  const probe = document.createElement("div");
+  probe.style.opacity = "0";
+  probe.style.lineHeight = "1";
+  probe.style.fontSize = "1px";
+  probe.style.position = "absolute";
+  probe.textContent = "X";
+  document.body.append(probe);
+  measuredMinimumFontSize = probe.getBoundingClientRect().height;
+  probe.remove();
+  return measuredMinimumFontSize;
+}
+
+/**
+ * PDF.js compensates when a browser rounds a 1px font probe above 1px, but its
+ * TextLayer currently also multiplies by probe values below 1 without applying
+ * the inverse transform. WKWebView can report 0.8333px on scaled displays,
+ * shrinking selection geometry while the canvas remains correctly sized.
+ */
+export function correctPdfTextLayerMinimumFontSize(
+  textLayer: HTMLDivElement,
+  minimumFontSize = measureMinimumFontSize(),
+): void {
+  if (
+    !Number.isFinite(minimumFontSize) ||
+    minimumFontSize <= 0 ||
+    minimumFontSize >= 1
+  ) {
+    return;
+  }
+
+  const correction = 1 / minimumFontSize;
+  for (const span of textLayer.querySelectorAll<HTMLElement>(
+    'span[role="presentation"]',
+  )) {
+    if (!span.style.fontSize || span.dataset.lyceumMinFontCorrected) continue;
+    const transform = span.style.transform.trim();
+    span.style.transform = `${transform ? `${transform} ` : ""}scale(${correction})`;
+    span.dataset.lyceumMinFontCorrected = "true";
+  }
+}
+
 type TextLayerRegistration = {
   endOfContent: HTMLDivElement;
   onCopy: (event: ClipboardEvent) => void;
@@ -141,40 +187,32 @@ function ensureSelectionListeners(): void {
         previousRange !== null &&
         (range.compareBoundaryPoints(Range.END_TO_END, previousRange) === 0 ||
           range.compareBoundaryPoints(Range.START_TO_END, previousRange) === 0);
-      const boundaryContainer = modifyStart
+      let anchor: Node | null = modifyStart
         ? range.startContainer
         : range.endContainer;
-      const boundaryOffset = modifyStart ? range.startOffset : range.endOffset;
-      let anchor: Node | null = boundaryContainer;
       if (anchor.nodeType === Node.TEXT_NODE) anchor = anchor.parentNode;
       if (!(anchor instanceof Element)) return;
 
-      // PDF.js normally receives a text-span boundary here. WebKit can instead
-      // place the moving edge directly on the text-layer/marked-content
-      // container when the pointer crosses blank space between positioned
-      // spans. Preserve that container boundary rather than abandoning the
-      // sentinel, otherwise selection gets stuck at the preceding span.
-      const parentTextLayer = anchor.closest(
+      // Match PDF.js exactly here: relocate the sentinel only when the moving
+      // boundary belongs to a child inside the text layer. WebKit sometimes
+      // reports the text-layer element itself as the boundary while dragging
+      // through blank space. Inserting the sentinel into that same Range
+      // container changes its child offsets and corrupts the live selection.
+      const anchorParent = anchor.parentElement;
+      const parentTextLayer = anchorParent?.closest(
         ".pdf-text-layer",
       ) as HTMLDivElement | null;
       const registration = parentTextLayer
         ? textLayers.get(parentTextLayer)
         : undefined;
-      let insertionParent: Node | null;
-      let insertionBefore: Node | null;
-      if (boundaryContainer instanceof Element) {
-        insertionParent = boundaryContainer;
-        insertionBefore =
-          boundaryContainer.childNodes.item(boundaryOffset) ?? null;
-      } else {
-        insertionParent = anchor.parentNode;
-        insertionBefore = modifyStart ? anchor : anchor.nextSibling;
-      }
-      if (registration && insertionParent && parentTextLayer) {
+      if (registration && anchorParent && parentTextLayer) {
         const { endOfContent } = registration;
         endOfContent.style.width = parentTextLayer.style.width;
         endOfContent.style.height = parentTextLayer.style.height;
-        insertionParent.insertBefore(endOfContent, insertionBefore);
+        anchorParent.insertBefore(
+          endOfContent,
+          modifyStart ? anchor : anchor.nextSibling,
+        );
       }
       previousRange = range.cloneRange();
     },

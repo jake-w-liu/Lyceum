@@ -14,18 +14,15 @@ import {
 
 const webviewMocks = vi.hoisted(() => {
   const onDragDropEvent = vi.fn(async () => vi.fn());
-  const outerSize = vi.fn(async () => ({
-    width: window.innerWidth,
-    height: window.innerHeight,
-  }));
   const scaleFactor = vi.fn(async () => 1);
   return {
     getCurrentWebview: vi.fn(() => ({
       onDragDropEvent,
     })),
     onDragDropEvent,
-    getCurrentWindow: vi.fn(() => ({ outerSize, scaleFactor })),
-    outerSize,
+    getCurrentWindow: vi.fn(() => ({
+      scaleFactor,
+    })),
     scaleFactor,
   };
 });
@@ -64,6 +61,7 @@ vi.mock("../lib/ipc", () => ({
   restoreTrashBatch: vi.fn(async () => {}),
   redoTrashBatch: vi.fn(async () => {}),
   gitStatus: vi.fn(async () => ({ isRepo: false, files: {} })),
+  nativeWindowContentInset: vi.fn(async () => ({ x: 0, y: 0 })),
 }));
 import {
   createDirectory,
@@ -71,6 +69,7 @@ import {
   movePathsToTrash,
   copyPaths,
   movePaths,
+  nativeWindowContentInset,
   readDirectory,
   redoTrashBatch,
   gitStatus,
@@ -154,16 +153,10 @@ beforeEach(() => {
   useWorkspaceStore.setState(initialWorkspaceData, false);
   webviewMocks.onDragDropEvent.mockReset();
   webviewMocks.onDragDropEvent.mockResolvedValue(vi.fn());
-  webviewMocks.outerSize.mockReset();
-  webviewMocks.outerSize.mockImplementation(async () => ({
-    width: window.innerWidth,
-    height: window.innerHeight,
-  }));
   webviewMocks.scaleFactor.mockReset();
   webviewMocks.scaleFactor.mockResolvedValue(1);
   webviewMocks.getCurrentWindow.mockReset();
   webviewMocks.getCurrentWindow.mockReturnValue({
-    outerSize: webviewMocks.outerSize,
     scaleFactor: webviewMocks.scaleFactor,
   });
   webviewMocks.getCurrentWebview.mockReset();
@@ -171,6 +164,8 @@ beforeEach(() => {
     onDragDropEvent: webviewMocks.onDragDropEvent,
   });
   vi.mocked(readDirectory).mockReset();
+  vi.mocked(nativeWindowContentInset).mockReset();
+  vi.mocked(nativeWindowContentInset).mockResolvedValue({ x: 0, y: 0 });
   vi.mocked(readDirectory).mockImplementation(async (p: string) => {
     if (p === ROOT) return [dir("src"), file("README.md")];
     if (p === "/ws/src") return [file("main.tsx", "/ws/src")];
@@ -865,7 +860,7 @@ describe("Explorer", () => {
           "/ws/src",
         ),
       );
-      expect(hitTest.elementFromPoint).toHaveBeenCalledWith(240, 80);
+      expect(hitTest.elementFromPoint).toHaveBeenCalledWith(120, 40);
     } finally {
       hitTest.restore();
       if (originalDpr) {
@@ -882,15 +877,20 @@ describe("Explorer", () => {
     }
   });
 
-  it("uses Wry's macOS client position for folder feedback and drop", async () => {
+  it("removes the native macOS frame inset for folder feedback and drop", async () => {
     const originalPlatform = Object.getOwnPropertyDescriptor(navigator, "platform");
+    const originalDpr = Object.getOwnPropertyDescriptor(window, "devicePixelRatio");
     Object.defineProperty(navigator, "platform", {
       configurable: true,
       value: "MacIntel",
     });
-    // At 2x, a native outer height of 1600px is 800 CSS px. The live jsdom
-    // viewport is 768px high, so the macOS client inset is 32px.
-    webviewMocks.outerSize.mockResolvedValueOnce({ width: 2048, height: 1600 });
+    Object.defineProperty(window, "devicePixelRatio", {
+      configurable: true,
+      value: 2.4,
+    });
+    // The native inner origin is 64 physical pixels below the outer window
+    // origin, which is a 32 AppKit-point title bar at scale factor 2.
+    vi.mocked(nativeWindowContentInset).mockResolvedValueOnce({ x: 0, y: 32 });
     webviewMocks.scaleFactor.mockResolvedValueOnce(2);
 
     try {
@@ -931,11 +931,20 @@ describe("Explorer", () => {
             "/ws/src",
           ),
         );
-        expect(hitTest.elementFromPoint).toHaveBeenCalledWith(131, 79);
+        expect(hitTest.elementFromPoint).toHaveBeenCalledWith(
+          131 / 1.2,
+          79 / 1.2,
+        );
       } finally {
         hitTest.restore();
       }
     } finally {
+      if (originalDpr) {
+        Object.defineProperty(window, "devicePixelRatio", originalDpr);
+      } else {
+        delete (window as unknown as { devicePixelRatio?: unknown })
+          .devicePixelRatio;
+      }
       if (originalPlatform) {
         Object.defineProperty(navigator, "platform", originalPlatform);
       } else {
@@ -950,7 +959,7 @@ describe("Explorer", () => {
       configurable: true,
       value: "MacIntel",
     });
-    const refreshedOuterSize = deferred<{ width: number; height: number }>();
+    const refreshedInset = deferred<{ x: number; y: number }>();
     vi.mocked(readDirectory).mockImplementation(async (path: string) => {
       if (path === ROOT) return [dir("src"), dir("docs"), file("README.md")];
       return [];
@@ -970,7 +979,9 @@ describe("Explorer", () => {
         configurable: true,
         value: elementFromPoint,
       });
-      webviewMocks.outerSize.mockReturnValueOnce(refreshedOuterSize.promise);
+      vi.mocked(nativeWindowContentInset).mockReturnValueOnce(
+        refreshedInset.promise,
+      );
       webviewMocks.scaleFactor.mockResolvedValueOnce(2);
 
       try {
@@ -1011,7 +1022,7 @@ describe("Explorer", () => {
           ),
         );
 
-        refreshedOuterSize.resolve({ width: 2048, height: 1600 });
+        refreshedInset.resolve({ x: 0, y: 0 });
       } finally {
         if (originalElementFromPoint) {
           Object.defineProperty(document, "elementFromPoint", {
@@ -1032,7 +1043,7 @@ describe("Explorer", () => {
     }
   });
 
-  it("refuses a macOS native drop when client geometry is unavailable", async () => {
+  it("refuses a macOS native drop when native frame geometry is unavailable", async () => {
     const originalPlatform = Object.getOwnPropertyDescriptor(navigator, "platform");
     Object.defineProperty(navigator, "platform", {
       configurable: true,
