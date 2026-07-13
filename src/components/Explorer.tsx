@@ -5,6 +5,7 @@
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { ask, message } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { cursorPosition } from "@tauri-apps/api/window";
 import {
   copyPaths,
   createDirectory,
@@ -1555,17 +1556,7 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
 
   // Tauri intercepts native file drops, so the destination folder is resolved by
   // hit-testing the DOM under the cursor rather than via web dragover events.
-  // On macOS Wry forwards an NSPoint in desktop coordinates (already logical
-  // points), so it must be translated by the webview's logical desktop origin.
-  // Windows/Linux positions are webview-relative physical pixels and only need
-  // conversion to CSS pixels.
-  let nativeDropOrigin = { x: 0, y: 0 };
-  function resolveImportDir(position: { x: number; y: number }): string | null {
-    const isMacOS = navigator.platform.startsWith("Mac");
-    const scale = isMacOS ? 1 : window.devicePixelRatio || 1;
-    const clientX = position.x / scale - nativeDropOrigin.x;
-    const clientY = position.y / scale - nativeDropOrigin.y;
-    const el = document.elementFromPoint(clientX, clientY);
+  function importDirForElement(el: Element | null): string | null {
     if (!el || !explorerRef.current?.contains(el)) return null;
     const row = el.closest<HTMLElement>("[data-row-path], [data-path]");
     if (!row) return rootPath; // inside the explorer but not on a row → root
@@ -1575,9 +1566,27 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     return isDir ? path : parentDirectory(path);
   }
 
+  function resolveImportDir(clientPoint: { x: number; y: number }): string | null {
+    return importDirForElement(
+      document.elementFromPoint(clientPoint.x, clientPoint.y),
+    );
+  }
+
+  function resolveHoveredImportDir(): string | null {
+    // WKWebView updates CSS :hover during a native Finder drag even though
+    // Tauri intercepts HTML drag events. This is the only coordinate-free DOM
+    // source and is therefore authoritative when available.
+    return importDirForElement(
+      explorerRef.current?.querySelector(
+        ".tree-row:hover, .tree-empty:hover, .tree-root-drop-spacer:hover",
+      ) ?? null,
+    );
+  }
+
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let disposed = false;
+    let hoverSequence = 0;
     let webview;
     try {
       webview = getCurrentWebview();
@@ -1587,30 +1596,77 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
       return;
     }
     void (async () => {
-      if (navigator.platform.startsWith("Mac")) {
+      type NativeGeometry = {
+        origin: { x: number; y: number };
+        scaleFactor: number;
+      };
+      const loadGeometry = async (): Promise<NativeGeometry | null> => {
         try {
           const [physicalOrigin, scaleFactor] = await Promise.all([
             webview.position(),
             webview.window.scaleFactor(),
           ]);
-          nativeDropOrigin = {
-            x: physicalOrigin.x / scaleFactor,
-            y: physicalOrigin.y / scaleFactor,
+          if (!Number.isFinite(scaleFactor) || scaleFactor <= 0) return null;
+          return {
+            origin: physicalOrigin,
+            scaleFactor,
           };
         } catch {
-          // Browser tests and older Tauri runtimes may not expose geometry.
-          // A zero origin retains their already-client-relative behavior.
+          return null;
         }
-      }
+      };
+      let geometryPromise = loadGeometry();
+      const clientPoint = async (fallback: {
+        x: number;
+        y: number;
+      }): Promise<{ x: number; y: number }> => {
+        try {
+          const [cursor, geometry] = await Promise.all([
+            cursorPosition(),
+            geometryPromise,
+          ]);
+          if (geometry) {
+            return {
+              x: (cursor.x - geometry.origin.x) / geometry.scaleFactor,
+              y: (cursor.y - geometry.origin.y) / geometry.scaleFactor,
+            };
+          }
+        } catch {
+          // Fall through to the event payload for browser tests/older runtimes.
+        }
+        const scale = window.devicePixelRatio || 1;
+        return { x: fallback.x / scale, y: fallback.y / scale };
+      };
       return webview.onDragDropEvent((event) => {
         const payload = event.payload;
         if (payload.type === "drop") {
+          hoverSequence += 1;
           setDropTargetPath(null);
-          const dir = resolveImportDir(payload.position);
-          if (dir) void importPaths(payload.paths, dir);
+          const hoveredDir = resolveHoveredImportDir();
+          if (hoveredDir) {
+            void importPaths(payload.paths, hoveredDir);
+            return;
+          }
+          void clientPoint(payload.position).then((point) => {
+            if (disposed) return;
+            const dir = resolveImportDir(point);
+            if (dir) void importPaths(payload.paths, dir);
+          });
         } else if (payload.type === "enter" || payload.type === "over") {
-          setDropTargetPath(resolveImportDir(payload.position));
+          if (payload.type === "enter") geometryPromise = loadGeometry();
+          const hoveredDir = resolveHoveredImportDir();
+          if (hoveredDir) {
+            hoverSequence += 1;
+            setDropTargetPath(hoveredDir);
+            return;
+          }
+          const sequence = ++hoverSequence;
+          void clientPoint(payload.position).then((point) => {
+            if (disposed || sequence !== hoverSequence) return;
+            setDropTargetPath(resolveImportDir(point));
+          });
         } else {
+          hoverSequence += 1;
           setDropTargetPath(null); // leave
         }
       });

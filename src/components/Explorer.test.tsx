@@ -16,6 +16,7 @@ const webviewMocks = vi.hoisted(() => {
   const onDragDropEvent = vi.fn(async () => vi.fn());
   const position = vi.fn(async () => ({ x: 0, y: 0 }));
   const scaleFactor = vi.fn(async () => 1);
+  const cursorPosition = vi.fn(async () => ({ x: 0, y: 0 }));
   return {
     getCurrentWebview: vi.fn(() => ({
       onDragDropEvent,
@@ -25,6 +26,7 @@ const webviewMocks = vi.hoisted(() => {
     onDragDropEvent,
     position,
     scaleFactor,
+    cursorPosition,
   };
 });
 
@@ -36,6 +38,10 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 
 vi.mock("@tauri-apps/api/webview", () => ({
   getCurrentWebview: webviewMocks.getCurrentWebview,
+}));
+
+vi.mock("@tauri-apps/api/window", () => ({
+  cursorPosition: webviewMocks.cursorPosition,
 }));
 
 vi.mock("../lib/ipc", () => ({
@@ -152,6 +158,8 @@ beforeEach(() => {
   webviewMocks.position.mockResolvedValue({ x: 0, y: 0 });
   webviewMocks.scaleFactor.mockReset();
   webviewMocks.scaleFactor.mockResolvedValue(1);
+  webviewMocks.cursorPosition.mockReset();
+  webviewMocks.cursorPosition.mockResolvedValue({ x: 0, y: 0 });
   webviewMocks.getCurrentWebview.mockReset();
   webviewMocks.getCurrentWebview.mockReturnValue({
     onDragDropEvent: webviewMocks.onDragDropEvent,
@@ -834,6 +842,7 @@ describe("Explorer", () => {
       configurable: true,
       value: "MacIntel",
     });
+    webviewMocks.cursorPosition.mockResolvedValue({ x: 240, y: 80 });
 
     try {
       const calls = webviewMocks.onDragDropEvent.mock
@@ -877,9 +886,11 @@ describe("Explorer", () => {
       configurable: true,
       value: "MacIntel",
     });
-    // Retina physical webview origin (252, 174) => logical origin (126, 87).
+    // Both values are desktop physical coordinates. Their delta (310, 394),
+    // divided by Retina scale 2, is DOM client point (155, 197).
     webviewMocks.position.mockResolvedValueOnce({ x: 252, y: 174 });
     webviewMocks.scaleFactor.mockResolvedValueOnce(2);
+    webviewMocks.cursorPosition.mockResolvedValueOnce({ x: 562, y: 568 });
 
     try {
       render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
@@ -896,7 +907,9 @@ describe("Explorer", () => {
             payload: {
               type: "drop",
               paths: ["/tmp/from-finder.txt"],
-              position: { x: 281, y: 284 },
+            // Deliberately invalid/corrupted Wry coordinates: macOS targeting
+            // must use the independently queried live cursor instead.
+            position: { x: 9999, y: -9999 },
             },
           });
         });
@@ -918,6 +931,45 @@ describe("Explorer", () => {
       } else {
         delete (navigator as unknown as { platform?: unknown }).platform;
       }
+    }
+  });
+
+  it("uses the live hovered folder instead of an inaccurate native position", async () => {
+    render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await screen.findByText("src");
+    await waitFor(() => expect(webviewMocks.onDragDropEvent).toHaveBeenCalled());
+    const srcRow = screen.getByText("src").closest(".tree-row")!;
+    const querySelector = vi
+      .spyOn(Element.prototype, "querySelector")
+      .mockImplementation(function (this: Element, selector: string) {
+        if (selector.includes(":hover")) return srcRow;
+        return null;
+      });
+    webviewMocks.cursorPosition.mockResolvedValue({ x: 9999, y: 9999 });
+
+    try {
+      const calls = webviewMocks.onDragDropEvent.mock
+        .calls as unknown as Array<[NativeDropHandler]>;
+      act(() => {
+        calls[0][0]({
+          payload: {
+            type: "drop",
+            paths: ["/tmp/from-finder.txt"],
+            position: { x: -9999, y: -9999 },
+          },
+        });
+      });
+
+      await waitFor(() =>
+        expect(copyPaths).toHaveBeenCalledWith(
+          ROOT,
+          ["/tmp/from-finder.txt"],
+          "/ws/src",
+        ),
+      );
+      expect(webviewMocks.cursorPosition).not.toHaveBeenCalled();
+    } finally {
+      querySelector.mockRestore();
     }
   });
 
