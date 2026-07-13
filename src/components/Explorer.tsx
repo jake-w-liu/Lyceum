@@ -5,7 +5,7 @@
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { ask, message } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { cursorPosition } from "@tauri-apps/api/window";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   copyPaths,
   createDirectory,
@@ -140,6 +140,37 @@ function dragPathsFromDataTransfer(dataTransfer: DataTransfer): string[] {
   } catch {
     return [];
   }
+}
+
+type NativeDropGeometry = {
+  clientInset: { x: number; y: number };
+  scaleFactor: number;
+};
+
+function nativeDropClientPoint(
+  position: { x: number; y: number },
+  geometry: NativeDropGeometry | null,
+): { x: number; y: number } | null {
+  const isMac = /Mac|iPhone|iPad/.test(
+    `${navigator.platform} ${navigator.userAgent}`,
+  );
+  if (!geometry) return null;
+  if (isMac) {
+    // WKWebView/Wry reports logical coordinates relative to the native window,
+    // including its frame. elementFromPoint is relative to the DOM viewport,
+    // so remove the client inset derived from native outer size and the live
+    // viewport size. Position APIs cannot provide this inset for full-size
+    // WKWebViews because they report a zero webview origin.
+    return {
+      x: position.x - geometry.clientInset.x,
+      y: position.y - geometry.clientInset.y,
+    };
+  }
+  // Other Wry backends report physical pixels relative to the webview.
+  return {
+    x: position.x / geometry.scaleFactor,
+    y: position.y / geometry.scaleFactor,
+  };
 }
 
 /**
@@ -1572,101 +1603,112 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     );
   }
 
-  function resolveHoveredImportDir(): string | null {
-    // WKWebView updates CSS :hover during a native Finder drag even though
-    // Tauri intercepts HTML drag events. This is the only coordinate-free DOM
-    // source and is therefore authoritative when available.
-    return importDirForElement(
-      explorerRef.current?.querySelector(
-        ".tree-row:hover, .tree-empty:hover, .tree-root-drop-spacer:hover",
-      ) ?? null,
-    );
-  }
-
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let disposed = false;
-    let hoverSequence = 0;
     let webview;
+    let appWindow;
     try {
       webview = getCurrentWebview();
+      appWindow = getCurrentWindow();
     } catch {
       // Not running inside a Tauri webview (e.g. unit tests) — file-drop import
       // simply isn't wired; the explorer still renders and works normally.
       return;
     }
     void (async () => {
-      type NativeGeometry = {
-        origin: { x: number; y: number };
-        scaleFactor: number;
-      };
-      const loadGeometry = async (): Promise<NativeGeometry | null> => {
+      const loadGeometry = async (): Promise<NativeDropGeometry | null> => {
         try {
-          const [physicalOrigin, scaleFactor] = await Promise.all([
-            webview.position(),
-            webview.window.scaleFactor(),
+          const [outerSize, scaleFactor] = await Promise.all([
+            appWindow.outerSize(),
+            appWindow.scaleFactor(),
           ]);
           if (!Number.isFinite(scaleFactor) || scaleFactor <= 0) return null;
+          const outerWidth = outerSize.width / scaleFactor;
+          const outerHeight = outerSize.height / scaleFactor;
           return {
-            origin: physicalOrigin,
             scaleFactor,
+            clientInset: {
+              x: Math.max(0, (outerWidth - window.innerWidth) / 2),
+              y: Math.max(0, outerHeight - window.innerHeight),
+            },
           };
         } catch {
           return null;
         }
       };
-      let geometryPromise = loadGeometry();
-      const clientPoint = async (fallback: {
-        x: number;
-        y: number;
-      }): Promise<{ x: number; y: number }> => {
-        try {
-          const [cursor, geometry] = await Promise.all([
-            cursorPosition(),
-            geometryPromise,
-          ]);
-          if (geometry) {
-            return {
-              x: (cursor.x - geometry.origin.x) / geometry.scaleFactor,
-              y: (cursor.y - geometry.origin.y) / geometry.scaleFactor,
-            };
-          }
-        } catch {
-          // Fall through to the event payload for browser tests/older runtimes.
-        }
-        const scale = window.devicePixelRatio || 1;
-        return { x: fallback.x / scale, y: fallback.y / scale };
+      let geometry = await loadGeometry();
+      let geometryRefresh: Promise<NativeDropGeometry | null> | null = null;
+      let latestOverPosition: { x: number; y: number } | null = null;
+
+      const targetAt = (
+        position: { x: number; y: number },
+        currentGeometry: NativeDropGeometry | null,
+      ) => {
+        const point = nativeDropClientPoint(position, currentGeometry);
+        setDropTargetPath(point ? resolveImportDir(point) : null);
       };
+
+      const startDragGeometryRefresh = () => {
+        const refresh = loadGeometry();
+        geometryRefresh = refresh;
+        void refresh.then((nextGeometry) => {
+          if (disposed || geometryRefresh !== refresh) return;
+          geometry = nextGeometry;
+          geometryRefresh = null;
+          if (latestOverPosition) targetAt(latestOverPosition, geometry);
+        });
+      };
+
+      const importAt = (
+        paths: string[],
+        position: { x: number; y: number },
+        currentGeometry: NativeDropGeometry | null,
+      ) => {
+        const point = nativeDropClientPoint(position, currentGeometry);
+        const dir = point ? resolveImportDir(point) : null;
+        if (dir) {
+          void importPaths(paths, dir);
+        } else {
+          void message(
+            "Import failed: could not determine the folder under the pointer.",
+          );
+        }
+      };
+
       return webview.onDragDropEvent((event) => {
         const payload = event.payload;
         if (payload.type === "drop") {
-          hoverSequence += 1;
           setDropTargetPath(null);
-          const hoveredDir = resolveHoveredImportDir();
-          if (hoveredDir) {
-            void importPaths(payload.paths, hoveredDir);
-            return;
+          latestOverPosition = null;
+          const pendingGeometry = geometryRefresh;
+          geometryRefresh = null;
+          if (pendingGeometry) {
+            void pendingGeometry.then((nextGeometry) => {
+              if (disposed) return;
+              geometry = nextGeometry;
+              importAt(payload.paths, payload.position, geometry);
+            });
+          } else if (geometry) {
+            importAt(payload.paths, payload.position, geometry);
+          } else {
+            void loadGeometry().then((nextGeometry) => {
+              if (disposed) return;
+              geometry = nextGeometry;
+              importAt(payload.paths, payload.position, geometry);
+            });
           }
-          void clientPoint(payload.position).then((point) => {
-            if (disposed) return;
-            const dir = resolveImportDir(point);
-            if (dir) void importPaths(payload.paths, dir);
-          });
         } else if (payload.type === "enter" || payload.type === "over") {
-          if (payload.type === "enter") geometryPromise = loadGeometry();
-          const hoveredDir = resolveHoveredImportDir();
-          if (hoveredDir) {
-            hoverSequence += 1;
-            setDropTargetPath(hoveredDir);
-            return;
+          latestOverPosition = payload.position;
+          if (payload.type === "enter") {
+            targetAt(payload.position, geometry);
+            startDragGeometryRefresh();
+          } else if (!geometryRefresh) {
+            targetAt(payload.position, geometry);
           }
-          const sequence = ++hoverSequence;
-          void clientPoint(payload.position).then((point) => {
-            if (disposed || sequence !== hoverSequence) return;
-            setDropTargetPath(resolveImportDir(point));
-          });
         } else {
-          hoverSequence += 1;
+          latestOverPosition = null;
+          geometryRefresh = null;
           setDropTargetPath(null); // leave
         }
       });

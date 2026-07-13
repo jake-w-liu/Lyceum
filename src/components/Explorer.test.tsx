@@ -14,19 +14,19 @@ import {
 
 const webviewMocks = vi.hoisted(() => {
   const onDragDropEvent = vi.fn(async () => vi.fn());
-  const position = vi.fn(async () => ({ x: 0, y: 0 }));
+  const outerSize = vi.fn(async () => ({
+    width: window.innerWidth,
+    height: window.innerHeight,
+  }));
   const scaleFactor = vi.fn(async () => 1);
-  const cursorPosition = vi.fn(async () => ({ x: 0, y: 0 }));
   return {
     getCurrentWebview: vi.fn(() => ({
       onDragDropEvent,
-      position,
-      window: { scaleFactor },
     })),
     onDragDropEvent,
-    position,
+    getCurrentWindow: vi.fn(() => ({ outerSize, scaleFactor })),
+    outerSize,
     scaleFactor,
-    cursorPosition,
   };
 });
 
@@ -41,7 +41,7 @@ vi.mock("@tauri-apps/api/webview", () => ({
 }));
 
 vi.mock("@tauri-apps/api/window", () => ({
-  cursorPosition: webviewMocks.cursorPosition,
+  getCurrentWindow: webviewMocks.getCurrentWindow,
 }));
 
 vi.mock("../lib/ipc", () => ({
@@ -154,17 +154,21 @@ beforeEach(() => {
   useWorkspaceStore.setState(initialWorkspaceData, false);
   webviewMocks.onDragDropEvent.mockReset();
   webviewMocks.onDragDropEvent.mockResolvedValue(vi.fn());
-  webviewMocks.position.mockReset();
-  webviewMocks.position.mockResolvedValue({ x: 0, y: 0 });
+  webviewMocks.outerSize.mockReset();
+  webviewMocks.outerSize.mockImplementation(async () => ({
+    width: window.innerWidth,
+    height: window.innerHeight,
+  }));
   webviewMocks.scaleFactor.mockReset();
   webviewMocks.scaleFactor.mockResolvedValue(1);
-  webviewMocks.cursorPosition.mockReset();
-  webviewMocks.cursorPosition.mockResolvedValue({ x: 0, y: 0 });
+  webviewMocks.getCurrentWindow.mockReset();
+  webviewMocks.getCurrentWindow.mockReturnValue({
+    outerSize: webviewMocks.outerSize,
+    scaleFactor: webviewMocks.scaleFactor,
+  });
   webviewMocks.getCurrentWebview.mockReset();
   webviewMocks.getCurrentWebview.mockReturnValue({
     onDragDropEvent: webviewMocks.onDragDropEvent,
-    position: webviewMocks.position,
-    window: { scaleFactor: webviewMocks.scaleFactor },
   });
   vi.mocked(readDirectory).mockReset();
   vi.mocked(readDirectory).mockImplementation(async (p: string) => {
@@ -842,8 +846,6 @@ describe("Explorer", () => {
       configurable: true,
       value: "MacIntel",
     });
-    webviewMocks.cursorPosition.mockResolvedValue({ x: 240, y: 80 });
-
     try {
       const calls = webviewMocks.onDragDropEvent.mock
         .calls as unknown as Array<[NativeDropHandler]>;
@@ -880,17 +882,16 @@ describe("Explorer", () => {
     }
   });
 
-  it("translates macOS desktop drag coordinates to the webview origin", async () => {
+  it("uses Wry's macOS client position for folder feedback and drop", async () => {
     const originalPlatform = Object.getOwnPropertyDescriptor(navigator, "platform");
     Object.defineProperty(navigator, "platform", {
       configurable: true,
       value: "MacIntel",
     });
-    // Both values are desktop physical coordinates. Their delta (310, 394),
-    // divided by Retina scale 2, is DOM client point (155, 197).
-    webviewMocks.position.mockResolvedValueOnce({ x: 252, y: 174 });
+    // At 2x, a native outer height of 1600px is 800 CSS px. The live jsdom
+    // viewport is 768px high, so the macOS client inset is 32px.
+    webviewMocks.outerSize.mockResolvedValueOnce({ width: 2048, height: 1600 });
     webviewMocks.scaleFactor.mockResolvedValueOnce(2);
-    webviewMocks.cursorPosition.mockResolvedValueOnce({ x: 562, y: 568 });
 
     try {
       render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
@@ -905,14 +906,23 @@ describe("Explorer", () => {
         act(() => {
           calls[0][0]({
             payload: {
-              type: "drop",
-              paths: ["/tmp/from-finder.txt"],
-            // Deliberately invalid/corrupted Wry coordinates: macOS targeting
-            // must use the independently queried live cursor instead.
-            position: { x: 9999, y: -9999 },
+              type: "over",
+              position: { x: 131, y: 111 },
             },
           });
         });
+        expect(srcRow).toHaveClass("drop-target");
+
+        act(() => {
+          calls[0][0]({
+            payload: {
+              type: "drop",
+              paths: ["/tmp/from-finder.txt"],
+              position: { x: 131, y: 111 },
+            },
+          });
+        });
+        expect(srcRow).not.toHaveClass("drop-target");
 
         await waitFor(() =>
           expect(copyPaths).toHaveBeenCalledWith(
@@ -921,7 +931,7 @@ describe("Explorer", () => {
             "/ws/src",
           ),
         );
-        expect(hitTest.elementFromPoint).toHaveBeenCalledWith(155, 197);
+        expect(hitTest.elementFromPoint).toHaveBeenCalledWith(131, 79);
       } finally {
         hitTest.restore();
       }
@@ -934,42 +944,93 @@ describe("Explorer", () => {
     }
   });
 
-  it("uses the live hovered folder instead of an inaccurate native position", async () => {
-    render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
-    await screen.findByText("src");
-    await waitFor(() => expect(webviewMocks.onDragDropEvent).toHaveBeenCalled());
-    const srcRow = screen.getByText("src").closest(".tree-row")!;
-    const querySelector = vi
-      .spyOn(Element.prototype, "querySelector")
-      .mockImplementation(function (this: Element, selector: string) {
-        if (selector.includes(":hover")) return srcRow;
-        return null;
-      });
-    webviewMocks.cursorPosition.mockResolvedValue({ x: 9999, y: 9999 });
+  it("shows the current macOS native target immediately during scale refresh", async () => {
+    const originalPlatform = Object.getOwnPropertyDescriptor(navigator, "platform");
+    Object.defineProperty(navigator, "platform", {
+      configurable: true,
+      value: "MacIntel",
+    });
+    const refreshedOuterSize = deferred<{ width: number; height: number }>();
 
     try {
-      const calls = webviewMocks.onDragDropEvent.mock
-        .calls as unknown as Array<[NativeDropHandler]>;
+      render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+      await screen.findByText("src");
+      await waitFor(() => expect(webviewMocks.onDragDropEvent).toHaveBeenCalled());
+      const srcRow = screen.getByText("src").closest(".tree-row")!;
+      const hitTest = mockElementFromPoint(srcRow);
+      webviewMocks.outerSize.mockReturnValueOnce(refreshedOuterSize.promise);
+      webviewMocks.scaleFactor.mockResolvedValueOnce(2);
+
+      try {
+        const handler = (webviewMocks.onDragDropEvent.mock.calls as unknown as Array<
+          [NativeDropHandler]
+        >)[0][0];
+        act(() => {
+          handler({
+            payload: {
+              type: "enter",
+              paths: ["/tmp/from-finder.txt"],
+              position: { x: 131, y: 111 },
+            },
+          });
+          handler({
+            payload: { type: "over", position: { x: 131, y: 111 } },
+          });
+        });
+        expect(srcRow).toHaveClass("drop-target");
+
+        refreshedOuterSize.resolve({ width: 2048, height: 1600 });
+        await waitFor(() => expect(srcRow).toHaveClass("drop-target"));
+        expect(hitTest.elementFromPoint).toHaveBeenLastCalledWith(131, 79);
+      } finally {
+        hitTest.restore();
+      }
+    } finally {
+      if (originalPlatform) {
+        Object.defineProperty(navigator, "platform", originalPlatform);
+      } else {
+        delete (navigator as unknown as { platform?: unknown }).platform;
+      }
+    }
+  });
+
+  it("refuses a macOS native drop when client geometry is unavailable", async () => {
+    const originalPlatform = Object.getOwnPropertyDescriptor(navigator, "platform");
+    Object.defineProperty(navigator, "platform", {
+      configurable: true,
+      value: "MacIntel",
+    });
+    webviewMocks.scaleFactor.mockRejectedValue(new Error("unavailable"));
+
+    try {
+      render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+      await screen.findByText("src");
+      await waitFor(() => expect(webviewMocks.onDragDropEvent).toHaveBeenCalled());
+      const handler = (webviewMocks.onDragDropEvent.mock.calls as unknown as Array<
+        [NativeDropHandler]
+      >)[0][0];
       act(() => {
-        calls[0][0]({
+        handler({
           payload: {
             type: "drop",
             paths: ["/tmp/from-finder.txt"],
-            position: { x: -9999, y: -9999 },
+            position: { x: 131, y: 111 },
           },
         });
       });
 
       await waitFor(() =>
-        expect(copyPaths).toHaveBeenCalledWith(
-          ROOT,
-          ["/tmp/from-finder.txt"],
-          "/ws/src",
+        expect(message).toHaveBeenCalledWith(
+          "Import failed: could not determine the folder under the pointer.",
         ),
       );
-      expect(webviewMocks.cursorPosition).not.toHaveBeenCalled();
+      expect(copyPaths).not.toHaveBeenCalled();
     } finally {
-      querySelector.mockRestore();
+      if (originalPlatform) {
+        Object.defineProperty(navigator, "platform", originalPlatform);
+      } else {
+        delete (navigator as unknown as { platform?: unknown }).platform;
+      }
     }
   });
 
