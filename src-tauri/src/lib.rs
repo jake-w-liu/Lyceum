@@ -111,24 +111,25 @@ struct NativeWindowContentInset {
 /// Return the AppKit chrome inset between Wry's NSWindow-relative drag points
 /// and the WKWebView client origin. Native page zoom is handled separately by
 /// the frontend and must not be folded into this logical-point value.
+#[cfg(target_os = "macos")]
 #[tauri::command]
 fn native_window_content_inset(window: tauri::Window) -> Result<NativeWindowContentInset, String> {
-    #[cfg(target_os = "macos")]
-    {
-        let pointer = window.ns_window().map_err(|error| error.to_string())?;
-        // SAFETY: Tauri owns this NSWindow for the command's duration and
-        // `ns_window` returns its valid AppKit object pointer on the main thread.
-        let ns_window = unsafe { &*pointer.cast::<objc2_app_kit::NSWindow>() };
-        let frame = ns_window.frame();
-        let content = ns_window.contentLayoutRect();
-        Ok(NativeWindowContentInset {
-            x: ((frame.size.width - content.size.width) / 2.0).max(0.0),
-            y: (frame.size.height - content.size.height).max(0.0),
-        })
-    }
+    let pointer = window.ns_window().map_err(|error| error.to_string())?;
+    // SAFETY: Tauri owns this NSWindow for the command's duration and
+    // `ns_window` returns its valid AppKit object pointer on the main thread.
+    let ns_window = unsafe { &*pointer.cast::<objc2_app_kit::NSWindow>() };
+    let frame = ns_window.frame();
+    let content = ns_window.contentLayoutRect();
+    Ok(NativeWindowContentInset {
+        x: ((frame.size.width - content.size.width) / 2.0).max(0.0),
+        y: (frame.size.height - content.size.height).max(0.0),
+    })
+}
 
-    #[cfg(not(target_os = "macos"))]
-    Ok(NativeWindowContentInset { x: 0.0, y: 0.0 })
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+fn native_window_content_inset() -> NativeWindowContentInset {
+    NativeWindowContentInset { x: 0.0, y: 0.0 }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
