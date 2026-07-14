@@ -61,6 +61,7 @@ vi.mock("../lib/ipc", () => ({
   restoreTrashBatch: vi.fn(async () => {}),
   redoTrashBatch: vi.fn(async () => {}),
   gitStatus: vi.fn(async () => ({ isRepo: false, files: {} })),
+  nativeWindowContentInset: vi.fn(async () => ({ x: 0, y: 0 })),
 }));
 import {
   createDirectory,
@@ -68,6 +69,7 @@ import {
   movePathsToTrash,
   copyPaths,
   movePaths,
+  nativeWindowContentInset,
   readDirectory,
   redoTrashBatch,
   gitStatus,
@@ -162,6 +164,8 @@ beforeEach(() => {
     onDragDropEvent: webviewMocks.onDragDropEvent,
   });
   vi.mocked(readDirectory).mockReset();
+  vi.mocked(nativeWindowContentInset).mockReset();
+  vi.mocked(nativeWindowContentInset).mockResolvedValue({ x: 0, y: 0 });
   vi.mocked(readDirectory).mockImplementation(async (p: string) => {
     if (p === ROOT) return [dir("src"), file("README.md")];
     if (p === "/ws/src") return [file("main.tsx", "/ws/src")];
@@ -841,12 +845,14 @@ describe("Explorer", () => {
       const calls = webviewMocks.onDragDropEvent.mock
         .calls as unknown as Array<[NativeDropHandler]>;
       const handler = calls[0][0];
-      handler({
-        payload: {
-          type: "drop",
-          paths: ["/tmp/from-finder.txt"],
-          position: { x: 240, y: 80 },
-        },
+      act(() => {
+        handler({
+          payload: {
+            type: "drop",
+            paths: ["/tmp/from-finder.txt"],
+            position: { x: 240, y: 80 },
+          },
+        });
       });
 
       await waitFor(() =>
@@ -856,7 +862,7 @@ describe("Explorer", () => {
           "/ws/src",
         ),
       );
-      expect(hitTest.elementFromPoint).toHaveBeenCalledWith(240, 80);
+      expect(hitTest.elementFromPoint).toHaveBeenCalledWith(120, 40);
     } finally {
       hitTest.restore();
       if (originalDpr) {
@@ -873,7 +879,7 @@ describe("Explorer", () => {
     }
   });
 
-  it("uses webview-local macOS points unchanged at non-default window zoom", async () => {
+  it("removes native chrome and page zoom from macOS drag points", async () => {
     const originalPlatform = Object.getOwnPropertyDescriptor(navigator, "platform");
     const originalDpr = Object.getOwnPropertyDescriptor(window, "devicePixelRatio");
     Object.defineProperty(navigator, "platform", {
@@ -885,6 +891,7 @@ describe("Explorer", () => {
       value: 2.4,
     });
     webviewMocks.scaleFactor.mockResolvedValueOnce(2);
+    vi.mocked(nativeWindowContentInset).mockResolvedValueOnce({ x: 0, y: 32 });
 
     try {
       render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
@@ -924,7 +931,10 @@ describe("Explorer", () => {
             "/ws/src",
           ),
         );
-        expect(hitTest.elementFromPoint).toHaveBeenCalledWith(131, 111);
+        expect(hitTest.elementFromPoint).toHaveBeenCalledWith(
+          131 / 1.2,
+          (111 - 32) / 1.2,
+        );
       } finally {
         hitTest.restore();
       }
@@ -1027,11 +1037,11 @@ describe("Explorer", () => {
     }
   });
 
-  it("refuses a non-macOS native drop when display geometry is unavailable", async () => {
+  it("refuses a macOS native drop when display geometry is unavailable", async () => {
     const originalPlatform = Object.getOwnPropertyDescriptor(navigator, "platform");
     Object.defineProperty(navigator, "platform", {
       configurable: true,
-      value: "Linux x86_64",
+      value: "MacIntel",
     });
     webviewMocks.scaleFactor.mockRejectedValue(new Error("unavailable"));
 

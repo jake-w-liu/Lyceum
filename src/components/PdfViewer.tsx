@@ -44,7 +44,10 @@ import {
   type PdfMatch,
   type PdfPageIndex,
 } from "../lib/pdfSearch";
-import { registerPdfTextSelection } from "../lib/pdfTextSelection";
+import {
+  correctPdfTextLayerMinimumFontSize,
+  registerPdfTextSelection,
+} from "../lib/pdfTextSelection";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -542,6 +545,7 @@ function PdfPage({
         const renderTextLayer = async (): Promise<void> => {
           await textLayer!.render();
           if (!cancelled) {
+            correctPdfTextLayerMinimumFontSize(textLayerElement);
             unregisterTextSelection =
               registerPdfTextSelection(textLayerElement);
           }

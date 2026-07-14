@@ -6,6 +6,53 @@
 
 import { normalizeUnicode } from "pdfjs-dist";
 
+let measuredMinimumFontSize: number | null = null;
+
+function measureMinimumFontSize(): number {
+  if (measuredMinimumFontSize !== null) return measuredMinimumFontSize;
+
+  const probe = document.createElement("div");
+  probe.style.opacity = "0";
+  probe.style.lineHeight = "1";
+  probe.style.fontSize = "1px";
+  probe.style.position = "absolute";
+  probe.textContent = "X";
+  document.body.append(probe);
+  measuredMinimumFontSize = probe.getBoundingClientRect().height;
+  probe.remove();
+  return measuredMinimumFontSize;
+}
+
+/**
+ * PDF.js compensates for browser minimum font sizes above one CSS pixel, but
+ * not for WKWebView returning a sub-pixel minimum at native page zoom. In that
+ * case TextLayer multiplies every span's font size by the probe value while its
+ * scaleX calculation still uses the unmodified size. Restore the missing
+ * inverse scale so pointer hit-testing covers the full rendered line.
+ */
+export function correctPdfTextLayerMinimumFontSize(
+  textLayer: HTMLDivElement,
+  minimumFontSize = measureMinimumFontSize(),
+): void {
+  if (
+    !Number.isFinite(minimumFontSize) ||
+    minimumFontSize <= 0 ||
+    minimumFontSize >= 1
+  ) {
+    return;
+  }
+
+  const correction = 1 / minimumFontSize;
+  for (const span of textLayer.querySelectorAll<HTMLElement>(
+    'span[role="presentation"]',
+  )) {
+    if (!span.style.fontSize || span.dataset.lyceumMinFontCorrected) continue;
+    const transform = span.style.transform.trim();
+    span.style.transform = `${transform ? `${transform} ` : ""}scale(${correction})`;
+    span.dataset.lyceumMinFontCorrected = "true";
+  }
+}
+
 type TextLayerRegistration = {
   endOfContent: HTMLDivElement;
   onCopy: (event: ClipboardEvent) => void;

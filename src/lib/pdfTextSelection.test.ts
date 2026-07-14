@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { registerPdfTextSelection } from "./pdfTextSelection";
+import {
+  correctPdfTextLayerMinimumFontSize,
+  registerPdfTextSelection,
+} from "./pdfTextSelection";
 
 function makeTextLayer(): {
   layer: HTMLDivElement;
@@ -34,6 +37,40 @@ function selectBetween(start: Node, end: Node): void {
 afterEach(() => {
   document.getSelection()?.removeAllRanges();
   document.body.replaceChildren();
+});
+
+describe("correctPdfTextLayerMinimumFontSize", () => {
+  it("restores the missing inverse scale for sub-pixel WebKit probes", () => {
+    const layer = document.createElement("div");
+    const span = document.createElement("span");
+    span.setAttribute("role", "presentation");
+    span.style.fontSize = "7.47px";
+    span.style.transform = "scaleX(0.98)";
+    layer.append(span);
+
+    correctPdfTextLayerMinimumFontSize(layer, 5 / 6);
+    correctPdfTextLayerMinimumFontSize(layer, 5 / 6);
+
+    expect(span.style.transform).toBe("scaleX(0.98) scale(1.2)");
+    expect(span.dataset.lyceumMinFontCorrected).toBe("true");
+  });
+
+  it.each([0, 1, 1.25, Number.NaN])(
+    "does not alter spans for a minimum font size of %s",
+    (minimumFontSize) => {
+      const layer = document.createElement("div");
+      const span = document.createElement("span");
+      span.setAttribute("role", "presentation");
+      span.style.fontSize = "9px";
+      span.style.transform = "scaleX(0.9)";
+      layer.append(span);
+
+      correctPdfTextLayerMinimumFontSize(layer, minimumFontSize);
+
+      expect(span.style.transform).toBe("scaleX(0.9)");
+      expect(span.dataset.lyceumMinFontCorrected).toBeUndefined();
+    },
+  );
 });
 
 describe("PDF text selection geometry", () => {

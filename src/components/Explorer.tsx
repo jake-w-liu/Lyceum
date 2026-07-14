@@ -12,6 +12,7 @@ import {
   createFile,
   movePaths,
   movePathsToTrash,
+  nativeWindowContentInset,
   readDirectory,
   redoTrashBatch,
   renamePath,
@@ -143,6 +144,7 @@ function dragPathsFromDataTransfer(dataTransfer: DataTransfer): string[] {
 }
 
 type NativeDropGeometry = {
+  clientInset: { x: number; y: number };
   scaleFactor: number;
 };
 
@@ -154,15 +156,20 @@ function nativeDropClientPoint(
     `${navigator.platform} ${navigator.userAgent}`,
   );
   if (!Number.isFinite(position.x) || !Number.isFinite(position.y)) return null;
+  if (!geometry) return null;
   if (isMac) {
-    // Wry's WKWebView backend forwards AppKit points in the webview's own
-    // coordinate space. They are already the client coordinates expected by
-    // elementFromPoint, including when WKWebView page zoom changes DPR. Scaling
-    // these absolute values by DPR makes the error grow with pointer position.
-    return position;
+    // Wry forwards AppKit logical points in the NSWindow frame. Subtract the
+    // AppKit content-layout inset to reach the WKWebView client origin. Native
+    // page zoom also magnifies those points, while elementFromPoint expects
+    // pre-zoom CSS coordinates; DPR / display scale isolates that page zoom.
+    const pageZoom = window.devicePixelRatio / geometry.scaleFactor;
+    if (!Number.isFinite(pageZoom) || pageZoom <= 0) return null;
+    return {
+      x: (position.x - geometry.clientInset.x) / pageZoom,
+      y: (position.y - geometry.clientInset.y) / pageZoom,
+    };
   }
   // Other Wry backends report physical pixels relative to the webview.
-  if (!geometry) return null;
   return {
     x: position.x / geometry.scaleFactor,
     y: position.y / geometry.scaleFactor,
@@ -1614,19 +1621,26 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     }
     void (async () => {
       const loadGeometry = async (): Promise<NativeDropGeometry | null> => {
-        if (
-          /Mac|iPhone|iPad/.test(
-            `${navigator.platform} ${navigator.userAgent}`,
-          )
-        ) {
-          return { scaleFactor: 1 };
-        }
         try {
-          const scaleFactor = await appWindow.scaleFactor();
-          if (!Number.isFinite(scaleFactor) || scaleFactor <= 0) {
+          const [scaleFactor, clientInset] = await Promise.all([
+            appWindow.scaleFactor(),
+            nativeWindowContentInset(),
+          ]);
+          if (
+            !Number.isFinite(scaleFactor) ||
+            scaleFactor <= 0 ||
+            !Number.isFinite(clientInset.x) ||
+            !Number.isFinite(clientInset.y)
+          ) {
             return null;
           }
-          return { scaleFactor };
+          return {
+            scaleFactor,
+            clientInset: {
+              x: Math.max(0, clientInset.x),
+              y: Math.max(0, clientInset.y),
+            },
+          };
         } catch {
           return null;
         }

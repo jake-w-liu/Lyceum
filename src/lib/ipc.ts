@@ -16,6 +16,15 @@ export interface AppInfo {
   arch: string;
 }
 
+export interface NativeWindowContentInset {
+  x: number;
+  y: number;
+}
+
+export function nativeWindowContentInset(): Promise<NativeWindowContentInset> {
+  return invoke<NativeWindowContentInset>("native_window_content_inset");
+}
+
 /** A single file-explorer entry, mirroring the Rust `DirEntryDto`. */
 export interface DirEntry {
   name: string;
