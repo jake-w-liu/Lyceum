@@ -1,7 +1,7 @@
 {
   "name": "lyceum",
   "private": true,
-  "version": "0.5.92",
+  "version": "0.5.93",
   "type": "module",
   "description": "A lightweight, VS Code-inspired research IDE built with Tauri.",
   "license": "MIT",
@@ -14,7 +14,7 @@
     "url": "https://github.com/jake-w-liu/Lyceum/issues"
   },
   "engines": {
-    "node": "^20.19.0 || >=22.12.0"
+    "node": ">=22.13.0"
   },
   "scripts": {
     "dev": "vite",
@@ -39,7 +39,7 @@
     "@xterm/xterm": "^5.5.0",
     "markdown-it": "^14.1.0",
     "monaco-editor": "^0.52.2",
-    "pdfjs-dist": "^4.8.69",
+    "pdfjs-dist": "^6.1.200",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "zustand": "^5.0.2"

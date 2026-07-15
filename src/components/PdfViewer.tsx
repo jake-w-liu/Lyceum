@@ -16,12 +16,17 @@ import {
   useState,
 } from "react";
 import type {
+  PDFDocumentLoadingTask,
   PDFDocumentProxy,
   PDFPageProxy,
   RefProxy,
   RenderTask,
 } from "pdfjs-dist/types/src/display/api";
-import type { IPDFLinkService } from "pdfjs-dist/types/web/interfaces";
+import type { CatalogAttachmentContent } from "pdfjs-dist/types/src/core/catalog";
+import type {
+  AnnotationLayer as PdfAnnotationLayer,
+} from "pdfjs-dist/types/src/display/annotation_layer";
+import type { PDFLinkService } from "pdfjs-dist/types/web/pdf_link_service";
 import * as pdfjsLib from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
@@ -44,10 +49,8 @@ import {
   type PdfMatch,
   type PdfPageIndex,
 } from "../lib/pdfSearch";
-import {
-  correctPdfTextLayerMinimumFontSize,
-  registerPdfTextSelection,
-} from "../lib/pdfTextSelection";
+import { registerPdfTextSelection } from "../lib/pdfTextSelection";
+import { readPdfTextContent } from "../lib/pdfTextContent";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -250,11 +253,39 @@ async function openExternalHref(href: string): Promise<void> {
   }
 }
 
-class LocalPdfLinkService implements IPDFLinkService {
+type LocalPdfLinkServiceContract = Omit<
+  PDFLinkService,
+  | "eventBus"
+  | "externalLinkTarget"
+  | "externalLinkRel"
+  | "_ignoreDestinationZoom"
+  | "baseUrl"
+  | "pdfDocument"
+  | "pdfViewer"
+  | "pdfHistory"
+>;
+
+class LocalPdfLinkService implements LocalPdfLinkServiceContract {
   externalLinkEnabled = true;
   eventBus = null;
+  externalLinkTarget = 0;
+  externalLinkRel = "noopener noreferrer nofollow";
+  _ignoreDestinationZoom = false;
+  baseUrl: string | null = null;
 
   constructor(private handlers: MutableRefObject<PdfLinkHandlers>) {}
+
+  setDocument(_pdfDocument: unknown, baseUrl: string | null = null): void {
+    this.baseUrl = baseUrl;
+  }
+
+  setViewer(_pdfViewer: unknown): void {
+    // Lyceum owns navigation directly rather than through PDF.js's full viewer.
+  }
+
+  setHistory(_pdfHistory: unknown): void {
+    // Browser-history integration is intentionally absent in the desktop app.
+  }
 
   get pagesCount(): number {
     return this.handlers.current.getPagesCount();
@@ -299,6 +330,33 @@ class LocalPdfLinkService implements IPDFLinkService {
     this.handlers.current.scrollToPage(pageNumber);
   }
 
+  goToXY(
+    pageNumber: number,
+    x: number,
+    y: number,
+    _options: object = {},
+  ): void {
+    if (!Number.isInteger(pageNumber)) return;
+    this.handlers.current.scrollToDestination(pageNumber, [
+      null,
+      { name: "XYZ" },
+      x,
+      y,
+      null,
+    ]);
+  }
+
+  async getAttachmentContent(id: string): Promise<CatalogAttachmentContent> {
+    const pdf = this.handlers.current.getPdf();
+    if (!pdf) return null;
+    try {
+      return await pdf.getAttachmentContent(id);
+    } catch (error) {
+      console.warn(`Unable to load PDF attachment ${id}:`, error);
+      return null;
+    }
+  }
+
   addLinkAttributes(
     link: HTMLAnchorElement,
     url: string,
@@ -321,15 +379,21 @@ class LocalPdfLinkService implements IPDFLinkService {
     });
   }
 
-  getDestinationHash(dest: unknown): string {
+  getDestinationHash(dest: string | unknown[]): string {
     if (typeof dest === "string" && dest.length > 0) {
       return this.getAnchorUrl(`#${encodeURIComponent(dest)}`);
+    }
+    if (Array.isArray(dest)) {
+      const serialized = JSON.stringify(dest);
+      if (serialized.length > 0) {
+        return this.getAnchorUrl(`#${encodeURIComponent(serialized)}`);
+      }
     }
     return this.getAnchorUrl("");
   }
 
-  getAnchorUrl(hash: unknown): string {
-    return typeof hash === "string" ? hash : "";
+  getAnchorUrl(hash: string): string {
+    return this.baseUrl ? `${this.baseUrl}${hash}` : hash;
   }
 
   setHash(hash: string): void {
@@ -468,6 +532,7 @@ function PdfPage({
     let cancelled = false;
     let task: RenderTask | null = null;
     let textLayer: TextLayerRender | null = null;
+    let annotationLayer: PdfAnnotationLayer | null = null;
     let unregisterTextSelection: (() => void) | null = null;
     setRenderError(null);
     setTextReady(false);
@@ -496,8 +561,7 @@ function PdfPage({
         textLayerElement.style.setProperty("--scale-factor", String(zoom));
         annotationLayerElement.style.setProperty("--scale-factor", String(zoom));
 
-        const canvasContext = canvas.getContext("2d");
-        if (!canvasContext) return;
+        if (!canvas.getContext("2d")) return;
         // Render at the device pixel ratio so pages are crisp on HiDPI/Retina
         // displays: the bitmap is sized in physical pixels (viewport × dpr) while
         // its CSS box stays in layout pixels, and the draw is scaled by transform.
@@ -516,11 +580,18 @@ function PdfPage({
         const transform =
           outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : undefined;
 
-        task = pdfPage.render({ canvasContext, viewport, transform });
+        task = pdfPage.render({ canvas, viewport, transform });
+        // Observe render failure immediately. Text extraction runs before the
+        // combined await below, so cancellation during that window must not
+        // leave RenderTask.promise rejected without a handler.
+        const canvasRenderResult = task.promise.then(
+          () => ({ error: null }),
+          (error: unknown) => ({ error }),
+        );
         // Match PDF.js's full viewer text path. Marked-content boundaries keep
         // the DOM reading order intact for selection across separately emitted
         // spans, while normalization is deferred until copy time.
-        const textContent = await pdfPage.getTextContent({
+        const textContent = await readPdfTextContent(pdfPage, {
           includeMarkedContent: true,
           disableNormalization: true,
         });
@@ -533,7 +604,11 @@ function PdfPage({
         const annotations = await pdfPage.getAnnotations({ intent: "display" });
         if (cancelled) return;
         const annotationViewport = viewport.clone({ dontFlip: true });
-        const annotationLayer = new pdfjsLib.AnnotationLayer({
+        // AnnotationLayer's public type names PDF.js's full PDFLinkService,
+        // while this compact adapter implements the same annotation-facing API
+        // without importing the full viewer bundle.
+        const annotationLinkService = linkService as unknown as PDFLinkService;
+        annotationLayer = new pdfjsLib.AnnotationLayer({
           div: annotationLayerElement,
           accessibilityManager: null,
           annotationCanvasMap: null,
@@ -541,29 +616,32 @@ function PdfPage({
           page: pdfPage,
           viewport: annotationViewport,
           structTreeLayer: null,
+          commentManager: null,
+          linkService: annotationLinkService,
+          annotationStorage: doc.annotationStorage,
         });
         const renderTextLayer = async (): Promise<void> => {
           await textLayer!.render();
           if (!cancelled) {
-            correctPdfTextLayerMinimumFontSize(textLayerElement);
             unregisterTextSelection =
               registerPdfTextSelection(textLayerElement);
           }
         };
-        await Promise.all([
-          task.promise,
+        const [canvasResult] = await Promise.all([
+          canvasRenderResult,
           renderTextLayer(),
           annotationLayer.render({
             annotations,
             viewport: annotationViewport,
             div: annotationLayerElement,
             page: pdfPage,
-            linkService,
+            linkService: annotationLinkService,
             annotationStorage: doc.annotationStorage,
             renderForms: true,
             enableScripting: false,
           }),
         ]);
+        if (canvasResult.error) throw canvasResult.error;
         if (!cancelled) setTextReady(true);
       } catch (e) {
         if (!cancelled) {
@@ -576,6 +654,7 @@ function PdfPage({
       unregisterTextSelection?.();
       task?.cancel();
       textLayer?.cancel();
+      annotationLayer?.destroy();
     };
   }, [visible, doc, pageNumber, zoom, linkService]);
 
@@ -1040,17 +1119,16 @@ export default function PdfViewer({ path }: { path: string }) {
   // Load the document.
   useEffect(() => {
     let cancelled = false;
-    let loadingPdf: PDFDocumentProxy | null = null;
+    let loadingTask: PDFDocumentLoadingTask | null = null;
     setLoadError(null);
     (async () => {
       try {
         const data = await readFileBytes(path);
-        const pdf = await pdfjsLib.getDocument({ data }).promise;
-        loadingPdf = pdf;
-        if (cancelled) {
-          void pdf.destroy();
-          return;
-        }
+        if (cancelled) return;
+        const task = pdfjsLib.getDocument({ data });
+        loadingTask = task;
+        const pdf = await task.promise;
+        if (cancelled) return;
         // Reserve every page's exact box before mounting the scroll stack.
         // Canvas/text/annotation rendering remains virtualized below.
         const sizes = await loadPageSizes(pdf);
@@ -1067,7 +1145,11 @@ export default function PdfViewer({ path }: { path: string }) {
     })();
     return () => {
       cancelled = true;
-      void loadingPdf?.destroy();
+      if (loadingTask && !loadingTask.destroyed) {
+        void loadingTask.destroy().catch((error) => {
+          console.warn("Failed to destroy PDF loading task:", error);
+        });
+      }
       docRef.current = null;
     };
   }, [path]);
@@ -1200,7 +1282,7 @@ export default function PdfViewer({ path }: { path: string }) {
     for (let n = 1; n <= pdf.numPages; n += 1) {
       try {
         const pdfPage = await pdf.getPage(n);
-        const content = await pdfPage.getTextContent();
+        const content = await readPdfTextContent(pdfPage);
         index.push(buildPageIndex(n, content));
       } catch {
         index.push(buildPageIndex(n, { items: [] }));

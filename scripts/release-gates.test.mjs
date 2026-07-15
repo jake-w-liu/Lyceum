@@ -184,20 +184,54 @@ describe("bundle cleanup path boundary", () => {
 });
 
 describe("Node toolchain boundary", () => {
-  it("matches the locked build tool and package-lock metadata", () => {
+  it("pins a Node version accepted by the locked build dependencies", () => {
     const packageJson = readJson(new URL("../package.json", import.meta.url));
     const packageLock = readJson(
       new URL("../package-lock.json", import.meta.url),
     );
+    const pinnedNode = readFileSync(
+      new URL("../.nvmrc", import.meta.url),
+      "utf8",
+    ).trim();
     const vitePackage = readJson(
       new URL("../node_modules/vite/package.json", import.meta.url),
     );
+    const pdfjsPackage = readJson(
+      new URL("../node_modules/pdfjs-dist/package.json", import.meta.url),
+    );
 
-    assert.equal(packageJson.engines.node, vitePackage.engines.node);
     assert.equal(
       packageLock.packages[""].engines.node,
       packageJson.engines.node,
     );
+    assert.equal(packageJson.engines.node, `>=${pinnedNode}`);
+    assert.equal(satisfiesEngine(pinnedNode, vitePackage.engines.node), true);
+    assert.equal(satisfiesEngine(pinnedNode, pdfjsPackage.engines.node), true);
+  });
+});
+
+describe("PDF.js WebKit rendering boundary", () => {
+  it("locks a release with the Safari soft-mask fallback", () => {
+    const packageLock = readJson(
+      new URL("../package-lock.json", import.meta.url),
+    );
+    const pdfjsPackage = readJson(
+      new URL("../node_modules/pdfjs-dist/package.json", import.meta.url),
+    );
+    const lockedVersion =
+      packageLock.packages["node_modules/pdfjs-dist"].version;
+    const viewerCss = readFileSync(
+      new URL("../src/styles/global.css", import.meta.url),
+      "utf8",
+    );
+
+    assert.equal(pdfjsPackage.version, lockedVersion);
+    // PDF.js 6.0.227 is the first release containing upstream b823271,
+    // the pixel-buffer SMask fallback used when Safari lacks ctx.filter.
+    assert.ok(compareVersions(lockedVersion, "6.0.227") >= 0);
+    assert.match(viewerCss, /font-size:\s*calc\([^;]*--font-height/);
+    assert.match(viewerCss, /scaleX\(var\(--scale-x\)\)/);
+    assert.match(viewerCss, /\.pdf-text-layer \.markedContent\s*{\s*display:\s*contents/);
   });
 });
 
@@ -256,6 +290,59 @@ function temporaryDirectory(name) {
 
 function readJson(url) {
   return JSON.parse(readFileSync(url, "utf8"));
+}
+
+function compareVersions(left, right) {
+  const a = left.split(".").map(Number);
+  const b = right.split(".").map(Number);
+  for (let index = 0; index < 3; index += 1) {
+    const delta = (a[index] ?? 0) - (b[index] ?? 0);
+    if (delta !== 0) return Math.sign(delta);
+  }
+  return 0;
+}
+
+function satisfiesEngine(version, range) {
+  return range.split("||").some((alternative) =>
+    alternative
+      .trim()
+      .split(/\s+/)
+      .every((comparator) => satisfiesComparator(version, comparator)),
+  );
+}
+
+function satisfiesComparator(version, comparator) {
+  const match = /^(\^|>=|>|<=|<|=)?(\d+(?:\.\d+){0,2})$/.exec(comparator);
+  assert.ok(match, `Unsupported Node engine comparator: ${comparator}`);
+  const [, operator = "=", boundary] = match;
+  const comparison = compareVersions(version, boundary);
+
+  switch (operator) {
+    case ">=":
+      return comparison >= 0;
+    case ">":
+      return comparison > 0;
+    case "<=":
+      return comparison <= 0;
+    case "<":
+      return comparison < 0;
+    case "=":
+      return comparison === 0;
+    case "^": {
+      const [major = 0, minor = 0, patch = 0] = boundary
+        .split(".")
+        .map(Number);
+      const upper =
+        major > 0
+          ? `${major + 1}.0.0`
+          : minor > 0
+            ? `0.${minor + 1}.0`
+            : `0.0.${patch + 1}`;
+      return comparison >= 0 && compareVersions(version, upper) < 0;
+    }
+    default:
+      return false;
+  }
 }
 
 function deterministicBytes(length) {

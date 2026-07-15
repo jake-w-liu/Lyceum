@@ -42,8 +42,8 @@ cross-compile installers from another platform.
 
 Install these on every platform:
 
-- **Node.js 20.19+ below 21, or 22.12+** and npm — frontend toolchain and the local
-  Tauri CLI. The repo pins Node `22.12.0` in `.nvmrc`.
+- **Node.js 22.13+** and npm — frontend toolchain and the local Tauri CLI. The
+  repo pins Node `22.13.0` in `.nvmrc`.
 - **Rust stable** with Cargo — Rust backend and native packaging.
 
 Then install the OS-specific Tauri dependencies.
@@ -66,7 +66,7 @@ curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | sh
 
 Install:
 
-- Node.js 20.19+ below 21, or 22.12+
+- Node.js 22.13+
 - Rust via `rustup`, using the **MSVC** toolchain
 - Microsoft C++ Build Tools with **Desktop development with C++**
 - Microsoft Edge WebView2 Runtime if it is not already installed

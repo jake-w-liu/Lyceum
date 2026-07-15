@@ -12,9 +12,11 @@ const pdfMocks = vi.hoisted(() => ({
   getDestination: vi.fn(),
   getPage: vi.fn(),
   getPageIndex: vi.fn(),
-  getTextContent: vi.fn(),
+  textContent: vi.fn(),
+  streamTextContent: vi.fn(),
   getViewport: vi.fn(),
   annotationLayerRender: vi.fn(),
+  annotationLayerDestroy: vi.fn(),
   pageCleanup: vi.fn(),
   pageRender: vi.fn(),
   taskCancel: vi.fn(),
@@ -40,7 +42,8 @@ vi.mock("pdfjs-dist", () => ({
     div: HTMLDivElement;
   }) {
     return {
-    render: (params: unknown) => pdfMocks.annotationLayerRender(params, div),
+      destroy: pdfMocks.annotationLayerDestroy,
+      render: (params: unknown) => pdfMocks.annotationLayerRender(params, div),
     };
   }),
   TextLayer: vi.fn().mockImplementation(function TextLayerMock() {
@@ -60,15 +63,16 @@ function mockPdfDocument(numPages: number) {
   const pageProxy = {
     cleanup: pdfMocks.pageCleanup,
     getAnnotations: pdfMocks.getAnnotations,
-    getTextContent: pdfMocks.getTextContent,
+    streamTextContent: pdfMocks.streamTextContent,
     getViewport: pdfMocks.getViewport,
     render: pdfMocks.pageRender,
   };
   pdfMocks.getPage.mockResolvedValue(pageProxy);
   pdfMocks.getDocument.mockReturnValue({
+    destroy: pdfMocks.destroy,
+    destroyed: false,
     promise: Promise.resolve({
       annotationStorage: {},
-      destroy: pdfMocks.destroy,
       getDestination: pdfMocks.getDestination,
       getPage: pdfMocks.getPage,
       getPageIndex: pdfMocks.getPageIndex,
@@ -85,7 +89,21 @@ beforeEach(() => {
   pdfMocks.getAnnotations.mockResolvedValue([]);
   pdfMocks.getDestination.mockResolvedValue(null);
   pdfMocks.getPageIndex.mockResolvedValue(0);
-  pdfMocks.getTextContent.mockResolvedValue({ items: [], styles: {} });
+  pdfMocks.textContent.mockResolvedValue({ items: [], styles: {} });
+  pdfMocks.streamTextContent.mockImplementation(
+    () =>
+      new ReadableStream({
+        async start(controller) {
+          try {
+            controller.enqueue(await pdfMocks.textContent());
+            controller.close();
+          } catch (error) {
+            controller.error(error);
+          }
+        },
+      }),
+  );
+  pdfMocks.destroy.mockResolvedValue(undefined);
   pdfMocks.getViewport.mockImplementation(({ scale }: { scale: number }) => {
     const viewport = {
       height: 240 * scale,
@@ -167,7 +185,7 @@ describe("PdfViewer", () => {
       return {
         cleanup: pdfMocks.pageCleanup,
         getAnnotations: pdfMocks.getAnnotations,
-        getTextContent: pdfMocks.getTextContent,
+        streamTextContent: pdfMocks.streamTextContent,
         getViewport,
         render: pdfMocks.pageRender,
       };
@@ -204,6 +222,8 @@ describe("PdfViewer", () => {
     unmount();
     expect(textLayer).not.toHaveClass("selecting");
     expect(textLayer.querySelector(".endOfContent")).toBeNull();
+    expect(pdfMocks.annotationLayerDestroy).toHaveBeenCalledOnce();
+    expect(pdfMocks.destroy).toHaveBeenCalledOnce();
   });
 
   it("keeps the restored page instead of deriving current page from the render cache", async () => {
@@ -259,9 +279,15 @@ describe("PdfViewer", () => {
       expect(canvas.height).toBe(480);
       expect(canvas.style.width).toBe("180px");
       expect(canvas.style.height).toBe("240px");
+      expect(pdfMocks.pageRender.mock.calls[0][0].canvas).toBe(canvas);
+      expect(pdfMocks.pageRender.mock.calls[0][0].canvasContext).toBeUndefined();
       expect(pdfMocks.pageRender.mock.calls[0][0].transform).toEqual([
         2, 0, 0, 2, 0, 0,
       ]);
+      expect(pdfMocks.streamTextContent).toHaveBeenCalledWith({
+        includeMarkedContent: true,
+        disableNormalization: true,
+      });
     } finally {
       if (originalDpr) {
         Object.defineProperty(window, "devicePixelRatio", originalDpr);
@@ -358,7 +384,7 @@ describe("PdfViewer", () => {
   });
 
   it("finds text and navigates matches via the find bar", async () => {
-    pdfMocks.getTextContent.mockResolvedValue({
+    pdfMocks.textContent.mockResolvedValue({
       items: [{ str: "the quick brown fox the" }],
       styles: {},
     });
@@ -390,7 +416,7 @@ describe("PdfViewer", () => {
   });
 
   it("reports no results for a query that is not present", async () => {
-    pdfMocks.getTextContent.mockResolvedValue({
+    pdfMocks.textContent.mockResolvedValue({
       items: [{ str: "lorem ipsum" }],
       styles: {},
     });
