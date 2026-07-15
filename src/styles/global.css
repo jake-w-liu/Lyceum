@@ -1152,9 +1152,17 @@ kbd {
   user-select: text;
 }
 
+/* Ensure no text-layer element paints a background over the canvas. Beamer
+   theorem/block backgrounds must render from the canvas, not from an opaque
+   text-layer span (e.g. marked-content wrappers with forced background). */
+.pdf-text-layer * {
+  background-color: transparent !important;
+}
+
 .pdf-text-layer :is(span, br) {
   position: absolute;
   color: transparent;
+  background: transparent;
   white-space: pre;
   cursor: text;
   transform-origin: 0 0;
@@ -1168,6 +1176,8 @@ kbd {
 .pdf-text-layer span.markedContent {
   top: 0;
   height: 0;
+  background: transparent;
+  pointer-events: none;
 }
 
 .pdf-text-layer span[role="img"] {
