@@ -230,6 +230,46 @@ describe("useWorkspaceFileWatcher", () => {
     expect(gitStatusMock).toHaveBeenCalledWith("/w");
   });
 
+  it("clears committed-file decorations after a git-only event", async () => {
+    useGitStore.setState({
+      ...initialGitData,
+      isRepo: true,
+      rootRepo: "/w",
+      repoRoots: ["/w"],
+      files: { "/w/committed.ts": "modified" },
+      fileScopes: { "/w/committed.ts": "workspace" },
+      folders: { "/w": "modified" },
+      folderScopes: { "/w": "workspace" },
+    });
+    gitStatusMock.mockResolvedValue({
+      isRepo: true,
+      rootRepo: "/w",
+      repoRoots: ["/w"],
+      files: {},
+      fileRepos: {},
+    });
+    renderHook(() => useWorkspaceFileWatcher());
+    await Promise.resolve();
+
+    act(() => {
+      getListener()?.({
+        event: "workspace:fs-change",
+        id: 1,
+        payload: {
+          root: "/w",
+          paths: [],
+          kind: "Modify(Data)",
+          gitChanged: true,
+        },
+      });
+      vi.advanceTimersByTime(150);
+    });
+    await flushPromises();
+
+    expect(useGitStore.getState().files).toEqual({});
+    expect(useGitStore.getState().folders).toEqual({});
+  });
+
   it("coalesces visible and git events into one tree refresh and one git refresh", async () => {
     renderHook(() => useWorkspaceFileWatcher());
     await Promise.resolve();

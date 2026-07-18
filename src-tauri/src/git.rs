@@ -158,6 +158,19 @@ fn repo_top_level(program: &OsString, cwd: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Canonical Git metadata directory for the repository containing `cwd`.
+/// This can live outside the opened workspace when the user opens only a
+/// repository subdirectory, or when the repository is a linked worktree.
+pub(crate) fn repo_git_dir(cwd: &Path) -> Option<PathBuf> {
+    let program = git_program();
+    let out = run_git(&program, cwd, &["rev-parse", "--absolute-git-dir"])?;
+    let trimmed = out.strip_suffix('\n').unwrap_or(&out);
+    if trimmed.is_empty() {
+        return None;
+    }
+    PathBuf::from(trimmed).canonicalize().ok()
+}
+
 fn has_git_marker(dir: &Path) -> bool {
     dir.join(".git").exists()
 }

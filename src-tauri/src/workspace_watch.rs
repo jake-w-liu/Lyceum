@@ -9,6 +9,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
+use crate::git;
 use crate::path_access::{self, PathAccessManager};
 use crate::workspace_paths::{
     path_resolves_into_workspace_trash, path_resolves_through_workspace_name,
@@ -166,13 +167,19 @@ pub fn watch_workspace(
     let event_root = root.clone();
     let watched_root = root_path.clone();
     let requested_root = PathBuf::from(&root);
+    let external_git_roots = external_git_metadata_roots(&root_path);
+    let event_git_roots = external_git_roots.clone();
     let app_for_events = app.clone();
     let label_for_events = label.clone();
     let watcher_result =
         notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
             let Ok(event) = event else { return };
-            let Some(event_paths) = workspace_event_paths(&watched_root, &requested_root, &event)
-            else {
+            let Some(event_paths) = workspace_event_paths_with_git_roots(
+                &watched_root,
+                &requested_root,
+                &event_git_roots,
+                &event,
+            ) else {
                 return;
             };
             let payload = WorkspaceFsEvent {
@@ -201,6 +208,16 @@ pub fn watch_workspace(
         remove_pending_watch(&state, &label, &pending_token);
         revoke_watch_access_if_unused(&app, &access, &state, &label, &root_path);
         return Err(format!("{}: {error}", root_path.display()));
+    }
+    for git_root in &external_git_roots {
+        if let Err(error) = watcher.watch(git_root, RecursiveMode::Recursive) {
+            remove_pending_watch(&state, &label, &pending_token);
+            revoke_watch_access_if_unused(&app, &access, &state, &label, &root_path);
+            return Err(format!(
+                "failed to watch Git metadata at {}: {error}",
+                git_root.display()
+            ));
+        }
     }
     let next = ActiveWatcher {
         root: root_path.clone(),
@@ -447,6 +464,17 @@ fn canonical_dir(path: &str) -> Result<PathBuf, String> {
     Ok(root)
 }
 
+/// Git metadata normally lives at `<workspace>/.git`, where the recursive
+/// workspace watch already sees it. A workspace can also be a subdirectory of
+/// a larger repository or a linked worktree; in those cases the owning Git
+/// directory is outside the visible tree and needs its own watch registration.
+fn external_git_metadata_roots(root: &Path) -> Vec<PathBuf> {
+    git::repo_git_dir(root)
+        .filter(|git_dir| !git_dir.starts_with(root))
+        .into_iter()
+        .collect()
+}
+
 fn event_path_for_requested_root(
     canonical_root: &Path,
     requested_root: &Path,
@@ -492,18 +520,38 @@ fn join_requested_root_text(requested_root: &Path, relative: &Path) -> String {
 // Only visible workspace mutations should drive Explorer refreshes. Read-only
 // filesystem activity and internal Git/trash bookkeeping can otherwise feed
 // back into the watcher and make the tree reload continuously.
+#[cfg(test)]
 fn workspace_event_paths(
     canonical_root: &Path,
     requested_root: &Path,
+    event: &notify::Event,
+) -> Option<WorkspaceEventPaths> {
+    workspace_event_paths_with_git_roots(canonical_root, requested_root, &[], event)
+}
+
+fn workspace_event_paths_with_git_roots(
+    canonical_root: &Path,
+    requested_root: &Path,
+    external_git_roots: &[PathBuf],
     event: &notify::Event,
 ) -> Option<WorkspaceEventPaths> {
     if ignores_workspace_event_kind(&event.kind) {
         return None;
     }
 
-    let mut git_changed = false;
+    // An empty native event does not identify which registered watch emitted
+    // it. If this watcher has an external Git root, conservatively refresh both
+    // the tree (the existing empty-event behavior) and Git decorations.
+    let mut git_changed = event.paths.is_empty() && !external_git_roots.is_empty();
     let mut paths = Vec::new();
     for path in &event.paths {
+        if external_git_roots
+            .iter()
+            .any(|git_root| path == git_root || path.starts_with(git_root))
+        {
+            git_changed = true;
+            continue;
+        }
         match internal_workspace_path_kind(canonical_root, requested_root, path) {
             Some(InternalWorkspacePath::Git) => {
                 git_changed = true;
@@ -619,9 +667,10 @@ fn path_contains_absent_ascii_case_alias(root: &Path, path: &Path, name: &str) -
 #[cfg(test)]
 mod tests {
     use super::{
-        claim_pending_watch, event_path_for_requested_root, pending_watch_is_current,
-        remove_pending_watch, watch_access_is_needed_in_state, with_unused_watch_access,
-        workspace_event_paths, PendingWatcher, WorkspaceEventPaths, WorkspaceWatchManager,
+        claim_pending_watch, event_path_for_requested_root, external_git_metadata_roots,
+        pending_watch_is_current, remove_pending_watch, watch_access_is_needed_in_state,
+        with_unused_watch_access, workspace_event_paths, workspace_event_paths_with_git_roots,
+        PendingWatcher, WorkspaceEventPaths, WorkspaceWatchManager,
     };
     use notify::event::{
         AccessKind, AccessMode, CreateKind, DataChange, EventKind, MetadataKind, ModifyKind,
@@ -870,6 +919,23 @@ mod tests {
     }
 
     #[test]
+    fn external_git_metadata_events_only_refresh_git_decorations() {
+        let external_git_root = PathBuf::from("/real/project/.git");
+        let event = Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Content)))
+            .add_path(external_git_root.join("index"));
+
+        assert_eq!(
+            workspace_event_paths_with_git_roots(
+                Path::new("/real/project/opened-subdirectory"),
+                Path::new("/link/project/opened-subdirectory"),
+                &[external_git_root],
+                &event,
+            ),
+            git_only()
+        );
+    }
+
+    #[test]
     fn trash_workspace_state_events_do_not_refresh_workspace() {
         let event = Event::new(EventKind::Create(CreateKind::File)).add_path(PathBuf::from(
             "/real/project/.lyceum-trash/batch-1/file.tex",
@@ -1067,6 +1133,88 @@ mod tests {
                 &event
             ),
             None
+        );
+    }
+
+    #[test]
+    #[ignore = "manual integration probe for native notify + git"]
+    fn native_git_commit_emits_a_git_decoration_refresh() {
+        use notify::{RecursiveMode, Watcher};
+        use std::process::Command;
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let tmp = tempfile::tempdir().expect("create temp git repository");
+        let repo_root = tmp.path();
+        let workspace_root = repo_root.join("opened-subdirectory");
+        std::fs::create_dir(&workspace_root).expect("create subdirectory workspace");
+        let canonical_workspace_root = workspace_root
+            .canonicalize()
+            .expect("canonicalize subdirectory workspace");
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(repo_root)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.name", "Lyceum Watch Probe"]);
+        git(&["config", "user.email", "watch-probe@invalid.example"]);
+        std::fs::write(workspace_root.join("tracked.txt"), b"initial\n")
+            .expect("write initial file");
+        git(&["add", "opened-subdirectory/tracked.txt"]);
+        git(&["commit", "-q", "-m", "initial"]);
+        std::fs::write(workspace_root.join("tracked.txt"), b"changed\n")
+            .expect("modify tracked file");
+
+        let (tx, rx) = mpsc::channel();
+        let external_git_roots = external_git_metadata_roots(&canonical_workspace_root);
+        assert_eq!(external_git_roots.len(), 1);
+        let mut watcher = notify::recommended_watcher(move |event| {
+            let _ = tx.send(event);
+        })
+        .expect("create native watcher");
+        watcher
+            .watch(&canonical_workspace_root, RecursiveMode::Recursive)
+            .expect("watch repository");
+        for git_root in &external_git_roots {
+            watcher
+                .watch(git_root, RecursiveMode::Recursive)
+                .expect("watch external Git metadata");
+        }
+
+        git(&["commit", "-q", "-am", "watched commit"]);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut saw_git_refresh = false;
+        while Instant::now() < deadline {
+            let timeout = deadline.saturating_duration_since(Instant::now());
+            let Ok(event) = rx.recv_timeout(timeout) else {
+                break;
+            };
+            let event = event.expect("native watcher event");
+            let classified = workspace_event_paths_with_git_roots(
+                &canonical_workspace_root,
+                &workspace_root,
+                &external_git_roots,
+                &event,
+            );
+            eprintln!("native event: {event:?}; classified: {classified:?}");
+            saw_git_refresh |= classified.is_some_and(|paths| paths.git_changed);
+            if saw_git_refresh {
+                break;
+            }
+        }
+
+        assert!(
+            saw_git_refresh,
+            "git commit produced no event classified as a Git decoration refresh"
         );
     }
 }
