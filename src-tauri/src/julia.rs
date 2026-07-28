@@ -622,10 +622,17 @@ pub(crate) fn validate_run_profile_programs(
     Ok(())
 }
 
+/// One event's worth of child output.
+///
+/// Every emitted Tauri event becomes a `webview.eval()` posted to the UI thread
+/// through an unbounded queue, so a payload per LINE let a chatty run (a build
+/// log, a noisy script) enqueue tens of thousands of script evaluations and wedge
+/// the whole window. Lines are grouped per read instead — the frontend already
+/// coalesces them into one store update per frame.
 #[derive(Clone, Serialize)]
-struct OutputLine {
-    stream: String,
-    line: String,
+pub(crate) struct OutputChunk {
+    pub(crate) stream: String,
+    pub(crate) lines: Vec<String>,
 }
 
 /// Incremental splitter that turns a child's raw output bytes into log lines.
@@ -705,38 +712,44 @@ impl LineSplitter {
     }
 }
 
-/// Read a child stream to EOF, emitting each line as an `OutputLine` event to
-/// the owning window only.
+/// Emit one batch of output lines to the owning window. Empty batches (a read
+/// that completed no line) emit nothing.
+pub(crate) fn emit_output_chunk(
+    app: &AppHandle,
+    label: &str,
+    event: &str,
+    stream_name: &str,
+    lines: Vec<String>,
+) {
+    if lines.is_empty() {
+        return;
+    }
+    let _ = app.emit_to(
+        label,
+        event,
+        OutputChunk {
+            stream: stream_name.into(),
+            lines,
+        },
+    );
+}
+
+/// Read a child stream to EOF, emitting each read's completed lines as one
+/// `OutputChunk` event to the owning window only. Batching per read (rather than
+/// per line) keeps a chatty child from flooding the UI thread with events, at no
+/// latency cost — the batch is emitted as soon as the read returns.
 fn pump<R: Read>(mut reader: R, app: &AppHandle, label: &str, event: &str, stream_name: &str) {
     let mut splitter = LineSplitter::default();
     let mut buf = [0u8; 4096];
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break,
-            Ok(n) => {
-                for line in splitter.feed(&buf[..n]) {
-                    let _ = app.emit_to(
-                        label,
-                        event,
-                        OutputLine {
-                            stream: stream_name.into(),
-                            line,
-                        },
-                    );
-                }
-            }
+            Ok(n) => emit_output_chunk(app, label, event, stream_name, splitter.feed(&buf[..n])),
             Err(_) => break,
         }
     }
     if let Some(line) = splitter.finish() {
-        let _ = app.emit_to(
-            label,
-            event,
-            OutputLine {
-                stream: stream_name.into(),
-                line,
-            },
-        );
+        emit_output_chunk(app, label, event, stream_name, vec![line]);
     }
 }
 

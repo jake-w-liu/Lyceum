@@ -132,14 +132,14 @@ export async function runLatexBuild(
     }
   };
   try {
-    offData = await listenScoped<{ stream: string; line: string }>(
+    offData = await listenScoped<{ stream: string; lines: string[] }>(
       `build:output:${id}`,
-      (event) =>
-        appendOutputBuffered(
-          event.payload.stream === "stderr"
-            ? `[stderr] ${event.payload.line}`
-            : event.payload.line,
-        ),
+      (event) => {
+        const stderr = event.payload.stream === "stderr";
+        for (const line of event.payload.lines) {
+          appendOutputBuffered(stderr ? `[stderr] ${line}` : line);
+        }
+      },
     );
     offExit = await listenScoped<number>(`build:exit:${id}`, (event) => {
       pendingExitCode = event.payload;

@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 
 use crate::julia::{self, RunManager};
 use crate::path_access::{self, PathAccessManager};
@@ -89,12 +89,6 @@ struct LatexBuildPlan {
     command: String,
     tool: String,
     source: String,
-}
-
-#[derive(Clone, Serialize)]
-struct OutputLine {
-    stream: String,
-    line: String,
 }
 
 /// Compile one concrete `.tex` file. The frontend must save the editor buffer
@@ -448,15 +442,11 @@ fn remove_stale_pdf(path: &Path) -> Result<bool, String> {
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// Emit a single banner line on the build's output channel. Uses the same
+/// batched `OutputChunk` payload the streamed child output does, so the frontend
+/// has one shape to handle.
 fn emit_output(app: &AppHandle, label: &str, event: &str, stream: &str, line: String) {
-    let _ = app.emit_to(
-        label,
-        event,
-        OutputLine {
-            stream: stream.to_string(),
-            line,
-        },
-    );
+    crate::julia::emit_output_chunk(app, label, event, stream, vec![line]);
 }
 
 fn no_latex_compiler_message() -> String {

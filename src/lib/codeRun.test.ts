@@ -17,7 +17,11 @@ import { runActiveCode, runInvocation } from "./codeRun";
 import { missingRuntimeMessage, runProfileForPath } from "./runProfiles";
 import type { EditorDoc } from "../state/editorStore";
 import { initialEditorData, useEditorStore } from "../state/editorStore";
-import { initialOutputData, useOutputStore } from "../state/outputStore";
+import {
+  flushOutputBuffer,
+  initialOutputData,
+  useOutputStore,
+} from "../state/outputStore";
 import { initialLayoutData, useLayoutStore } from "../state/layoutStore";
 import {
   DEFAULT_SETTINGS,
@@ -127,6 +131,41 @@ describe("runActiveCode", () => {
         }),
       }),
     );
+  });
+
+  it("appends every line of a batched output event, prefixing stderr", async () => {
+    // The backend groups a read's lines into one event (one UI-thread script
+    // evaluation) instead of emitting per line, so the listener must unpack the
+    // batch rather than read a single `line`.
+    const handlers = new Map<string, (event: { payload: unknown }) => void>();
+    listenMock.mockImplementation(
+      (event: string, handler: (e: { payload: unknown }) => void) => {
+        handlers.set(event, handler);
+        return Promise.resolve(() => {});
+      },
+    );
+    useWorkspaceStore.getState().openWorkspace("/w");
+    useEditorStore
+      .getState()
+      .openDoc({ path: "/w/a.jl", content: "println(1)", language: "julia" });
+    await runActiveCode();
+
+    const outputKey = Array.from(handlers.keys()).find((key) =>
+      key.startsWith("run:output:"),
+    );
+    expect(outputKey).toBeDefined();
+    handlers.get(outputKey!)!({
+      payload: { stream: "stdout", lines: ["one", "two"] },
+    });
+    handlers.get(outputKey!)!({ payload: { stream: "stderr", lines: ["boom"] } });
+    flushOutputBuffer();
+
+    // The first line is the "$ julia a.jl" banner runActiveCode prints itself.
+    expect(useOutputStore.getState().lines.slice(1)).toEqual([
+      "one",
+      "two",
+      "[stderr] boom",
+    ]);
   });
 
   it("runs Python selection as code without saving the file", async () => {

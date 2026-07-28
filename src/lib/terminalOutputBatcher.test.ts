@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { createOutputBatcher } from "./terminalOutputBatcher";
 
-// Deterministic stand-in for requestAnimationFrame: queues callbacks and runs
-// them only when the test calls runFrame(), so flush timing is fully controlled.
+// Deterministic stand-in for requestAnimationFrame + setTimeout: queues
+// callbacks and runs them only when the test asks, so flush timing is fully
+// controlled. Frames and timers are tracked separately so a test can simulate a
+// document that is not being rendered (frames never run, timers still do).
 function fakeScheduler() {
   const frames = new Map<number, () => void>();
+  const timers = new Map<number, { cb: () => void; ms: number }>();
   let nextHandle = 1;
   const cancelled: number[] = [];
+  const cancelledTimers: number[] = [];
   return {
     requestFrame: (cb: () => void) => {
       const handle = nextHandle++;
@@ -17,6 +21,15 @@ function fakeScheduler() {
       cancelled.push(handle);
       frames.delete(handle);
     },
+    requestTimer: (cb: () => void, ms: number) => {
+      const handle = nextHandle++;
+      timers.set(handle, { cb, ms });
+      return handle;
+    },
+    cancelTimer: (handle: number) => {
+      cancelledTimers.push(handle);
+      timers.delete(handle);
+    },
     runFrame: () => {
       // Run exactly one scheduled callback (the batcher only ever schedules one
       // at a time), mirroring a single animation frame.
@@ -26,7 +39,19 @@ function fakeScheduler() {
       frames.delete(handle);
       cb();
     },
+    runTimer: () => {
+      const [handle] = timers.keys();
+      if (handle === undefined) return;
+      const entry = timers.get(handle)!;
+      timers.delete(handle);
+      entry.cb();
+    },
+    timerDelay: () => {
+      const [entry] = timers.values();
+      return entry?.ms;
+    },
     pending: () => frames.size,
+    pendingTimers: () => timers.size,
     cancelledCount: () => cancelled.length,
   };
 }
@@ -114,6 +139,7 @@ describe("createOutputBatcher", () => {
     b.flushNow();
     expect(Array.from(writes[0])).toEqual([1, 2]);
     expect(sched.pending()).toBe(0); // frame was cancelled
+    expect(sched.pendingTimers()).toBe(0); // and so was the fallback
     expect(sched.cancelledCount()).toBe(1);
   });
 
@@ -142,6 +168,7 @@ describe("createOutputBatcher", () => {
     const b = createOutputBatcher({ write: () => {}, ...sched });
     b.push(new Uint8Array(0));
     expect(sched.pending()).toBe(0);
+    expect(sched.pendingTimers()).toBe(0);
   });
 
   it("dispose cancels a pending frame and drops buffered output", () => {
@@ -151,7 +178,9 @@ describe("createOutputBatcher", () => {
     b.push(bytes(1, 2));
     b.dispose();
     expect(sched.pending()).toBe(0);
+    expect(sched.pendingTimers()).toBe(0);
     sched.runFrame(); // no-op
+    sched.runTimer(); // no-op
     expect(writes).toHaveLength(0);
   });
 
@@ -162,7 +191,71 @@ describe("createOutputBatcher", () => {
     b.dispose();
     b.push(bytes(1));
     expect(sched.pending()).toBe(0);
+    expect(sched.pendingTimers()).toBe(0);
     b.flushNow();
     expect(writes).toHaveLength(0);
+  });
+
+  // --- no-frames fallback (window minimised / occluded / on another Space) ---
+
+  it("arms a slower fallback alongside every frame", () => {
+    const sched = fakeScheduler();
+    const b = createOutputBatcher({
+      write: () => {},
+      idleFlushDelayMs: 250,
+      ...sched,
+    });
+    b.push(bytes(1));
+    expect(sched.pending()).toBe(1);
+    expect(sched.pendingTimers()).toBe(1);
+    expect(sched.timerDelay()).toBe(250);
+  });
+
+  it("drains the whole backlog from the fallback when frames never run", () => {
+    // The document is not being rendered, so requestAnimationFrame callbacks are
+    // never invoked. Without the fallback the backlog grew for as long as the
+    // window stayed away and landed in one stalling write on return.
+    const writes: Uint8Array[] = [];
+    const sched = fakeScheduler();
+    const b = createOutputBatcher({
+      write: (x) => writes.push(x),
+      maxFlushBytes: 4,
+      ...sched,
+    });
+    for (let i = 0; i < 100; i += 1) b.push(bytes(i, i));
+
+    sched.runTimer();
+
+    expect(writes).toHaveLength(1);
+    expect(writes[0].length).toBe(200); // the byte cap does not apply off-frame
+    expect(sched.pending()).toBe(0); // the losing frame was cancelled
+    expect(sched.pendingTimers()).toBe(0);
+  });
+
+  it("a frame cancels the fallback so output is never written twice", () => {
+    const writes: Uint8Array[] = [];
+    const sched = fakeScheduler();
+    const b = createOutputBatcher({ write: (x) => writes.push(x), ...sched });
+    b.push(bytes(1, 2));
+
+    sched.runFrame();
+    sched.runTimer(); // the fallback was cancelled by the frame; this is a no-op
+
+    expect(writes).toHaveLength(1);
+    expect(Array.from(writes[0])).toEqual([1, 2]);
+  });
+
+  it("keeps flushing on later fallbacks while frames stay stopped", () => {
+    const writes: Uint8Array[] = [];
+    const sched = fakeScheduler();
+    const b = createOutputBatcher({ write: (x) => writes.push(x), ...sched });
+
+    b.push(bytes(1));
+    sched.runTimer();
+    b.push(bytes(2));
+    expect(sched.pendingTimers()).toBe(1); // re-armed for the next chunk
+    sched.runTimer();
+
+    expect(Array.from(concat(writes))).toEqual([1, 2]);
   });
 });

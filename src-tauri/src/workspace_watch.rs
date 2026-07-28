@@ -46,8 +46,11 @@ struct PendingWatcher {
 
 impl WorkspaceWatchManager {
     /// Drop all active watchers (called on app exit). Dropping a
-    /// `RecommendedWatcher` stops its notify worker threads, mirroring the other
-    /// managers' `shutdown_all()` so nothing emits during teardown.
+    /// `RecommendedWatcher` stops its notify worker threads and releases the
+    /// sender feeding its coalescer, which then ends its own current merge
+    /// window and exits. A coalescer mid-window may still emit once afterwards;
+    /// that is a no-op, because emitting onto a closing runtime just fails and
+    /// is discarded.
     pub fn shutdown_all(&self) {
         let removed = match self.state.lock() {
             Ok(mut state) => {
@@ -100,6 +103,107 @@ pub struct WorkspaceFsEvent {
 struct WorkspaceEventPaths {
     paths: Vec<String>,
     git_changed: bool,
+}
+
+/// How long the coalescer keeps merging filesystem notifications before it
+/// emits. Shorter than the frontend's own 150 ms refresh debounce, so merging
+/// adds no perceptible delay to the Explorer/Git refresh it feeds.
+const FS_EVENT_COALESCE_WINDOW: std::time::Duration = std::time::Duration::from_millis(100);
+/// Stop merging once a batch carries this many paths and emit what we have. The
+/// rest of the burst simply lands in the next batch — nothing is dropped.
+const MAX_COALESCED_PATHS: usize = 2048;
+/// Queue depth between the notify worker and the coalescer. A full queue blocks
+/// only that watcher's own worker thread, which is correct backpressure: the
+/// producer is the filesystem, and the UI thread is never involved.
+const FS_EVENT_QUEUE_CAPACITY: usize = 4096;
+/// `kind` on a merged event. The field is part of the published payload but the
+/// frontend keys off `paths`/`gitChanged` only, so a burst of mixed kinds needs
+/// no per-kind fidelity.
+const COALESCED_EVENT_KIND: &str = "Coalesced";
+
+/// Merge every notification that arrives within `window` into one payload,
+/// de-duplicating paths and OR-ing `git_changed`.
+///
+/// This is behaviour-preserving for the frontend: it refreshes the tree when a
+/// batch has any path (or is a pathless native event) and refreshes Git when any
+/// merged event touched Git metadata — exactly the union of what the individual
+/// events would have produced.
+fn coalesce_fs_events(
+    rx: &std::sync::mpsc::Receiver<WorkspaceEventPaths>,
+    first: WorkspaceEventPaths,
+    window: std::time::Duration,
+    max_paths: usize,
+) -> WorkspaceEventPaths {
+    fn absorb(incoming: Vec<String>, seen: &mut HashSet<String>, paths: &mut Vec<String>) {
+        for path in incoming {
+            if seen.insert(path.clone()) {
+                paths.push(path);
+            }
+        }
+    }
+
+    let mut git_changed = first.git_changed;
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut paths: Vec<String> = Vec::new();
+    absorb(first.paths, &mut seen, &mut paths);
+
+    let deadline = std::time::Instant::now() + window;
+    // The cap is checked per event, not per path, so an event that is accepted
+    // always contributes all of its paths.
+    while paths.len() < max_paths {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        match rx.recv_timeout(deadline - now) {
+            Ok(event) => {
+                git_changed |= event.git_changed;
+                absorb(event.paths, &mut seen, &mut paths);
+            }
+            // Timeout: the filesystem went quiet, emit now. Disconnected: the
+            // watcher is gone, emit the tail and let the caller's `recv` end the
+            // coalescer thread.
+            Err(_) => break,
+        }
+    }
+    WorkspaceEventPaths { paths, git_changed }
+}
+
+/// Start the coalescer for one watcher and return the sender its notify callback
+/// writes to. The thread ends on its own when the watcher (and therefore the
+/// closure holding the sender) is dropped, so it needs no separate teardown.
+fn spawn_fs_event_coalescer(
+    app: AppHandle,
+    label: String,
+    root: String,
+) -> std::sync::mpsc::SyncSender<WorkspaceEventPaths> {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<WorkspaceEventPaths>(FS_EVENT_QUEUE_CAPACITY);
+    let label_for_error = label.clone();
+    let spawned = std::thread::Builder::new()
+        .name("lyceum-fs-coalesce".to_string())
+        .spawn(move || {
+            while let Ok(first) = rx.recv() {
+                let merged =
+                    coalesce_fs_events(&rx, first, FS_EVENT_COALESCE_WINDOW, MAX_COALESCED_PATHS);
+                let _ = app.emit_to(
+                    label.as_str(),
+                    WORKSPACE_FS_CHANGE_EVENT,
+                    WorkspaceFsEvent {
+                        root: root.clone(),
+                        paths: merged.paths,
+                        kind: COALESCED_EVENT_KIND.to_string(),
+                        git_changed: merged.git_changed,
+                    },
+                );
+            }
+        });
+    if spawned.is_err() {
+        // Thread creation failed (OS limit). Returning the sender anyway is safe:
+        // with no receiver every `send` fails immediately, so the watcher runs
+        // without change notifications rather than blocking its notify worker.
+        eprintln!("failed to start workspace fs-event coalescer for {label_for_error}");
+    }
+    tx
 }
 
 #[tauri::command]
@@ -164,13 +268,17 @@ pub fn watch_workspace(
         return Ok(());
     }
 
-    let event_root = root.clone();
     let watched_root = root_path.clone();
     let requested_root = PathBuf::from(&root);
     let external_git_roots = external_git_metadata_roots(&root_path);
     let event_git_roots = external_git_roots.clone();
-    let app_for_events = app.clone();
-    let label_for_events = label.clone();
+    // Hand filtered events to a coalescing thread instead of emitting straight
+    // from the notify callback. Every Tauri event is a `webview.eval()` posted
+    // to the UI thread through an unbounded queue, so one event per filesystem
+    // notification let a build (or an npm install) inside the workspace enqueue
+    // thousands of script evaluations and freeze the window. The frontend
+    // already debounces these by 150 ms, so merging them costs it nothing.
+    let events_tx = spawn_fs_event_coalescer(app.clone(), label.clone(), root.clone());
     let watcher_result =
         notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
             let Ok(event) = event else { return };
@@ -182,17 +290,9 @@ pub fn watch_workspace(
             ) else {
                 return;
             };
-            let payload = WorkspaceFsEvent {
-                root: event_root.clone(),
-                paths: event_paths.paths,
-                kind: format!("{:?}", event.kind),
-                git_changed: event_paths.git_changed,
-            };
-            let _ = app_for_events.emit_to(
-                label_for_events.as_str(),
-                WORKSPACE_FS_CHANGE_EVENT,
-                payload,
-            );
+            // A full queue means the coalescer is still merging a burst; the
+            // send blocks only that watcher's own notify worker, never the UI.
+            let _ = events_tx.send(event_paths);
         });
     let mut watcher = match watcher_result {
         Ok(watcher) => watcher,
@@ -667,10 +767,11 @@ fn path_contains_absent_ascii_case_alias(root: &Path, path: &Path, name: &str) -
 #[cfg(test)]
 mod tests {
     use super::{
-        claim_pending_watch, event_path_for_requested_root, external_git_metadata_roots,
-        pending_watch_is_current, remove_pending_watch, watch_access_is_needed_in_state,
-        with_unused_watch_access, workspace_event_paths, workspace_event_paths_with_git_roots,
-        PendingWatcher, WorkspaceEventPaths, WorkspaceWatchManager,
+        claim_pending_watch, coalesce_fs_events, event_path_for_requested_root,
+        external_git_metadata_roots, pending_watch_is_current, remove_pending_watch,
+        watch_access_is_needed_in_state, with_unused_watch_access, workspace_event_paths,
+        workspace_event_paths_with_git_roots, PendingWatcher, WorkspaceEventPaths,
+        WorkspaceWatchManager, FS_EVENT_QUEUE_CAPACITY,
     };
     use notify::event::{
         AccessKind, AccessMode, CreateKind, DataChange, EventKind, MetadataKind, ModifyKind,
@@ -679,6 +780,122 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+
+    fn fs_event_channel() -> (
+        std::sync::mpsc::SyncSender<WorkspaceEventPaths>,
+        std::sync::mpsc::Receiver<WorkspaceEventPaths>,
+    ) {
+        std::sync::mpsc::sync_channel(FS_EVENT_QUEUE_CAPACITY)
+    }
+
+    fn event(paths: &[&str], git_changed: bool) -> WorkspaceEventPaths {
+        WorkspaceEventPaths {
+            paths: paths.iter().map(|path| (*path).to_string()).collect(),
+            git_changed,
+        }
+    }
+
+    #[test]
+    fn coalesce_fs_events_merges_a_burst_into_one_payload() {
+        // A build touching many files used to emit one Tauri event (one UI-thread
+        // script evaluation) per notification.
+        let (sender, receiver) = fs_event_channel();
+        for index in 0..500 {
+            sender
+                .try_send(event(&[&format!("/w/out/{index}.o")], false))
+                .expect("queue capacity");
+        }
+        sender.try_send(event(&[], true)).expect("queue capacity");
+
+        let first = receiver.recv().expect("first event");
+        let merged = coalesce_fs_events(
+            &receiver,
+            first,
+            std::time::Duration::from_millis(500),
+            2048,
+        );
+
+        assert_eq!(merged.paths.len(), 500);
+        assert!(merged.git_changed, "a merged Git event still refreshes Git");
+        assert_eq!(merged.paths[0], "/w/out/0.o");
+    }
+
+    #[test]
+    fn coalesce_fs_events_deduplicates_repeated_paths() {
+        let (sender, receiver) = fs_event_channel();
+        for _ in 0..10 {
+            sender
+                .try_send(event(&["/w/main.tex"], false))
+                .expect("queue capacity");
+        }
+
+        let first = receiver.recv().expect("first event");
+        let merged = coalesce_fs_events(
+            &receiver,
+            first,
+            std::time::Duration::from_millis(200),
+            2048,
+        );
+
+        assert_eq!(merged.paths, vec!["/w/main.tex".to_string()]);
+    }
+
+    #[test]
+    fn coalesce_fs_events_keeps_whole_events_when_it_hits_the_cap() {
+        // The cap is checked per event, so an accepted event always contributes
+        // all of its paths and the remainder of the burst lands in the next batch.
+        let (sender, receiver) = fs_event_channel();
+        for index in 0..4 {
+            sender
+                .try_send(event(
+                    &[&format!("/w/a{index}"), &format!("/w/b{index}")],
+                    false,
+                ))
+                .expect("queue capacity");
+        }
+
+        let first = receiver.recv().expect("first event");
+        let merged = coalesce_fs_events(&receiver, first, std::time::Duration::from_millis(200), 3);
+
+        assert_eq!(
+            merged.paths.len(),
+            4,
+            "stops after the event that hit the cap"
+        );
+        assert_eq!(receiver.try_recv().map(|e| e.paths.len()).ok(), Some(2));
+    }
+
+    #[test]
+    fn coalesce_fs_events_returns_promptly_once_the_watcher_is_gone() {
+        let (sender, receiver) = fs_event_channel();
+        sender
+            .try_send(event(&["/w/only"], false))
+            .expect("queue capacity");
+        drop(sender);
+
+        let first = receiver.recv().expect("first event");
+        let started = std::time::Instant::now();
+        let merged = coalesce_fs_events(&receiver, first, std::time::Duration::from_secs(30), 2048);
+
+        assert_eq!(merged.paths, vec!["/w/only".to_string()]);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn coalesce_fs_events_preserves_a_pathless_native_event() {
+        // An empty native event still means "refresh the tree"; merging must not
+        // turn it into something the frontend ignores.
+        let (sender, receiver) = fs_event_channel();
+        sender.try_send(event(&[], false)).expect("queue capacity");
+        drop(sender);
+
+        let first = receiver.recv().expect("first event");
+        let merged =
+            coalesce_fs_events(&receiver, first, std::time::Duration::from_millis(50), 2048);
+
+        assert!(merged.paths.is_empty());
+        assert!(!merged.git_changed);
+    }
 
     fn visible(paths: &[&str]) -> Option<WorkspaceEventPaths> {
         Some(WorkspaceEventPaths {

@@ -120,14 +120,20 @@ describe("runLatexBuild", () => {
       key.startsWith("build:output:"),
     );
     expect(outputKey).toBeDefined();
+    // The backend groups a read's lines into one event (one UI-thread script
+    // evaluation) rather than emitting per line.
     handlers.get(outputKey!)!({
-      payload: { stream: "stdout", line: "[latex] removed stale /w/main.pdf" },
+      payload: {
+        stream: "stdout",
+        lines: ["[latex] removed stale /w/main.pdf", "[latex] compiling"],
+      },
     });
     // Streamed output is batched (rAF); flush so we can assert it synchronously.
     flushOutputBuffer();
     expect(useOutputStore.getState().lines).toContain(
       "[latex] removed stale /w/main.pdf",
     );
+    expect(useOutputStore.getState().lines).toContain("[latex] compiling");
     const refreshAfterRemove = useTreeStore.getState().refreshNonce;
     expect(refreshAfterRemove).toBe(1);
 

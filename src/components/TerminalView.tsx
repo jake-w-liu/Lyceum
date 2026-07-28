@@ -24,7 +24,10 @@ import { getActiveDoc, useEditorStore } from "../state/editorStore";
 import { useTerminalStore } from "../state/terminalStore";
 import { resolveTerminalCwd } from "../lib/terminalCwd";
 import { createOutputBatcher } from "../lib/terminalOutputBatcher";
-import { terminalKeyOverride } from "../lib/terminalKeys";
+import {
+  suppressesNativeTextInsertion,
+  terminalKeyOverride,
+} from "../lib/terminalKeys";
 import { isMac } from "../hooks/useLayoutKeybindings";
 
 export interface TerminalViewProps {
@@ -96,10 +99,15 @@ export function TerminalView({
     // Coalesce PTY output into one write per animation frame so a backlog (e.g.
     // catching up after the screen unlocks, or a verbose command) doesn't make
     // xterm parse thousands of tiny chunks and stall the UI. See terminalOutputBatcher.
+    // The timer is the fallback for when animation frames stop entirely (window
+    // minimised/occluded/on another Space): without it the backlog grew for the
+    // whole time the window was away and landed as one stalling write on return.
     const outputBatcher = createOutputBatcher({
       write: (bytes) => term.write(bytes),
       requestFrame: (cb) => requestAnimationFrame(cb),
       cancelFrame: (handle) => cancelAnimationFrame(handle),
+      requestTimer: (cb, ms) => window.setTimeout(cb, ms),
+      cancelTimer: (handle) => window.clearTimeout(handle),
     });
     // Buffer keystrokes typed before the PTY exists, then flush on ready — so
     // the first characters a user types into a brand-new terminal aren't dropped
@@ -111,6 +119,29 @@ export function TerminalView({
       else pending.push(data);
     };
 
+    // xterm's hidden helper textarea exists for IME composition, but it also
+    // silently accumulates every character the WebView inserts by default —
+    // pasted text (xterm's paste handler never calls preventDefault) and
+    // Shift-typed capitals (the one printable keydown path xterm returns from
+    // without cancelling). xterm's composition helper later re-reads that
+    // textarea by offset, so the residue can be sent to the shell a second time.
+    // Everything below keeps it empty except while an IME is really composing.
+    const textarea = term.textarea;
+    let composing = false;
+    const onCompositionStart = () => {
+      composing = true;
+    };
+    const onCompositionEnd = () => {
+      composing = false;
+    };
+    // Runs after xterm's own paste listener (same element, so its
+    // stopPropagation does not hide the event from us): xterm has already sent
+    // the text, we only suppress the native re-insertion.
+    const onPaste = (event: Event) => event.preventDefault();
+    textarea?.addEventListener("compositionstart", onCompositionStart);
+    textarea?.addEventListener("compositionend", onCompositionEnd);
+    textarea?.addEventListener("paste", onPaste);
+
     // Clipboard: copy the selection (Cmd/Ctrl+C with a selection). Paste is left
     // to xterm's native `paste` event so Cmd/Ctrl+V inserts exactly once and does
     // not trip the macOS clipboard-permission prompt. Ctrl+C with no selection
@@ -118,6 +149,14 @@ export function TerminalView({
     // some WebView/browser key events can be mis-mapped before xterm turns them
     // into terminal bytes.
     term.attachCustomKeyEventHandler((e) => {
+      // Not ours to handle — xterm sends the character itself from `keypress`,
+      // regardless of defaultPrevented — but the native insertion into the
+      // helper textarea must not happen. Never while composing: there the
+      // textarea IS the input path and xterm reads the composed text back out.
+      if (suppressesNativeTextInsertion(e) && !composing) {
+        e.preventDefault();
+        return true;
+      }
       const override = terminalKeyOverride(e, isMac(), term.hasSelection());
       if (!override) return true;
       switch (override.type) {
@@ -128,6 +167,13 @@ export function TerminalView({
           navigator.clipboard?.writeText(term.getSelection()).catch(() => {});
           break;
       }
+      // Returning false makes xterm bail out of its keydown handler *before* the
+      // point where it would cancel the event, so a key we fully handle has to be
+      // cancelled here — otherwise the WebView still runs the native default (a
+      // second clipboard write for Cmd+C, an edit of the helper textarea for
+      // Backspace) and the chord still reaches window-level keybinding handlers.
+      e.preventDefault();
+      e.stopPropagation();
       return false;
     });
 
@@ -209,6 +255,10 @@ export function TerminalView({
         offData?.();
         offExit?.();
         useTerminalStore.getState().clearBackendPtyId(id, ptyId);
+        // There is no PTY to flush into, so stop buffering: `pending` would
+        // otherwise grow with every keystroke for the life of the dead tab.
+        ready = true;
+        pending.length = 0;
         term.write(`\r\nfailed to start terminal: ${String(e)}\r\n`);
       }
     })();
@@ -241,6 +291,9 @@ export function TerminalView({
       disposed = true;
       observer.disconnect();
       unsubTheme();
+      textarea?.removeEventListener("compositionstart", onCompositionStart);
+      textarea?.removeEventListener("compositionend", onCompositionEnd);
+      textarea?.removeEventListener("paste", onPaste);
       dataDisp.dispose();
       unlistens.forEach((off) => off());
       // Cancel any pending batched flush before disposing the terminal so a

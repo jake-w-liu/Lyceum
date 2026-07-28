@@ -37,6 +37,29 @@ export function terminalKeyOverride(
   return null;
 }
 
+/**
+ * Whether the browser's own default action for this key event must be
+ * suppressed even though xterm keeps handling the event.
+ *
+ * xterm forwards printable characters to the PTY from its `keypress` handler,
+ * but only cancels the DOM event when the (deprecated, default-off)
+ * `cancelEvents` option is set. With the default, WebKit still runs the default
+ * action and inserts the character into xterm's hidden helper textarea. The
+ * uncancelled path is exactly `A`-`Z` — the capitals produced with Shift — since
+ * xterm's keydown handler returns early for those (its macOS caps-lock/IME
+ * workaround) and only lowercase keys reach the branch that cancels.
+ *
+ * That leftover text is never cleared, and xterm's IME composition helper later
+ * re-reads the textarea by offset (`value.substring(compositionStart)`) or in
+ * full, so residue can be transmitted to the shell a second time. Suppressing
+ * the default insertion keeps the helper textarea empty except while an IME is
+ * actually composing; the character still reaches the PTY because xterm sends it
+ * itself, independently of `defaultPrevented`.
+ */
+export function suppressesNativeTextInsertion(event: Pick<KeyLike, "type">): boolean {
+  return event.type === "keypress";
+}
+
 function isBackspace(event: KeyLike): boolean {
   return (
     event.key === "Backspace" ||

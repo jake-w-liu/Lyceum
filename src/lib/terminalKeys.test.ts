@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { terminalKeyOverride } from "./terminalKeys";
+import {
+  suppressesNativeTextInsertion,
+  terminalKeyOverride,
+} from "./terminalKeys";
 
 const ev = (init: Partial<KeyboardEvent>) =>
   ({
@@ -46,5 +49,36 @@ describe("terminalKeyOverride", () => {
   it("does not override paste (xterm pastes natively, avoiding double-paste)", () => {
     expect(terminalKeyOverride(ev({ key: "v", metaKey: true }), true, false)).toBeNull();
     expect(terminalKeyOverride(ev({ key: "v", ctrlKey: true }), false, false)).toBeNull();
+  });
+
+  it("ignores non-keydown events so keypress/keyup never re-send a key", () => {
+    expect(
+      terminalKeyOverride(ev({ type: "keypress", key: "Backspace" }), true, false),
+    ).toBeNull();
+    expect(
+      terminalKeyOverride(ev({ type: "keyup", key: "c", metaKey: true }), true, true),
+    ).toBeNull();
+  });
+});
+
+describe("suppressesNativeTextInsertion", () => {
+  it("suppresses the default insertion on keypress", () => {
+    // Shift+letter is the one printable path xterm leaves uncancelled, so its
+    // characters would otherwise pile up in xterm's hidden textarea and can be
+    // re-sent by the IME composition helper.
+    expect(suppressesNativeTextInsertion(ev({ type: "keypress", key: "A" }))).toBe(
+      true,
+    );
+  });
+
+  it("leaves keydown and keyup alone", () => {
+    // keydown must keep its default so app-level chords and xterm's own
+    // cancelling logic behave exactly as before.
+    expect(suppressesNativeTextInsertion(ev({ type: "keydown", key: "A" }))).toBe(
+      false,
+    );
+    expect(suppressesNativeTextInsertion(ev({ type: "keyup", key: "A" }))).toBe(
+      false,
+    );
   });
 });

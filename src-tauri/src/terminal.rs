@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
@@ -24,6 +24,11 @@ static SESSION_GEN: AtomicU64 = AtomicU64::new(0);
 /// terminal before applying backpressure to the PTY (plus one in-flight batch).
 const OUTPUT_QUEUE_CAPACITY: usize = 64;
 
+/// Largest payload the emitter thread will coalesce into one Tauri event.
+const MAX_OUTPUT_BATCH: usize = 32 * 1024;
+/// How long the emitter waits for more output before flushing a partial batch.
+const MAX_OUTPUT_DELAY: std::time::Duration = std::time::Duration::from_millis(5);
+
 fn terminal_output_channel() -> (
     std::sync::mpsc::SyncSender<Vec<u8>>,
     std::sync::mpsc::Receiver<Vec<u8>>,
@@ -31,12 +36,83 @@ fn terminal_output_channel() -> (
     std::sync::mpsc::sync_channel(OUTPUT_QUEUE_CAPACITY)
 }
 
+/// At most this many pending writes may queue for a session's writer thread.
+/// One entry is one `terminal_write` (a keystroke, or a whole paste however
+/// large), so this only fills when a wedged child has ignored a thousand
+/// separate inputs.
+const INPUT_QUEUE_CAPACITY: usize = 1024;
+
+fn terminal_input_channel() -> (
+    std::sync::mpsc::SyncSender<Vec<u8>>,
+    std::sync::mpsc::Receiver<Vec<u8>>,
+) {
+    std::sync::mpsc::sync_channel(INPUT_QUEUE_CAPACITY)
+}
+
+/// Own the PTY writer on a dedicated thread and drain the input queue in order.
+/// Exits when the session (and with it the sender) is dropped, or when the PTY
+/// write fails because the shell is gone.
+fn spawn_terminal_writer(
+    mut writer: Box<dyn Write + Send>,
+    rx: std::sync::mpsc::Receiver<Vec<u8>>,
+) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name("lyceum-terminal-write".to_string())
+        .spawn(move || {
+            while let Ok(bytes) = rx.recv() {
+                if writer.write_all(&bytes).is_err() || writer.flush().is_err() {
+                    break;
+                }
+            }
+        })
+        .map(|_| ())
+}
+
+/// Coalesce reader chunks into one event payload: start from `first`, then keep
+/// WAITING for more until the batch reaches `max_batch` bytes or `max_delay`
+/// elapses.
+///
+/// Waiting (rather than draining only what is already queued) is the whole
+/// point. The reader hands over one 4 KiB chunk per `read`, and every emitted
+/// event becomes a `webview.eval()` posted to the UI thread's event loop —
+/// which is unbounded and has no backpressure. A drain-only loop returned as
+/// soon as the queue was momentarily empty, so heavy output produced one
+/// main-thread script evaluation per 4 KiB instead of per 32 KiB.
+fn collect_batch(
+    rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+    first: Vec<u8>,
+    max_batch: usize,
+    max_delay: std::time::Duration,
+) -> Vec<u8> {
+    let mut batch = first;
+    let deadline = std::time::Instant::now() + max_delay;
+    while batch.len() < max_batch {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        match rx.recv_timeout(deadline - now) {
+            Ok(chunk) => batch.extend_from_slice(&chunk),
+            // Timeout: the shell went quiet inside the window, so emit what we
+            // have (this is the interactive path — at most `max_delay` of added
+            // echo latency). Disconnected: the reader is gone; emit the tail and
+            // let the outer `recv` end the emitter thread.
+            Err(_) => break,
+        }
+    }
+    batch
+}
+
 struct Session {
     master: Box<dyn MasterPty + Send>,
-    // The writer lives behind its own lock so terminal_write never holds the
-    // manager map lock across blocking PTY I/O (a full PTY buffer would
-    // otherwise deadlock every terminal command). Mirrors lsp.rs's stdin.
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    // Input is handed to a per-session writer thread rather than written inline.
+    // Tauri runs non-async commands on the thread that receives the IPC message
+    // — the UI thread on macOS — so writing to the PTY from terminal_write meant
+    // a child that had stopped draining its stdin (a long command running while
+    // the user pastes) blocked the whole window until it finished. A single
+    // consumer also keeps writes in arrival order, which a threadpool command
+    // would not.
+    input: std::sync::mpsc::SyncSender<Vec<u8>>,
     // The child handle lives in the session (not the reader thread) so whoever
     // wins the gen-guarded map removal — the reader on EOF, OR a closer — owns
     // the reap. All kills go through this one owned handle (child.kill() escalates
@@ -221,7 +297,14 @@ pub fn terminal_create(
             return Err(e.to_string());
         }
     };
-    let writer = Arc::new(Mutex::new(writer));
+    // The writer thread must exist before the session does; without it every
+    // keystroke would be queued to a receiver nobody reads.
+    let (input_tx, input_rx) = terminal_input_channel();
+    if let Err(e) = spawn_terminal_writer(writer, input_rx) {
+        let _ = killer.kill();
+        let _ = child.wait();
+        return Err(format!("failed to start terminal writer: {e}"));
+    }
 
     let gen = SESSION_GEN.fetch_add(1, Ordering::Relaxed);
     let label = window.label().to_string();
@@ -243,7 +326,7 @@ pub fn terminal_create(
             key.clone(),
             Session {
                 master: pair.master,
-                writer,
+                input: input_tx,
                 child,
                 gen,
             },
@@ -312,21 +395,13 @@ pub fn terminal_create(
     });
 
     // Emitter thread: coalesce bursts (up to ~32 KiB or ~5 ms) into one event so
-    // heavy output does not become thousands of IPC events per second, while
-    // small interactive output is flushed immediately (try_recv -> Empty).
+    // heavy output does not become thousands of IPC events per second. An idle
+    // shell costs nothing extra — the batch closes as soon as the PTY goes quiet
+    // for MAX_DELAY, so interactive echo is delayed by at most one 5 ms window.
     let app_for_thread = app.clone();
     std::thread::spawn(move || {
-        const MAX_BATCH: usize = 32 * 1024;
-        const MAX_DELAY: std::time::Duration = std::time::Duration::from_millis(5);
         while let Ok(first) = rx.recv() {
-            let mut batch = first;
-            let deadline = std::time::Instant::now() + MAX_DELAY;
-            while batch.len() < MAX_BATCH && std::time::Instant::now() < deadline {
-                match rx.try_recv() {
-                    Ok(chunk) => batch.extend_from_slice(&chunk),
-                    Err(_) => break,
-                }
-            }
+            let batch = collect_batch(&rx, first, MAX_OUTPUT_BATCH, MAX_OUTPUT_DELAY);
             // base64 (a JSON-safe string) instead of Vec<u8>, which Tauri
             // would serialize as a bloated JSON number array (~3.5x).
             let _ = app_for_thread.emit_to(label.as_str(), &data_event, STANDARD.encode(&batch));
@@ -345,10 +420,13 @@ pub fn terminal_write(
     id: String,
     data: String,
 ) -> Result<(), String> {
-    // Clone out the per-session writer under the map lock, then release the map
-    // lock BEFORE the (potentially blocking) write/flush so a full PTY buffer
-    // on one terminal can't wedge every other terminal command.
-    let writer = {
+    // Clone out the session's input sender under the map lock, release the lock,
+    // then hand the bytes to that session's writer thread. This command runs on
+    // the UI thread (Tauri executes non-async commands inline on the thread that
+    // received the IPC message), so it must never touch the PTY itself: a child
+    // that has stopped reading its stdin would otherwise block the write — and
+    // the whole window — until it did.
+    let input = {
         let sessions = state
             .sessions
             .lock()
@@ -356,16 +434,11 @@ pub fn terminal_write(
         let session = sessions
             .get(&session_key(&window, &id))
             .ok_or("no such terminal")?;
-        session.writer.clone()
+        session.input.clone()
     };
-    let mut writer = writer
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    writer
-        .write_all(&normalize_terminal_input(&data))
-        .map_err(|e| e.to_string())?;
-    writer.flush().map_err(|e| e.to_string())?;
-    Ok(())
+    input
+        .send(normalize_terminal_input(&data))
+        .map_err(|_| "terminal input closed".to_string())
 }
 
 /// Resize a session's PTY (in character cells).
@@ -431,6 +504,197 @@ mod tests {
             sender.try_send(vec![0; 4096]),
             Err(std::sync::mpsc::TrySendError::Full(_))
         ));
+    }
+
+    #[test]
+    fn terminal_input_queue_is_strictly_bounded() {
+        let (sender, _receiver) = terminal_input_channel();
+        for _ in 0..INPUT_QUEUE_CAPACITY {
+            sender.try_send(b"x".to_vec()).expect("queue capacity");
+        }
+        assert!(matches!(
+            sender.try_send(b"x".to_vec()),
+            Err(std::sync::mpsc::TrySendError::Full(_))
+        ));
+    }
+
+    /// A `Write` sink that records everything written, for the writer-thread tests.
+    #[derive(Clone, Default)]
+    struct RecordingWriter(std::sync::Arc<Mutex<Vec<u8>>>);
+
+    impl Write for RecordingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn terminal_writer_thread_preserves_input_order_and_stops_with_the_session() {
+        let sink = RecordingWriter::default();
+        let recorded = sink.0.clone();
+        let (sender, receiver) = terminal_input_channel();
+        spawn_terminal_writer(Box::new(sink), receiver).expect("writer thread");
+
+        for byte in b"abcdefghij" {
+            sender.send(vec![*byte]).expect("queued");
+        }
+        // Dropping the session's sender is what ends the thread; once it has, the
+        // queue is fully drained.
+        drop(sender);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let written = recorded
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if written == b"abcdefghij".to_vec() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "writer thread did not drain in order: {written:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn terminal_write_never_blocks_on_a_stalled_pty() {
+        // Models a child that has stopped reading its stdin: the PTY write blocks.
+        // terminal_write runs on the UI thread, so it must hand off to the writer
+        // thread and return instead of blocking there itself.
+        struct BlockingWriter(std::sync::mpsc::Receiver<()>);
+        impl Write for BlockingWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                // Blocks until the test releases it (or forever, if it never does).
+                let _ = self.0.recv();
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (sender, receiver) = terminal_input_channel();
+        spawn_terminal_writer(Box::new(BlockingWriter(release_rx)), receiver)
+            .expect("writer thread");
+
+        let started = std::time::Instant::now();
+        for _ in 0..64 {
+            sender.send(b"keystroke".to_vec()).expect("queued");
+        }
+        let elapsed = started.elapsed();
+        drop(release_tx);
+        drop(sender);
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "queuing input behind a stalled PTY took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn collect_batch_waits_out_the_window_for_a_trickling_reader() {
+        // The reader hands over one 4 KiB chunk per `read`, so the queue is
+        // routinely empty for a few microseconds between chunks. A drain-only
+        // loop returned there and emitted a separate event per 4 KiB; the
+        // batcher must keep waiting until the batch is full or the window ends.
+        let (sender, receiver) = terminal_output_channel();
+        let producer = std::thread::spawn(move || {
+            for _ in 0..8 {
+                if sender.send(vec![b'x'; 4096]).is_err() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_micros(200));
+            }
+        });
+
+        let first = receiver.recv().expect("first chunk");
+        let batch = collect_batch(
+            &receiver,
+            first,
+            32 * 1024,
+            std::time::Duration::from_millis(500),
+        );
+        producer.join().expect("producer");
+
+        assert_eq!(
+            batch.len(),
+            8 * 4096,
+            "all trickled chunks land in one batch"
+        );
+    }
+
+    #[test]
+    fn collect_batch_stops_at_the_size_cap() {
+        let (sender, receiver) = terminal_output_channel();
+        for _ in 0..8 {
+            sender.try_send(vec![b'x'; 4096]).expect("queue capacity");
+        }
+
+        let first = receiver.recv().expect("first chunk");
+        let batch = collect_batch(
+            &receiver,
+            first,
+            3 * 4096,
+            std::time::Duration::from_millis(500),
+        );
+
+        // Chunks are appended whole, so the cap is honoured on the next check:
+        // three 4 KiB chunks reach the 12 KiB cap exactly and the loop stops.
+        assert_eq!(batch.len(), 3 * 4096);
+        assert_eq!(receiver.try_recv().map(|c| c.len()).ok(), Some(4096));
+    }
+
+    #[test]
+    fn collect_batch_flushes_a_partial_batch_when_the_shell_goes_quiet() {
+        let (sender, receiver) = terminal_output_channel();
+        sender.try_send(b"hi".to_vec()).expect("queue capacity");
+
+        let first = receiver.recv().expect("first chunk");
+        let started = std::time::Instant::now();
+        let batch = collect_batch(
+            &receiver,
+            first,
+            32 * 1024,
+            std::time::Duration::from_millis(20),
+        );
+        let elapsed = started.elapsed();
+
+        assert_eq!(batch, b"hi".to_vec());
+        // Bounded by the delay window: interactive echo is never held longer.
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "{elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn collect_batch_emits_the_tail_when_the_reader_disconnects() {
+        let (sender, receiver) = terminal_output_channel();
+        sender.try_send(b"tail".to_vec()).expect("queue capacity");
+        drop(sender);
+
+        let first = receiver.recv().expect("first chunk");
+        let batch = collect_batch(
+            &receiver,
+            first,
+            32 * 1024,
+            std::time::Duration::from_secs(30),
+        );
+
+        // Must not sit on the 30 s window after the reader is gone.
+        assert_eq!(batch, b"tail".to_vec());
     }
 
     #[test]
