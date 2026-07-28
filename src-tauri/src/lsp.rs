@@ -12,7 +12,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -27,6 +27,38 @@ static SESSION_GEN: AtomicU64 = AtomicU64::new(0);
 /// Upper bound on a single LSP message body. A larger declared `Content-Length`
 /// is treated as a desync/protocol error rather than buffered unboundedly.
 const MAX_CONTENT_LENGTH: usize = 16 * 1024 * 1024;
+
+/// At most this many framed messages may queue for a session's writer thread.
+/// Kept small because Lyceum syncs whole documents (`contentChanges: [{ text }]`),
+/// so one entry can be the size of the edited file.
+const INPUT_QUEUE_CAPACITY: usize = 64;
+
+fn lsp_input_channel() -> (
+    std::sync::mpsc::SyncSender<Vec<u8>>,
+    std::sync::mpsc::Receiver<Vec<u8>>,
+) {
+    std::sync::mpsc::sync_channel(INPUT_QUEUE_CAPACITY)
+}
+
+/// Own the server's stdin on a dedicated thread and drain the queue in order.
+/// Order is part of the protocol — a didChange must never overtake its didOpen —
+/// so there is exactly one consumer. Exits when the session (and with it the
+/// sender) is dropped, or when the pipe write fails because the server is gone.
+fn spawn_lsp_writer(
+    mut stdin: Box<dyn Write + Send>,
+    rx: std::sync::mpsc::Receiver<Vec<u8>>,
+) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name("lyceum-lsp-write".to_string())
+        .spawn(move || {
+            while let Ok(bytes) = rx.recv() {
+                if stdin.write_all(&bytes).is_err() || stdin.flush().is_err() {
+                    break;
+                }
+            }
+        })
+        .map(|_| ())
+}
 
 /// Frame a JSON-RPC body with an LSP `Content-Length` header.
 pub fn encode_message(body: &str) -> Vec<u8> {
@@ -104,10 +136,12 @@ impl LspDecoder {
 }
 
 struct LspSession {
-    // stdin lives behind its own lock so a write/flush never holds the manager
-    // map lock across blocking I/O (a full stdin pipe would otherwise deadlock
-    // lsp_start/lsp_stop for every server).
-    stdin: Arc<Mutex<Box<dyn Write + Send>>>,
+    // Messages are handed to a per-session writer thread rather than written
+    // inline. Tauri runs non-async commands on the thread that received the IPC
+    // message — the UI thread on macOS — and Lyceum syncs whole documents, so a
+    // single didChange on a large file can exceed the 64 KiB pipe buffer: any
+    // server that paused reading would freeze the window mid-keystroke.
+    input: std::sync::mpsc::SyncSender<Vec<u8>>,
     child: crate::julia::OwnedRun,
     gen: u64,
 }
@@ -228,6 +262,16 @@ pub fn lsp_start(
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
     let stdin = child.stdin.take().ok_or("failed to capture stdin")?;
     let mut stdout = child.stdout.take().ok_or("failed to capture stdout")?;
+    // The writer thread must exist before the session does; without it every
+    // message would be queued to a receiver nobody reads. Failing here leaves
+    // the just-spawned server to the `?` path's caller-visible error, and the
+    // child is killed below rather than orphaned.
+    let (input_tx, input_rx) = lsp_input_channel();
+    if let Err(e) = spawn_lsp_writer(Box::new(stdin), input_rx) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("failed to start lsp writer: {e}"));
+    }
 
     let child = crate::julia::own_child_in_new_process_group(child);
     let gen = SESSION_GEN.fetch_add(1, Ordering::Relaxed);
@@ -253,7 +297,7 @@ pub fn lsp_start(
         .insert(
             key,
             LspSession {
-                stdin: Arc::new(Mutex::new(Box::new(stdin))),
+                input: input_tx,
                 child,
                 gen,
             },
@@ -361,10 +405,11 @@ pub fn lsp_send(
     id: String,
     message: String,
 ) -> Result<(), String> {
-    // Clone out the per-session stdin handle under the map lock, then release
-    // the map lock BEFORE the (potentially blocking) write/flush so a full pipe
-    // on one server can't wedge lsp_start/lsp_stop for all the others.
-    let stdin = {
+    // Clone out the session's input sender under the map lock, release the lock,
+    // then hand the framed message to that session's writer thread. The session
+    // lookup still fails synchronously ("no such lsp server"), which is what the
+    // frontend's fire-and-forget send relies on to detect a dead server.
+    let input = {
         let servers = state
             .servers
             .lock()
@@ -372,16 +417,11 @@ pub fn lsp_send(
         let session = servers
             .get(&session_key(&window, &id))
             .ok_or("no such lsp server")?;
-        session.stdin.clone()
+        session.input.clone()
     };
-    let mut stdin = stdin
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    stdin
-        .write_all(&encode_message(&message))
-        .map_err(|e| e.to_string())?;
-    stdin.flush().map_err(|e| e.to_string())?;
-    Ok(())
+    input
+        .send(encode_message(&message))
+        .map_err(|_| "lsp server input closed".to_string())
 }
 
 /// Kill and remove a server (idempotent).
@@ -411,6 +451,101 @@ mod tests {
     #[test]
     fn encode_message_frames_body() {
         assert_eq!(encode_message("hello"), b"Content-Length: 5\r\n\r\nhello");
+    }
+
+    #[test]
+    fn lsp_input_queue_is_strictly_bounded() {
+        let (sender, _receiver) = lsp_input_channel();
+        for _ in 0..INPUT_QUEUE_CAPACITY {
+            sender.try_send(b"x".to_vec()).expect("queue capacity");
+        }
+        assert!(matches!(
+            sender.try_send(b"x".to_vec()),
+            Err(std::sync::mpsc::TrySendError::Full(_))
+        ));
+    }
+
+    #[test]
+    fn lsp_writer_thread_preserves_message_order_and_stops_with_the_session() {
+        // Order is protocol-critical: a didChange must never overtake its
+        // didOpen, so the queue has exactly one consumer.
+        #[derive(Clone, Default)]
+        struct RecordingWriter(std::sync::Arc<Mutex<Vec<u8>>>);
+        impl Write for RecordingWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let sink = RecordingWriter::default();
+        let recorded = sink.0.clone();
+        let (sender, receiver) = lsp_input_channel();
+        spawn_lsp_writer(Box::new(sink), receiver).expect("writer thread");
+
+        for body in ["one", "two", "three"] {
+            sender.send(encode_message(body)).expect("queued");
+        }
+        drop(sender);
+
+        let expected: Vec<u8> = ["one", "two", "three"]
+            .iter()
+            .flat_map(|body| encode_message(body))
+            .collect();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let written = recorded
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if written == expected {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "writer thread did not drain in order: {written:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn lsp_send_never_blocks_on_a_server_that_stopped_reading() {
+        // Whole-document sync means one didChange can exceed the 64 KiB pipe
+        // buffer, so this write must never happen on the UI thread.
+        struct BlockingWriter(std::sync::mpsc::Receiver<()>);
+        impl Write for BlockingWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                let _ = self.0.recv();
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (sender, receiver) = lsp_input_channel();
+        spawn_lsp_writer(Box::new(BlockingWriter(release_rx)), receiver).expect("writer thread");
+
+        let started = std::time::Instant::now();
+        for _ in 0..32 {
+            sender.send(encode_message("didChange")).expect("queued");
+        }
+        let elapsed = started.elapsed();
+        drop(release_tx);
+        drop(sender);
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "queuing behind a stalled server took {elapsed:?}"
+        );
     }
 
     #[test]
