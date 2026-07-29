@@ -12,17 +12,18 @@
 // not rendered (window minimised, occluded, or on another macOS Space) never
 // runs its animation-frame callbacks, while backend events keep being delivered.
 // A frame-only batcher therefore buffers *everything* produced while the window
-// is away and dumps it in one go on return. Every flush is also armed with a
-// slower timer that only ever wins when frames are genuinely not running, which
-// keeps the backlog bounded and removes the stall on restore.
+// is away. Every flush is also armed with a slower timer. Timers can themselves
+// be suspended by the WebView, so both timer and frame flushes retain the byte
+// cap: whichever callback resumes first can never hand xterm one giant parse
+// unit and freeze the foregrounded window.
 //
 // Scheduling is injected (requestFrame/cancelFrame/requestTimer/cancelTimer) so
 // the logic is unit-tested with a deterministic fake scheduler; TerminalView
 // wires real requestAnimationFrame/setTimeout.
 
 export interface OutputBatcherOptions {
-  /** Write merged bytes to the sink (xterm). */
-  write: (bytes: Uint8Array) => void;
+  /** Write merged bytes to xterm and call `onParsed` after xterm parses them. */
+  write: (bytes: Uint8Array, onParsed: () => void) => void;
   /** Schedule a flush; returns a handle. Real impl: requestAnimationFrame. */
   requestFrame: (cb: () => void) => number;
   /** Cancel a scheduled flush. Real impl: cancelAnimationFrame. */
@@ -31,7 +32,7 @@ export interface OutputBatcherOptions {
   requestTimer: (cb: () => void, ms: number) => number;
   /** Cancel the fallback flush. Real impl: clearTimeout. */
   cancelTimer: (handle: number) => void;
-  /** Max bytes written per frame flush (default 256 KiB). Keeps each frame short. */
+  /** Max bytes written per frame flush (default 64 KiB). Keeps each frame short. */
   maxFlushBytes?: number;
   /**
    * How long to wait for an animation frame before flushing from the timer
@@ -43,7 +44,7 @@ export interface OutputBatcherOptions {
 
 export interface OutputBatcher {
   /** Enqueue a chunk; schedules a flush on the next frame. */
-  push: (bytes: Uint8Array) => void;
+  push: (bytes: Uint8Array, onConsumed?: () => void) => void;
   /**
    * Synchronously write everything buffered. Use before an out-of-band write
    * (e.g. an "[exited]" notice) so it lands after all preceding output, in order.
@@ -53,7 +54,7 @@ export interface OutputBatcher {
   dispose: () => void;
 }
 
-const DEFAULT_MAX_FLUSH_BYTES = 256 * 1024;
+const DEFAULT_MAX_FLUSH_BYTES = 64 * 1024;
 const DEFAULT_IDLE_FLUSH_DELAY_MS = 250;
 
 function merge(chunks: Uint8Array[]): Uint8Array {
@@ -69,25 +70,61 @@ function merge(chunks: Uint8Array[]): Uint8Array {
   return merged;
 }
 
+interface PendingChunk {
+  bytes: Uint8Array;
+  onConsumed?: () => void;
+}
+
 export function createOutputBatcher(opts: OutputBatcherOptions): OutputBatcher {
-  const maxFlushBytes = opts.maxFlushBytes ?? DEFAULT_MAX_FLUSH_BYTES;
   const idleFlushDelayMs = opts.idleFlushDelayMs ?? DEFAULT_IDLE_FLUSH_DELAY_MS;
-  const pending: Uint8Array[] = [];
+  const pending: PendingChunk[] = [];
+  let pendingHead = 0;
   let frameHandle: number | null = null;
   let timerHandle: number | null = null;
   let disposed = false;
 
-  // Take as many leading chunks as fit under the byte cap (always at least one,
-  // so an oversized single chunk still makes progress).
-  function takeBatch(limit: number): Uint8Array[] {
+  const configuredMaxFlushBytes =
+    opts.maxFlushBytes ?? DEFAULT_MAX_FLUSH_BYTES;
+  const maxFlushBytes =
+    Number.isFinite(configuredMaxFlushBytes) && configuredMaxFlushBytes > 0
+      ? Math.max(1, Math.floor(configuredMaxFlushBytes))
+      : DEFAULT_MAX_FLUSH_BYTES;
+  function takeBatch(limit: number): {
+    chunks: Uint8Array[];
+    callbacks: Array<() => void>;
+  } {
+    // Source chunks normally top out at 32 KiB, but split an oversized chunk as
+    // well so the sink-facing cap is a real invariant rather than a best effort.
     let total = 0;
-    let count = 0;
-    for (const chunk of pending) {
-      if (count > 0 && total + chunk.length > limit) break;
-      total += chunk.length;
-      count += 1;
+    const batch: Uint8Array[] = [];
+    const callbacks: Array<() => void> = [];
+    while (pendingHead < pending.length && total < limit) {
+      const chunk = pending[pendingHead];
+      const remaining = limit - total;
+      if (chunk.bytes.length <= remaining) {
+        batch.push(chunk.bytes);
+        total += chunk.bytes.length;
+        if (chunk.onConsumed) callbacks.push(chunk.onConsumed);
+        pendingHead += 1;
+      } else {
+        batch.push(chunk.bytes.subarray(0, remaining));
+        pending[pendingHead] = {
+          bytes: chunk.bytes.subarray(remaining),
+          onConsumed: chunk.onConsumed,
+        };
+        total += remaining;
+      }
     }
-    return pending.splice(0, count);
+    // Avoid Array.shift's O(n) copy on every source chunk. Compact only after a
+    // substantial prefix was consumed, and reset completely when the queue drains.
+    if (pendingHead === pending.length) {
+      pending.length = 0;
+      pendingHead = 0;
+    } else if (pendingHead >= 256 && pendingHead * 2 >= pending.length) {
+      pending.splice(0, pendingHead);
+      pendingHead = 0;
+    }
+    return { chunks: batch, callbacks };
   }
 
   function clearScheduled(): void {
@@ -112,10 +149,13 @@ export function createOutputBatcher(opts: OutputBatcherOptions): OutputBatcher {
   }
 
   function flush(limit: number): void {
-    if (disposed || pending.length === 0) return;
-    opts.write(merge(takeBatch(limit)));
+    if (disposed || pendingHead >= pending.length) return;
+    const batch = takeBatch(limit);
+    opts.write(merge(batch.chunks), () => {
+      for (const callback of batch.callbacks) callback();
+    });
     // Hit the cap with more queued — finish on the next flush so this one stays short.
-    if (pending.length > 0) schedule();
+    if (pendingHead < pending.length) schedule();
   }
 
   function onFrame(): void {
@@ -127,28 +167,34 @@ export function createOutputBatcher(opts: OutputBatcherOptions): OutputBatcher {
   function onTimer(): void {
     timerHandle = null;
     clearScheduled();
-    // Reaching here means no animation frame ran for idleFlushDelayMs, i.e. the
-    // document is not being rendered. There is no frame budget to protect, so
-    // drain the whole backlog rather than letting it grow until the window is
-    // restored (which is what made the terminal stall for seconds on return).
-    flush(Number.POSITIVE_INFINITY);
+    // The timer may have fired off-screen, or it may itself be an overdue callback
+    // running only after the WebView resumed. Keep the same cap in both cases.
+    flush(maxFlushBytes);
   }
 
   return {
-    push(bytes) {
+    push(bytes, onConsumed) {
       if (disposed || bytes.length === 0) return;
-      pending.push(bytes);
+      pending.push({ bytes, onConsumed });
       schedule();
     },
     flushNow() {
       clearScheduled();
-      if (disposed || pending.length === 0) return;
-      opts.write(merge(pending.splice(0)));
+      if (disposed || pendingHead >= pending.length) return;
+      // Queue every byte synchronously (for ordering) but never as an oversized
+      // xterm parse unit. xterm can then yield between these bounded writes.
+      while (pendingHead < pending.length) {
+        const batch = takeBatch(maxFlushBytes);
+        opts.write(merge(batch.chunks), () => {
+          for (const callback of batch.callbacks) callback();
+        });
+      }
     },
     dispose() {
       disposed = true;
       clearScheduled();
       pending.length = 0;
+      pendingHead = 0;
     },
   };
 }

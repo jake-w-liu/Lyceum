@@ -30,8 +30,25 @@ export async function createPty(id: string, opts: CreatePtyOptions): Promise<voi
 export async function writePty(id: string, data: string): Promise<void> {
   try {
     await invoke("terminal_write", { id, data });
-  } catch {
-    /* PTY gone; terminal input is best-effort */
+  } catch (error) {
+    // PTY input is best-effort, but retain diagnostic evidence when a wedged
+    // child fills the bounded queue and a keystroke/paste cannot be accepted.
+    console.debug("terminal input rejected", id, error);
+  }
+}
+
+/** Acknowledge terminal output only after xterm has parsed it. This closes the
+ * backend flow-control loop, bounding hidden-window/event backlogs. */
+export async function acknowledgePtyOutput(
+  id: string,
+  count = 1,
+): Promise<void> {
+  try {
+    await invoke("terminal_ack_output", { id, count });
+  } catch (error) {
+    // A late acknowledgement can race terminal close. Other failures are still
+    // useful during diagnosis, but must not become unhandled rejections.
+    console.debug("terminal output acknowledgement failed", id, error);
   }
 }
 

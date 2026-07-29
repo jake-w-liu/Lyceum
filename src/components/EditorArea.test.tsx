@@ -72,7 +72,10 @@ describe("EditorArea", () => {
     render(<EditorArea />);
 
     expect(await screen.findByLabelText("Markdown preview")).toBeInTheDocument();
-    const heading = await screen.findByText("Notes");
+    // MarkdownView is deliberately code-split. Under parallel-suite/CI load its
+    // dynamic import can exceed Testing Library's one-second default even
+    // though the preview resolves normally.
+    const heading = await screen.findByText("Notes", {}, { timeout: 5_000 });
     const textNode = heading.firstChild;
     expect(textNode).toBeInstanceOf(Text);
     mockCaretAt(textNode as Text, 3);

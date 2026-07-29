@@ -40,6 +40,16 @@ fn lsp_input_channel() -> (
     std::sync::mpsc::sync_channel(INPUT_QUEUE_CAPACITY)
 }
 
+fn enqueue_lsp_input(
+    input: &std::sync::mpsc::SyncSender<Vec<u8>>,
+    bytes: Vec<u8>,
+) -> Result<(), String> {
+    input.try_send(bytes).map_err(|error| match error {
+        std::sync::mpsc::TrySendError::Full(_) => "lsp server input queue full".to_string(),
+        std::sync::mpsc::TrySendError::Disconnected(_) => "lsp server input closed".to_string(),
+    })
+}
+
 /// Own the server's stdin on a dedicated thread and drain the queue in order.
 /// Order is part of the protocol — a didChange must never overtake its didOpen —
 /// so there is exactly one consumer. Exits when the session (and with it the
@@ -419,9 +429,10 @@ pub fn lsp_send(
             .ok_or("no such lsp server")?;
         session.input.clone()
     };
-    input
-        .send(encode_message(&message))
-        .map_err(|_| "lsp server input closed".to_string())
+    // Never wait for capacity on the macOS UI thread. The frontend receives a
+    // rejection and can recover the session instead of the whole window hanging
+    // behind a language server that stopped reading.
+    enqueue_lsp_input(&input, encode_message(&message))
 }
 
 /// Kill and remove a server (idempotent).
@@ -437,9 +448,13 @@ pub fn lsp_stop(window: tauri::Window, state: State<LspManager>, id: String) -> 
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(&session_key(&window, &id));
     if let Some(session) = removed {
-        crate::julia::terminate_owned_child(&session.child);
-        // Reap so the exited server does not linger as a zombie process.
-        let _ = crate::julia::wait_owned_child(&session.child);
+        // Termination can wait through the SIGTERM grace period. Keep it off the
+        // synchronous command/UI thread, as the other LSP teardown paths do.
+        state.teardowns.spawn(move || {
+            crate::julia::terminate_owned_child(&session.child);
+            // Reap so the exited server does not linger as a zombie process.
+            let _ = crate::julia::wait_owned_child(&session.child);
+        });
     }
     Ok(())
 }
@@ -517,35 +532,36 @@ mod tests {
 
     #[test]
     fn lsp_send_never_blocks_on_a_server_that_stopped_reading() {
-        // Whole-document sync means one didChange can exceed the 64 KiB pipe
-        // buffer, so this write must never happen on the UI thread.
-        struct BlockingWriter(std::sync::mpsc::Receiver<()>);
-        impl Write for BlockingWriter {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                let _ = self.0.recv();
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
+        // Keep the receiver alive without draining it, modelling a server writer
+        // blocked on a full stdin pipe.
+        let (sender, _receiver) = lsp_input_channel();
+        for _ in 0..INPUT_QUEUE_CAPACITY {
+            enqueue_lsp_input(&sender, encode_message("didChange")).expect("queue capacity");
         }
-
-        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-        let (sender, receiver) = lsp_input_channel();
-        spawn_lsp_writer(Box::new(BlockingWriter(release_rx)), receiver).expect("writer thread");
-
         let started = std::time::Instant::now();
-        for _ in 0..32 {
-            sender.send(encode_message("didChange")).expect("queued");
-        }
+        let error = enqueue_lsp_input(&sender, encode_message("didChange"))
+            .expect_err("full queue must reject");
         let elapsed = started.elapsed();
-        drop(release_tx);
-        drop(sender);
 
         assert!(
-            elapsed < std::time::Duration::from_secs(1),
-            "queuing behind a stalled server took {elapsed:?}"
+            elapsed < std::time::Duration::from_millis(100),
+            "rejecting input behind a stalled server took {elapsed:?}"
         );
+        assert_eq!(error, "lsp server input queue full");
+    }
+
+    #[test]
+    fn lsp_stop_reap_is_manager_tracked() {
+        let source = include_str!("lsp.rs");
+        let stop = source
+            .split_once("pub fn lsp_stop(")
+            .expect("lsp_stop source")
+            .1
+            .split_once("#[cfg(test)]")
+            .expect("lsp_stop end")
+            .0;
+        assert!(stop.contains("state.teardowns.spawn(move ||"));
+        assert!(stop.contains("wait_owned_child(&session.child)"));
     }
 
     #[test]

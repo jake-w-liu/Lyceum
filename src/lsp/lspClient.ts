@@ -30,6 +30,25 @@ export interface LspSession {
   restarted: boolean;
 }
 
+export interface LspContentChange {
+  text: string;
+  range?: {
+    start: { line: number; character: number };
+    end: { line: number; character: number };
+  };
+  rangeLength?: number;
+}
+
+export function supportsIncrementalSync(session: LspSession): boolean {
+  const sync = session.capabilities.textDocumentSync;
+  if (sync === 2) return true;
+  return (
+    typeof sync === "object" &&
+    sync !== null &&
+    (sync as { change?: unknown }).change === 2
+  );
+}
+
 const sessions = new Map<string, LspSession>();
 
 // Monotonic token making every spawned server's id unique, even across a
@@ -262,7 +281,7 @@ export async function didChange(
   session: LspSession,
   uri: string,
   version: number,
-  text: string,
+  change: string | LspContentChange[],
 ): Promise<void> {
   try {
     await session.ready;
@@ -278,7 +297,7 @@ export async function didChange(
   if (!session.openDocs.has(uri)) return;
   session.rpc.notify("textDocument/didChange", {
     textDocument: { uri, version },
-    contentChanges: [{ text }],
+    contentChanges: typeof change === "string" ? [{ text: change }] : change,
   });
 }
 

@@ -78,50 +78,20 @@ type PageHighlight = { occurrence: number; active: boolean };
 // A4-ish fallback so a not-yet-rendered page reserves plausible scroll space;
 // replaced by the page's real size the moment it first renders.
 const FALLBACK_SIZE = { w: 612, h: 792 };
-const PAGE_SIZE_LOAD_CONCURRENCY = 8;
 
 type PageSize = { w: number; h: number };
 
-async function loadPageSizes(pdf: PDFDocumentProxy): Promise<PageSize[]> {
-  const sizes = Array.from({ length: pdf.numPages }, () => ({
-    ...FALLBACK_SIZE,
-  }));
-  let nextPage = 1;
-  const worker = async (): Promise<void> => {
-    for (;;) {
-      const pageNumber = nextPage;
-      nextPage += 1;
-      if (pageNumber > pdf.numPages) return;
-      try {
-        const page = await pdf.getPage(pageNumber);
-        const viewport = page.getViewport({ scale: 1 });
-        if (
-          Number.isFinite(viewport.width) &&
-          Number.isFinite(viewport.height) &&
-          viewport.width > 0 &&
-          viewport.height > 0
-        ) {
-          sizes[pageNumber - 1] = {
-            w: viewport.width,
-            h: viewport.height,
-          };
-        }
-      } catch {
-        // Keep the stable fallback for a malformed page. Its normal lazy render
-        // will surface the page-specific error without blocking the document.
-      }
-    }
-  };
-  await Promise.all(
-    Array.from(
-      { length: Math.min(PAGE_SIZE_LOAD_CONCURRENCY, pdf.numPages) },
-      () => worker(),
-    ),
-  );
-  return sizes;
-}
-
 const DEFAULT_SCROLL_PADDING = 12;
+
+function fallbackVisiblePages(center: number, numPages: number): Set<number> {
+  const visible = new Set<number>();
+  const first = Math.max(1, center - 1);
+  const last = Math.min(numPages, center + 1);
+  for (let pageNumber = first; pageNumber <= last; pageNumber += 1) {
+    visible.add(pageNumber);
+  }
+  return visible;
+}
 
 type ViewportAnchor = {
   pageNumber: number;
@@ -183,6 +153,43 @@ function pageOffset(
   };
 }
 
+function pageAtVerticalOffset(
+  pageRefs: PageRefs,
+  numPages: number,
+  target: number,
+): number | null {
+  let low = 1;
+  let high = numPages;
+  let preceding: number | null = null;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const pageEl = pageRefs.current.get(middle);
+    if (!pageEl) return null;
+    const top = pageEl.offsetTop;
+    const bottom = top + pageEl.offsetHeight;
+    if (target < top) {
+      high = middle - 1;
+    } else if (target >= bottom) {
+      preceding = middle;
+      low = middle + 1;
+    } else {
+      return middle;
+    }
+  }
+
+  // The target is before the first page, after the last, or in a page gap.
+  // Preserve the old nearest-page behavior while inspecting at most two boxes.
+  const following = low <= numPages ? low : null;
+  if (preceding === null) return following;
+  if (following === null) return preceding;
+  const precedingTop = pageRefs.current.get(preceding)?.offsetTop;
+  const followingTop = pageRefs.current.get(following)?.offsetTop;
+  if (precedingTop === undefined || followingTop === undefined) return null;
+  return Math.abs(target - precedingTop) <= Math.abs(target - followingTop)
+    ? preceding
+    : following;
+}
+
 function captureViewportAnchor(
   wrap: HTMLElement,
   pageRefs: PageRefs,
@@ -192,37 +199,22 @@ function captureViewportAnchor(
   const padding = scrollPadding(wrap);
   const viewportY = wrap.scrollTop + padding.top;
   const viewportX = wrap.scrollLeft + padding.left;
-  let fallback: ViewportAnchor | null = null;
-  let fallbackDistance = Infinity;
-
-  for (let n = 1; n <= numPages; n += 1) {
-    const pageEl = pageRefs.current.get(n);
-    if (!pageEl) continue;
-    const offset = pageOffset(wrap, pageEl);
-    const height = Math.max(1, offset.height);
-    const width = Math.max(1, offset.width);
-    const bottom = offset.top + height;
-    const right = offset.left + width;
-    const ratioY = Math.min(1, Math.max(0, (viewportY - offset.top) / height));
-    const ratioX = Math.min(1, Math.max(0, (viewportX - offset.left) / width));
-
-    const distance = Math.abs(viewportY - offset.top);
-    if (distance < fallbackDistance) {
-      fallbackDistance = distance;
-      fallback = { pageNumber: n, ratioY: 0, ratioX: 0 };
-    }
-    if (viewportY >= offset.top && viewportY < bottom) {
-      return {
-        pageNumber: n,
-        ratioY,
-        ratioX: viewportX >= offset.left && viewportX < right ? ratioX : 0,
-      };
-    }
-  }
-
-  return fallback
-    ? { pageNumber: fallback.pageNumber, ratioY: 0, ratioX: 0 }
-    : null;
+  const pageNumber = pageAtVerticalOffset(pageRefs, numPages, viewportY);
+  if (pageNumber === null) return null;
+  const pageEl = pageRefs.current.get(pageNumber);
+  if (!pageEl) return null;
+  const offset = pageOffset(wrap, pageEl);
+  const height = Math.max(1, offset.height);
+  const width = Math.max(1, offset.width);
+  const right = offset.left + width;
+  return {
+    pageNumber,
+    ratioY: Math.min(1, Math.max(0, (viewportY - offset.top) / height)),
+    ratioX:
+      viewportX >= offset.left && viewportX < right
+        ? Math.min(1, Math.max(0, (viewportX - offset.left) / width))
+        : 0,
+  };
 }
 
 function destinationCommand(destArray: PdfDestArray | null): string | null {
@@ -462,6 +454,7 @@ function PdfPage({
   searchQuery,
   highlights,
   initialSize,
+  onSize,
 }: {
   doc: PDFDocumentProxy;
   pageNumber: number;
@@ -472,6 +465,7 @@ function PdfPage({
   searchQuery: string;
   highlights: PageHighlight[] | undefined;
   initialSize: PageSize;
+  onSize: (pageNumber: number, size: PageSize) => void;
 }) {
   const elRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -551,6 +545,10 @@ function PdfPage({
             ? prev
             : { w: baseViewport.width, h: baseViewport.height },
         );
+        onSize(pageNumber, {
+          w: baseViewport.width,
+          h: baseViewport.height,
+        });
 
         const canvas = canvasRef.current;
         const textLayerElement = textLayerRef.current;
@@ -656,7 +654,7 @@ function PdfPage({
       textLayer?.cancel();
       annotationLayer?.destroy();
     };
-  }, [visible, doc, pageNumber, zoom, linkService]);
+  }, [visible, doc, pageNumber, zoom, linkService, onSize]);
 
   // Paint search highlights over the rendered text. Rects are measured from the
   // live text layer, so this re-runs when the page renders (`textReady`), when
@@ -699,26 +697,30 @@ function PdfPage({
       className="pdf-page-layer"
       style={{ width: size.w * zoom, height: size.h * zoom }}
     >
-      <canvas ref={canvasRef} className="pdf-canvas" />
-      <div
-        ref={textLayerRef}
-        className="pdf-text-layer textLayer"
-        aria-label={`Page ${pageNumber} text`}
-      />
-      <div
-        ref={annotationLayerRef}
-        className="pdf-annotation-layer annotationLayer"
-        aria-label={`Page ${pageNumber} annotations`}
-      />
-      <div
-        ref={highlightLayerRef}
-        className="pdf-highlight-layer"
-        aria-hidden="true"
-      />
-      {renderError && (
-        <div className="pdf-error pdf-error-inline" role="alert">
-          Failed to render page {pageNumber}: {renderError}
-        </div>
+      {visible && (
+        <>
+          <canvas ref={canvasRef} className="pdf-canvas" />
+          <div
+            ref={textLayerRef}
+            className="pdf-text-layer textLayer"
+            aria-label={`Page ${pageNumber} text`}
+          />
+          <div
+            ref={annotationLayerRef}
+            className="pdf-annotation-layer annotationLayer"
+            aria-label={`Page ${pageNumber} annotations`}
+          />
+          <div
+            ref={highlightLayerRef}
+            className="pdf-highlight-layer"
+            aria-hidden="true"
+          />
+          {renderError && (
+            <div className="pdf-error pdf-error-inline" role="alert">
+              Failed to render page {pageNumber}: {renderError}
+            </div>
+          )}
+        </>
       )}
     </div>
   );
@@ -802,7 +804,7 @@ export default function PdfViewer({ path }: { path: string }) {
 
   const [doc, setDoc] = useState<PDFDocumentProxy | null>(null);
   const [numPages, setNumPages] = useState(0);
-  const [pageSizes, setPageSizes] = useState<PageSize[]>([]);
+  const [pageSizes, setPageSizes] = useState<Record<number, PageSize>>({});
   const [page, setPage] = useState(saved?.page ?? 1);
   const [zoom, setZoom] = useState(saved?.zoom ?? 1);
   const [visiblePages, setVisiblePages] = useState<Set<number>>(new Set());
@@ -844,7 +846,11 @@ export default function PdfViewer({ path }: { path: string }) {
       const pageNumber = clampPage(target, numPages);
       const wrap = scrollRef.current;
       const pageEl = pageRefs.current.get(pageNumber);
-      setVisiblePages((prev) => new Set(prev).add(pageNumber));
+      setVisiblePages((prev) =>
+        typeof IntersectionObserver === "undefined"
+          ? fallbackVisiblePages(pageNumber, numPages)
+          : new Set(prev).add(pageNumber),
+      );
       setPage(pageNumber);
       if (!wrap || !pageEl) return;
       const padding = scrollPadding(wrap);
@@ -858,29 +864,20 @@ export default function PdfViewer({ path }: { path: string }) {
     const wrap = scrollRef.current;
     if (!wrap || numPages === 0) return;
     const padding = scrollPadding(wrap);
-    const wrapRect = wrap.getBoundingClientRect();
-    const wrapHeight = wrapRect.height || wrap.clientHeight;
-    if (wrapHeight <= 0) return;
-    const viewportTop = wrapRect.top + padding.top;
-    const viewportBottom = wrapRect.bottom;
-    let nearestPage = 1;
-    let nearestDistance = Infinity;
-
-    for (let n = 1; n <= numPages; n += 1) {
-      const pageEl = pageRefs.current.get(n);
-      if (!pageEl) continue;
-      const rect = pageEl.getBoundingClientRect();
-      const distance = Math.abs(rect.top - viewportTop);
-      if (distance < nearestDistance) {
-        nearestDistance = distance;
-        nearestPage = n;
-      }
-      if (rect.bottom > viewportTop && rect.top < viewportBottom) {
-        setPage(n);
-        return;
+    const first = pageRefs.current.get(1);
+    // jsdom/hidden layouts have no usable offsets; keep the explicit/restored
+    // page instead of deriving a bogus value from zero-sized boxes.
+    if (!first || first.offsetHeight <= 0) return;
+    const target = wrap.scrollTop + padding.top;
+    // Page boxes are in document order. Binary search their layout offsets
+    // instead of forcing getBoundingClientRect on every page every frame.
+    const found = pageAtVerticalOffset(pageRefs, numPages, target);
+    if (found !== null) {
+      setPage(found);
+      if (typeof IntersectionObserver === "undefined") {
+        setVisiblePages(fallbackVisiblePages(found, numPages));
       }
     }
-    setPage(nearestPage);
   }, [numPages]);
 
   const setZoomPreservingAnchor = useCallback(
@@ -1129,12 +1126,11 @@ export default function PdfViewer({ path }: { path: string }) {
         loadingTask = task;
         const pdf = await task.promise;
         if (cancelled) return;
-        // Reserve every page's exact box before mounting the scroll stack.
-        // Canvas/text/annotation rendering remains virtualized below.
-        const sizes = await loadPageSizes(pdf);
-        if (cancelled) return;
+        // Mount immediately. Exact dimensions are learned only when a page enters
+        // the virtualized render window; asking pdf.js for every page up front
+        // made first paint and its internal page cache grow with document length.
         docRef.current = pdf;
-        setPageSizes(sizes);
+        setPageSizes({});
         setNumPages(pdf.numPages);
         setDoc(pdf);
       } catch (e) {
@@ -1153,6 +1149,25 @@ export default function PdfViewer({ path }: { path: string }) {
       docRef.current = null;
     };
   }, [path]);
+
+  const recordPageSize = useCallback(
+    (pageNumber: number, size: PageSize) => {
+      if (
+        !Number.isFinite(size.w) ||
+        !Number.isFinite(size.h) ||
+        size.w <= 0 ||
+        size.h <= 0
+      ) {
+        return;
+      }
+      setPageSizes((current) => {
+        const previous = current[pageNumber];
+        if (previous?.w === size.w && previous.h === size.h) return current;
+        return { ...current, [pageNumber]: size };
+      });
+    },
+    [],
+  );
 
   // Once the page count is known, seed the restored page (so it renders without
   // waiting for the observer) and scroll to it after the first paint.
@@ -1174,12 +1189,19 @@ export default function PdfViewer({ path }: { path: string }) {
   }, [numPages, scrollToPage]);
 
   // Observe which pages are near the viewport so only those render. Without
-  // IntersectionObserver (e.g. jsdom) fall back to rendering every page.
+  // IntersectionObserver (e.g. jsdom), explicit navigation renders its target.
   useEffect(() => {
     if (numPages === 0) return;
     if (typeof IntersectionObserver === "undefined") {
-      setVisiblePages(
-        new Set(Array.from({ length: numPages }, (_, i) => i + 1)),
+      // Older WebViews/tests without IntersectionObserver still keep rendering
+      // bounded. Manual scrolling and explicit navigation slide this window.
+      setVisiblePages((prev) =>
+        prev.size > 0
+          ? prev
+          : fallbackVisiblePages(
+              clampPage(pageStateRef.current, numPages),
+              numPages,
+            ),
       );
       return;
     }
@@ -1579,9 +1601,10 @@ export default function PdfViewer({ path }: { path: string }) {
               visible={visiblePages.has(n)}
               pageRefs={pageRefs}
               linkService={linkService}
-            searchQuery={searchQuery}
+              searchQuery={searchQuery}
               highlights={highlightsByPage.get(n)}
-              initialSize={pageSizes[n - 1] ?? FALLBACK_SIZE}
+              initialSize={pageSizes[n] ?? FALLBACK_SIZE}
+              onSize={recordPageSize}
             />
           ))}
       </div>

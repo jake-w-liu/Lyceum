@@ -40,8 +40,9 @@ import {
   ensureServer,
   getSession,
   stopServer,
+  supportsIncrementalSync,
 } from "../lsp/lspClient";
-import type { LspSession } from "../lsp/lspClient";
+import type { LspContentChange, LspSession } from "../lsp/lspClient";
 import { serverForLanguage } from "../lsp/servers";
 import { setActiveEditor } from "../lib/editorBridge";
 import { commandRegistry } from "../commands/commandRegistry";
@@ -67,6 +68,19 @@ let pendingStoreWrite: {
   model: monaco.editor.ITextModel;
 } | null = null;
 let storeWriteTimer: ReturnType<typeof setTimeout> | null = null;
+const modelSnapshots = new WeakMap<
+  monaco.editor.ITextModel,
+  { version: number; text: string }
+>();
+
+function modelSnapshot(model: monaco.editor.ITextModel): string {
+  const version = model.getVersionId();
+  const cached = modelSnapshots.get(model);
+  if (cached?.version === version) return cached.text;
+  const text = model.getValue();
+  modelSnapshots.set(model, { version, text });
+  return text;
+}
 
 function flushPendingStoreWrite(): void {
   if (storeWriteTimer) {
@@ -78,7 +92,7 @@ function flushPendingStoreWrite(): void {
   if (!pending || pending.model.isDisposed()) return;
   useEditorStore
     .getState()
-    .updateContent(pending.path, pending.model.getValue());
+    .updateContent(pending.path, modelSnapshot(pending.model));
 }
 
 setPendingEditsFlusher(flushPendingStoreWrite);
@@ -158,11 +172,20 @@ export default function MonacoEditor() {
     new Map(),
   );
   const pendingLspChanges = useRef<
-    Map<string, { session: LspSession; model: monaco.editor.ITextModel }>
+    Map<
+      string,
+      {
+        session: LspSession;
+        model: monaco.editor.ITextModel;
+        changes: LspContentChange[];
+      }
+    >
   >(new Map());
   const startedLangsRef = useRef<Set<string>>(new Set());
 
   // Send (and clear) the pending debounced didChange for an LSP URI immediately.
+  // Incremental-capable servers receive the accumulated Monaco edit ranges;
+  // other servers receive one cached full-document snapshot.
   const flushLspChange = useCallback((uri: string) => {
     const timer = lspChangeTimers.current.get(uri);
     if (timer) {
@@ -179,11 +202,14 @@ export default function MonacoEditor() {
       // didChange is gated on openDocs, so a fresh session safely ignores it.
       const session = getSession(pending.session.languageId);
       if (session && !pending.model.isDisposed()) {
+        const change = supportsIncrementalSync(session)
+          ? pending.changes
+          : modelSnapshot(pending.model);
         void didChange(
           session,
           uri,
           (lspChangeVersion += 1),
-          pending.model.getValue(),
+          change,
         );
       }
     }
@@ -263,7 +289,7 @@ export default function MonacoEditor() {
       );
     });
 
-    const changeSub = editor.onDidChangeModelContent(() => {
+    const changeSub = editor.onDidChangeModelContent((event) => {
       const path = currentPathRef.current;
       const model = editor.getModel();
       if (!path || !model) return;
@@ -282,7 +308,7 @@ export default function MonacoEditor() {
           storeWriteTimer = null;
         }
         pendingStoreWrite = null;
-        useEditorStore.getState().updateContent(path, model.getValue());
+        useEditorStore.getState().updateContent(path, modelSnapshot(model));
       } else {
         pendingStoreWrite = { path, model };
         if (storeWriteTimer) clearTimeout(storeWriteTimer);
@@ -296,7 +322,29 @@ export default function MonacoEditor() {
         const uri = lspUriForModel(model);
         // Debounce per-URI: a burst of typing yields ONE didChange with the
         // latest text, and edits to other documents never clear this one.
-        pendingLspChanges.current.set(uri, { session, model });
+        const changes: LspContentChange[] = event.changes.map((change) => ({
+          range: {
+            start: {
+              line: change.range.startLineNumber - 1,
+              character: change.range.startColumn - 1,
+            },
+            end: {
+              line: change.range.endLineNumber - 1,
+              character: change.range.endColumn - 1,
+            },
+          },
+          rangeLength: change.rangeLength,
+          text: change.text,
+        }));
+        const previous = pendingLspChanges.current.get(uri);
+        pendingLspChanges.current.set(uri, {
+          session,
+          model,
+          changes:
+            previous?.model === model
+              ? [...previous.changes, ...changes]
+              : changes,
+        });
         const existing = lspChangeTimers.current.get(uri);
         if (existing) clearTimeout(existing);
         lspChangeTimers.current.set(

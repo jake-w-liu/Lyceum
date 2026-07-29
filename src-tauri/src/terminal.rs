@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Condvar, Mutex};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
@@ -28,12 +28,73 @@ const OUTPUT_QUEUE_CAPACITY: usize = 64;
 const MAX_OUTPUT_BATCH: usize = 32 * 1024;
 /// How long the emitter waits for more output before flushing a partial batch.
 const MAX_OUTPUT_DELAY: std::time::Duration = std::time::Duration::from_millis(5);
+/// Maximum terminal data events emitted but not yet parsed by xterm. Together
+/// with `MAX_OUTPUT_BATCH`, this bounds the WebView/event/xterm backlog to about
+/// 256 KiB per terminal; the reader's bounded queue adds another ~256 KiB.
+const MAX_IN_FLIGHT_OUTPUT_EVENTS: usize = 8;
 
 fn terminal_output_channel() -> (
     std::sync::mpsc::SyncSender<Vec<u8>>,
     std::sync::mpsc::Receiver<Vec<u8>>,
 ) {
     std::sync::mpsc::sync_channel(OUTPUT_QUEUE_CAPACITY)
+}
+
+#[derive(Default)]
+struct OutputFlowState {
+    in_flight: usize,
+    cancelled: bool,
+}
+
+#[derive(Default)]
+struct OutputFlow {
+    state: Mutex<OutputFlowState>,
+    ready: Condvar,
+}
+
+impl OutputFlow {
+    fn reserve(&self) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while !state.cancelled && state.in_flight >= MAX_IN_FLIGHT_OUTPUT_EVENTS {
+            state = self
+                .ready
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        if state.cancelled {
+            return false;
+        }
+        state.in_flight += 1;
+        true
+    }
+
+    fn acknowledge(&self, count: usize) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.in_flight = state.in_flight.saturating_sub(count);
+        self.ready.notify_all();
+    }
+
+    fn cancel(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.cancelled = true;
+        self.ready.notify_all();
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .cancelled
+    }
 }
 
 /// At most this many pending writes may queue for a session's writer thread.
@@ -47,6 +108,16 @@ fn terminal_input_channel() -> (
     std::sync::mpsc::Receiver<Vec<u8>>,
 ) {
     std::sync::mpsc::sync_channel(INPUT_QUEUE_CAPACITY)
+}
+
+fn enqueue_terminal_input(
+    input: &std::sync::mpsc::SyncSender<Vec<u8>>,
+    bytes: Vec<u8>,
+) -> Result<(), String> {
+    input.try_send(bytes).map_err(|error| match error {
+        std::sync::mpsc::TrySendError::Full(_) => "terminal input queue full".to_string(),
+        std::sync::mpsc::TrySendError::Disconnected(_) => "terminal input closed".to_string(),
+    })
 }
 
 /// Own the PTY writer on a dedicated thread and drain the input queue in order.
@@ -131,6 +202,7 @@ fn session_key(window: &tauri::Window, id: &str) -> String {
 #[derive(Default)]
 pub struct TerminalManager {
     sessions: Mutex<HashMap<String, Session>>,
+    output_flows: Mutex<HashMap<String, Arc<OutputFlow>>>,
     teardowns: crate::julia::TeardownTracker,
 }
 
@@ -138,6 +210,16 @@ impl TerminalManager {
     /// Kill every running terminal session. Called on app exit so no shell
     /// subprocess is orphaned when Lyceum quits.
     pub fn shutdown_all(&self) {
+        let flows: Vec<Arc<OutputFlow>> = self
+            .output_flows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain()
+            .map(|(_, flow)| flow)
+            .collect();
+        for flow in flows {
+            flow.cancel();
+        }
         let sessions = {
             let mut sessions = self
                 .sessions
@@ -158,6 +240,21 @@ impl TerminalManager {
     /// there is gen-guarded and tolerates a miss).
     pub fn close_sessions_for_window(&self, label: &str) {
         let prefix = format!("{label}:");
+        let flows: Vec<Arc<OutputFlow>> = {
+            let mut flows = self
+                .output_flows
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let keys: Vec<String> = flows
+                .keys()
+                .filter(|key| key.starts_with(&prefix))
+                .cloned()
+                .collect();
+            keys.iter().filter_map(|key| flows.remove(key)).collect()
+        };
+        for flow in flows {
+            flow.cancel();
+        }
         let removed: Vec<Session> = {
             let mut sessions = self
                 .sessions
@@ -310,6 +407,7 @@ pub fn terminal_create(
     let label = window.label().to_string();
     let data_event = format!("terminal:data:{id}");
     let exit_event = format!("terminal:exit:{id}");
+    let output_flow = Arc::new(OutputFlow::default());
 
     {
         let mut sessions = state
@@ -332,6 +430,11 @@ pub fn terminal_create(
             },
         );
     }
+    state
+        .output_flows
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(key.clone(), output_flow.clone());
 
     // Reader thread: pull raw bytes off the PTY and hand them to the emitter
     // thread through a channel. Splitting read from emit lets the emitter
@@ -399,14 +502,42 @@ pub fn terminal_create(
     // shell costs nothing extra — the batch closes as soon as the PTY goes quiet
     // for MAX_DELAY, so interactive echo is delayed by at most one 5 ms window.
     let app_for_thread = app.clone();
+    let key_for_emitter = key.clone();
+    let flow_for_emitter = output_flow.clone();
     std::thread::spawn(move || {
         while let Ok(first) = rx.recv() {
             let batch = collect_batch(&rx, first, MAX_OUTPUT_BATCH, MAX_OUTPUT_DELAY);
+            // `emit_to` only queues a WebView evaluation and returns immediately.
+            // Reserve a bounded slot first; xterm acknowledges after parsing so
+            // background output applies real backpressure all the way to the PTY.
+            if !flow_for_emitter.reserve() {
+                break;
+            }
             // base64 (a JSON-safe string) instead of Vec<u8>, which Tauri
             // would serialize as a bloated JSON number array (~3.5x).
-            let _ = app_for_thread.emit_to(label.as_str(), &data_event, STANDARD.encode(&batch));
+            if app_for_thread
+                .emit_to(label.as_str(), &data_event, STANDARD.encode(&batch))
+                .is_err()
+            {
+                flow_for_emitter.acknowledge(1);
+                break;
+            }
         }
-        let _ = app_for_thread.emit_to(label.as_str(), &exit_event, ());
+        if !flow_for_emitter.is_cancelled() {
+            let _ = app_for_thread.emit_to(label.as_str(), &exit_event, ());
+        }
+        if let Some(manager) = app_for_thread.try_state::<TerminalManager>() {
+            let mut flows = manager
+                .output_flows
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if flows
+                .get(&key_for_emitter)
+                .is_some_and(|flow| Arc::ptr_eq(flow, &flow_for_emitter))
+            {
+                flows.remove(&key_for_emitter);
+            }
+        }
     });
 
     Ok(())
@@ -436,9 +567,35 @@ pub fn terminal_write(
             .ok_or("no such terminal")?;
         session.input.clone()
     };
-    input
-        .send(normalize_terminal_input(&data))
-        .map_err(|_| "terminal input closed".to_string())
+    // Never wait for capacity here: this command executes on the macOS UI
+    // thread. A full bounded queue means the child is already not consuming
+    // input; report backpressure instead of freezing the whole window.
+    enqueue_terminal_input(&input, normalize_terminal_input(&data))
+}
+
+/// Release terminal output flow-control slots after xterm has parsed the data.
+#[tauri::command]
+pub fn terminal_ack_output(
+    window: tauri::Window,
+    state: State<TerminalManager>,
+    id: String,
+    count: usize,
+) -> Result<(), String> {
+    if count == 0 {
+        return Ok(());
+    }
+    let flow = state
+        .output_flows
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&session_key(&window, &id))
+        .cloned();
+    // Late acknowledgements after EOF/close are harmless: no emitter remains
+    // waiting on the removed flow.
+    if let Some(flow) = flow {
+        flow.acknowledge(count);
+    }
+    Ok(())
 }
 
 /// Resize a session's PTY (in character cells).
@@ -476,6 +633,14 @@ pub fn terminal_close(
     state: State<TerminalManager>,
     id: String,
 ) -> Result<(), String> {
+    if let Some(flow) = state
+        .output_flows
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&session_key(&window, &id))
+    {
+        flow.cancel();
+    }
     let removed = state
         .sessions
         .lock()
@@ -504,6 +669,46 @@ mod tests {
             sender.try_send(vec![0; 4096]),
             Err(std::sync::mpsc::TrySendError::Full(_))
         ));
+    }
+
+    #[test]
+    fn terminal_output_flow_waits_at_the_parse_backlog_cap() {
+        let flow = Arc::new(OutputFlow::default());
+        for _ in 0..MAX_IN_FLIGHT_OUTPUT_EVENTS {
+            assert!(flow.reserve());
+        }
+
+        let waiting_flow = flow.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let reserved = waiting_flow.reserve();
+            done_tx.send(reserved).expect("report reservation");
+        });
+
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "one more event must wait until xterm acknowledges parsed output"
+        );
+        flow.acknowledge(1);
+        assert!(done_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("reservation should resume"));
+        waiter.join().expect("flow waiter");
+    }
+
+    #[test]
+    fn terminal_output_flow_cancel_unblocks_a_waiting_emitter() {
+        let flow = Arc::new(OutputFlow::default());
+        for _ in 0..MAX_IN_FLIGHT_OUTPUT_EVENTS {
+            assert!(flow.reserve());
+        }
+
+        let waiting_flow = flow.clone();
+        let waiter = std::thread::spawn(move || waiting_flow.reserve());
+        flow.cancel();
+        assert!(!waiter.join().expect("flow waiter"));
     }
 
     #[test]
@@ -569,38 +774,22 @@ mod tests {
 
     #[test]
     fn terminal_write_never_blocks_on_a_stalled_pty() {
-        // Models a child that has stopped reading its stdin: the PTY write blocks.
-        // terminal_write runs on the UI thread, so it must hand off to the writer
-        // thread and return instead of blocking there itself.
-        struct BlockingWriter(std::sync::mpsc::Receiver<()>);
-        impl Write for BlockingWriter {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                // Blocks until the test releases it (or forever, if it never does).
-                let _ = self.0.recv();
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
+        // Keep the receiver alive but deliberately never drain it, modelling a
+        // writer blocked behind a child that stopped reading.
+        let (sender, _receiver) = terminal_input_channel();
+        for _ in 0..INPUT_QUEUE_CAPACITY {
+            enqueue_terminal_input(&sender, b"keystroke".to_vec()).expect("queue capacity");
         }
-
-        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-        let (sender, receiver) = terminal_input_channel();
-        spawn_terminal_writer(Box::new(BlockingWriter(release_rx)), receiver)
-            .expect("writer thread");
-
         let started = std::time::Instant::now();
-        for _ in 0..64 {
-            sender.send(b"keystroke".to_vec()).expect("queued");
-        }
+        let error = enqueue_terminal_input(&sender, b"one too many".to_vec())
+            .expect_err("full queue must reject");
         let elapsed = started.elapsed();
-        drop(release_tx);
-        drop(sender);
 
         assert!(
-            elapsed < std::time::Duration::from_secs(1),
-            "queuing input behind a stalled PTY took {elapsed:?}"
+            elapsed < std::time::Duration::from_millis(100),
+            "rejecting input behind a stalled PTY took {elapsed:?}"
         );
+        assert_eq!(error, "terminal input queue full");
     }
 
     #[test]

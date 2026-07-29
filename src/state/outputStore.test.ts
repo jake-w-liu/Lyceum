@@ -2,14 +2,19 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   MAX_OUTPUT_LINES,
   appendOutputBuffered,
+  bufferedOutputLineCount,
   flushOutputBuffer,
   initialOutputData,
+  resetOutputBuffer,
   useOutputStore,
 } from "./outputStore";
 
 const get = () => useOutputStore.getState();
 
-beforeEach(() => useOutputStore.setState(initialOutputData, false));
+beforeEach(() => {
+  resetOutputBuffer();
+  useOutputStore.setState(initialOutputData, false);
+});
 
 describe("outputStore", () => {
   it("appends and clears lines", () => {
@@ -43,5 +48,20 @@ describe("outputStore", () => {
     expect(lines).toHaveLength(MAX_OUTPUT_LINES);
     expect(lines[lines.length - 1]).toBe(`line ${MAX_OUTPUT_LINES + 249}`);
     expect(lines[0]).toBe("line 250"); // oldest 250 dropped
+  });
+
+  it("caps streamed output before a suspended animation frame resumes", () => {
+    for (let i = 0; i < MAX_OUTPUT_LINES * 3; i += 1) {
+      appendOutputBuffered(`stream ${i}`);
+    }
+
+    expect(bufferedOutputLineCount()).toBe(MAX_OUTPUT_LINES);
+    flushOutputBuffer();
+
+    expect(get().lines).toHaveLength(MAX_OUTPUT_LINES);
+    expect(get().lines[0]).toBe(`stream ${MAX_OUTPUT_LINES * 2}`);
+    expect(get().lines[get().lines.length - 1]).toBe(
+      `stream ${MAX_OUTPUT_LINES * 3 - 1}`,
+    );
   });
 });

@@ -115,6 +115,19 @@ describe("createOutputBatcher", () => {
     expect(Array.from(concat(writes))).toEqual([0, 0, 1, 1, 2, 2, 3, 3, 4, 4]);
   });
 
+  it("keeps the default xterm parse unit at 64 KiB", () => {
+    const writes: Uint8Array[] = [];
+    const sched = fakeScheduler();
+    const b = createOutputBatcher({ write: (x) => writes.push(x), ...sched });
+    b.push(new Uint8Array(128 * 1024));
+
+    sched.runFrame();
+
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toHaveLength(64 * 1024);
+    expect(sched.pending()).toBe(1);
+  });
+
   it("always makes progress even when a single chunk exceeds the cap", () => {
     const writes: Uint8Array[] = [];
     const sched = fakeScheduler();
@@ -125,7 +138,11 @@ describe("createOutputBatcher", () => {
     });
     b.push(bytes(1, 2, 3, 4, 5)); // 5 bytes > cap of 2
     sched.runFrame();
-    expect(Array.from(writes[0])).toEqual([1, 2, 3, 4, 5]);
+    expect(Array.from(writes[0])).toEqual([1, 2]);
+    sched.runFrame();
+    sched.runFrame();
+    expect(Array.from(concat(writes))).toEqual([1, 2, 3, 4, 5]);
+    expect(writes.every((write) => write.length <= 2)).toBe(true);
   });
 
   it("flushNow writes everything immediately and cancels the pending frame", () => {
@@ -211,10 +228,10 @@ describe("createOutputBatcher", () => {
     expect(sched.timerDelay()).toBe(250);
   });
 
-  it("drains the whole backlog from the fallback when frames never run", () => {
+  it("keeps each fallback write capped when a suspended window resumes", () => {
     // The document is not being rendered, so requestAnimationFrame callbacks are
-    // never invoked. Without the fallback the backlog grew for as long as the
-    // window stayed away and landed in one stalling write on return.
+    // never invoked. The timer itself may also be suspended until the window
+    // returns; it must not bypass the cap and hand xterm one giant parse unit.
     const writes: Uint8Array[] = [];
     const sched = fakeScheduler();
     const b = createOutputBatcher({
@@ -227,9 +244,60 @@ describe("createOutputBatcher", () => {
     sched.runTimer();
 
     expect(writes).toHaveLength(1);
-    expect(writes[0].length).toBe(200); // the byte cap does not apply off-frame
-    expect(sched.pending()).toBe(0); // the losing frame was cancelled
+    expect(writes[0].length).toBe(4);
+    expect(sched.pending()).toBe(1);
+    expect(sched.pendingTimers()).toBe(1);
+
+    while (sched.pendingTimers() > 0) sched.runTimer();
+    expect(concat(writes).length).toBe(200);
+    expect(writes.every((write) => write.length <= 4)).toBe(true);
+  });
+
+  it("flushNow preserves order without creating an oversized xterm write", () => {
+    const writes: Uint8Array[] = [];
+    const sched = fakeScheduler();
+    const b = createOutputBatcher({
+      write: (x) => writes.push(x),
+      maxFlushBytes: 4,
+      ...sched,
+    });
+    b.push(bytes(1, 2, 3));
+    b.push(bytes(4, 5, 6));
+    b.push(bytes(7, 8, 9, 10, 11)); // one source chunk can itself exceed the cap
+
+    b.flushNow();
+
+    expect(writes.every((write) => write.length <= 4)).toBe(true);
+    expect(Array.from(concat(writes))).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    expect(sched.pending()).toBe(0);
     expect(sched.pendingTimers()).toBe(0);
+  });
+
+  it("acknowledges source chunks only after xterm reports them parsed", () => {
+    const writes: Uint8Array[] = [];
+    const parsed: Array<() => void> = [];
+    const acknowledgements: number[] = [];
+    const sched = fakeScheduler();
+    const b = createOutputBatcher({
+      write: (x, onParsed) => {
+        writes.push(x);
+        parsed.push(onParsed);
+      },
+      maxFlushBytes: 4,
+      ...sched,
+    });
+    b.push(bytes(1, 2), () => acknowledgements.push(1));
+    b.push(bytes(3, 4, 5), () => acknowledgements.push(2));
+
+    sched.runFrame();
+    expect(Array.from(writes[0])).toEqual([1, 2, 3, 4]);
+    expect(acknowledgements).toEqual([]);
+    parsed[0]();
+    expect(acknowledgements).toEqual([1]);
+
+    sched.runFrame();
+    parsed[1]();
+    expect(acknowledgements).toEqual([1, 2]);
   });
 
   it("a frame cancels the fallback so output is never written twice", () => {

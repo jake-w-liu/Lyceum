@@ -27,6 +27,15 @@ export async function lspSend(id: string, message: string): Promise<void> {
     await invoke("lsp_send", { id, message });
   } catch (e) {
     console.debug("lsp_send failed (server gone?)", id, e);
+    // A full bounded queue means the server stopped consuming stdin. The
+    // rejected message would leave its document state stale, so stop this
+    // wedged instance; the owning client observes its exit and performs the
+    // existing one-shot restart with full didOpen snapshots.
+    if (String(e).includes("input queue full")) {
+      void lspStop(id).catch((stopError) => {
+        console.debug("failed to stop backpressured LSP server", id, stopError);
+      });
+    }
   }
 }
 

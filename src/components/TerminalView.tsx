@@ -10,6 +10,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import {
+  acknowledgePtyOutput,
   closePty,
   createPty,
   onPtyData,
@@ -103,7 +104,7 @@ export function TerminalView({
     // minimised/occluded/on another Space): without it the backlog grew for the
     // whole time the window was away and landed as one stalling write on return.
     const outputBatcher = createOutputBatcher({
-      write: (bytes) => term.write(bytes),
+      write: (bytes, onParsed) => term.write(bytes, onParsed),
       requestFrame: (cb) => requestAnimationFrame(cb),
       cancelFrame: (handle) => cancelAnimationFrame(handle),
       requestTimer: (cb, ms) => window.setTimeout(cb, ms),
@@ -208,7 +209,11 @@ export function TerminalView({
         // Register listeners BEFORE creating the PTY: the Rust reader thread
         // starts emitting output immediately, so attaching after createPty
         // would drop the initial shell prompt/banner.
-        offData = await onPtyData(ptyId, (bytes) => outputBatcher.push(bytes));
+        offData = await onPtyData(ptyId, (bytes) =>
+          outputBatcher.push(bytes, () => {
+            void acknowledgePtyOutput(ptyId);
+          }),
+        );
         offExit = await onPtyExit(ptyId, () => {
           // Drain buffered output first so the exit notice prints after it.
           outputBatcher.flushNow();

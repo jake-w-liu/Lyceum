@@ -151,7 +151,10 @@ describe("PdfViewer", () => {
     // Indicator shows the total; the top page is current.
     const indicator = await screen.findByLabelText("Page number");
     expect(indicator).toHaveValue("1");
-    expect(indicator.parentElement).toHaveTextContent("/ 3");
+    await waitFor(
+      () => expect(indicator.parentElement).toHaveTextContent("/ 3"),
+      { timeout: 5_000 },
+    );
     // One page-layer per page, stacked in a single scroll container — i.e. a
     // continuous document, not a single paged canvas.
     const scroll = container.querySelector(".pdf-scroll") as HTMLElement;
@@ -165,7 +168,7 @@ describe("PdfViewer", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
-  it("reserves exact page dimensions before mounting the scroll stack", async () => {
+  it("loads exact page dimensions only when a page becomes visible", async () => {
     mockPdfDocument(2);
     pdfMocks.getPage.mockImplementation(async (pageNumber: number) => {
       const width = pageNumber === 1 ? 400 : 800;
@@ -195,10 +198,52 @@ describe("PdfViewer", () => {
     await screen.findByLabelText("Page number");
 
     const pages = container.querySelectorAll<HTMLElement>(".pdf-page-layer");
-    expect(pages[0].style.width).toBe("400px");
+    await waitFor(() => expect(pages[0].style.width).toBe("400px"));
     expect(pages[0].style.height).toBe("200px");
+    expect(pdfMocks.getPage).not.toHaveBeenCalledWith(2);
+    expect(pages[1].style.width).toBe("612px");
+    expect(pages[1].style.height).toBe("792px");
+
+    fireEvent.click(screen.getByLabelText("Next page"));
+    await waitFor(() => expect(pdfMocks.getPage).toHaveBeenCalledWith(2));
     expect(pages[1].style.width).toBe("800px");
     expect(pages[1].style.height).toBe("300px");
+  });
+
+  it("keeps a bounded render window while tracking manual scroll without an observer", async () => {
+    mockPdfDocument(5);
+
+    const { container } = render(<PdfViewer path="/w/fallback-scroll.pdf" />);
+    await screen.findByLabelText("Page number");
+    const scroll = container.querySelector(".pdf-scroll") as HTMLDivElement;
+    const pages = Array.from(
+      container.querySelectorAll<HTMLElement>(".pdf-page-layer"),
+    );
+    pages.forEach((page, index) => {
+      Object.defineProperty(page, "offsetTop", {
+        configurable: true,
+        value: index * 252,
+      });
+      Object.defineProperty(page, "offsetHeight", {
+        configurable: true,
+        value: 240,
+      });
+    });
+
+    // +12 px scroll padding lands inside page 3 (top 504, bottom 744).
+    scroll.scrollTop = 500;
+    fireEvent.scroll(scroll);
+
+    await waitFor(() =>
+      expect(screen.getByLabelText("Page number")).toHaveValue("3"),
+    );
+    await waitFor(() =>
+      expect(container.querySelectorAll("canvas.pdf-canvas")).toHaveLength(3),
+    );
+    expect(pdfMocks.getPage).toHaveBeenCalledWith(2);
+    expect(pdfMocks.getPage).toHaveBeenCalledWith(3);
+    expect(pdfMocks.getPage).toHaveBeenCalledWith(4);
+    expect(pdfMocks.getPage).not.toHaveBeenCalledWith(5);
   });
 
   it("registers and cleans up text-layer selection geometry", async () => {

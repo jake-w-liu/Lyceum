@@ -20,9 +20,11 @@ import {
   didOpen,
   ensureServer,
   getSession,
+  supportsIncrementalSync,
   setOpenDocsProvider,
   stopServer,
 } from "./lspClient";
+import type { LspSession } from "./lspClient";
 import { initialLspStatusData, useLspStatusStore } from "../state/lspStatusStore";
 
 function sentMethods(calls: unknown[][]): string[] {
@@ -103,6 +105,53 @@ describe("ensureServer", () => {
     expect(sentMethods(lspSendMock.mock.calls)).not.toContain(
       "textDocument/didChange",
     );
+  });
+
+  it("sends incremental content changes without a full-document snapshot", async () => {
+    const session = await ensureServer("julia", "/w", null);
+    await session?.ready;
+    const uri = "file:///w/incremental.jl";
+    await didOpen(session!, uri, "julia", "abc");
+    lspSendMock.mockClear();
+
+    await didChange(session!, uri, 2, [
+      {
+        range: {
+          start: { line: 0, character: 1 },
+          end: { line: 0, character: 2 },
+        },
+        rangeLength: 1,
+        text: "Z",
+      },
+    ]);
+
+    const raw = lspSendMock.mock.calls
+      .map((call) => JSON.parse(String(call[1])))
+      .find((message) => message.method === "textDocument/didChange");
+    expect(raw.params.contentChanges).toEqual([
+      {
+        range: {
+          start: { line: 0, character: 1 },
+          end: { line: 0, character: 2 },
+        },
+        rangeLength: 1,
+        text: "Z",
+      },
+    ]);
+  });
+
+  it("recognizes numeric and object incremental-sync capabilities", () => {
+    const base = { capabilities: {} } as LspSession;
+    expect(supportsIncrementalSync(base)).toBe(false);
+    expect(
+      supportsIncrementalSync({ ...base, capabilities: { textDocumentSync: 2 } }),
+    ).toBe(true);
+    expect(
+      supportsIncrementalSync({
+        ...base,
+        capabilities: { textDocumentSync: { change: 2 } },
+      }),
+    ).toBe(true);
   });
 
   it("didOpens already-open documents when a session becomes ready", async () => {

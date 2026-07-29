@@ -289,6 +289,7 @@ pub fn run() {
             walk::list_workspace_files,
             terminal::terminal_create,
             terminal::terminal_write,
+            terminal::terminal_ack_output,
             terminal::terminal_resize,
             terminal::terminal_close,
             julia::run_process,
