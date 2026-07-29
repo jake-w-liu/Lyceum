@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const invokeMock = vi.fn();
 const listenMock = vi.fn();
 const writeFileMock = vi.fn();
+const acknowledgeRunOutputMock = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
 }));
@@ -10,6 +11,8 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: (...args: unknown[]) => listenMock(...args),
 }));
 vi.mock("./ipc", () => ({
+  acknowledgeRunOutput: (...args: unknown[]) =>
+    acknowledgeRunOutputMock(...args),
   writeFile: (...args: unknown[]) => writeFileMock(...args),
 }));
 
@@ -166,6 +169,7 @@ describe("runActiveCode", () => {
       "two",
       "[stderr] boom",
     ]);
+    expect(acknowledgeRunOutputMock).toHaveBeenCalledTimes(2);
   });
 
   it("runs Python selection as code without saving the file", async () => {

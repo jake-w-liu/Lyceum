@@ -240,6 +240,9 @@ impl TeardownTracker {
 #[derive(Default)]
 pub struct RunManager {
     pub(crate) runs: RunMap,
+    /// Per-run stdout/stderr flow controls. An event remains in flight until
+    /// the owning WebView callback accepts it and calls `run_ack_output`.
+    pub(crate) output_flows: Arc<Mutex<HashMap<String, Arc<crate::output_flow::OutputFlow>>>>,
     /// Run keys whose cancel arrived before the child was registered (cancel
     /// raced the spawn). `stream_child` consults this right after it inserts and
     /// kills immediately, so a Stop click during the spawn window is honored
@@ -255,6 +258,16 @@ impl RunManager {
     /// Entries are drained under the lock, but the (blocking) kills happen
     /// after the guard is dropped so reaper threads are never blocked on it.
     pub fn shutdown_all(&self) {
+        let flows: Vec<_> = self
+            .output_flows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain()
+            .map(|(_, flow)| flow)
+            .collect();
+        for flow in flows {
+            flow.cancel();
+        }
         let children: Vec<OwnedRun> = {
             let mut runs = self
                 .runs
@@ -284,6 +297,23 @@ impl RunManager {
     /// guard is dropped.
     pub fn cancel_runs_for_window(&self, label: &str) {
         let prefix = format!("{label}:");
+        let flows: Vec<_> = {
+            let mut output_flows = self
+                .output_flows
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let keys: Vec<_> = output_flows
+                .keys()
+                .filter(|key| key.starts_with(&prefix))
+                .cloned()
+                .collect();
+            keys.iter()
+                .filter_map(|key| output_flows.remove(key))
+                .collect()
+        };
+        for flow in flows {
+            flow.cancel();
+        }
         let mut children = Vec::new();
         self.runs
             .lock()
@@ -635,6 +665,12 @@ pub(crate) struct OutputChunk {
     pub(crate) lines: Vec<String>,
 }
 
+/// Maximum run/build events emitted but not yet accepted by JavaScript. With a
+/// normal 32 KiB read this bounds queued payloads to roughly 256 KiB per run;
+/// a forced 1 MiB newline-less line remains bounded to eight such payloads.
+const MAX_IN_FLIGHT_RUN_OUTPUT_EVENTS: usize = 8;
+const RUN_OUTPUT_READ_SIZE: usize = 32 * 1024;
+
 /// Incremental splitter that turns a child's raw output bytes into log lines.
 ///
 /// Unlike `BufRead::lines()` (which only yields on `\n`/EOF and withholds
@@ -738,18 +774,60 @@ pub(crate) fn emit_output_chunk(
 /// `OutputChunk` event to the owning window only. Batching per read (rather than
 /// per line) keeps a chatty child from flooding the UI thread with events, at no
 /// latency cost — the batch is emitted as soon as the read returns.
-fn pump<R: Read>(mut reader: R, app: &AppHandle, label: &str, event: &str, stream_name: &str) {
+fn pump<R: Read>(
+    mut reader: R,
+    app: &AppHandle,
+    label: &str,
+    event: &str,
+    stream_name: &str,
+    output_flow: &crate::output_flow::OutputFlow,
+) {
     let mut splitter = LineSplitter::default();
-    let mut buf = [0u8; 4096];
+    let mut buf = [0u8; RUN_OUTPUT_READ_SIZE];
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break,
-            Ok(n) => emit_output_chunk(app, label, event, stream_name, splitter.feed(&buf[..n])),
+            Ok(n) => {
+                let lines = splitter.feed(&buf[..n]);
+                if lines.is_empty() {
+                    continue;
+                }
+                if !output_flow.reserve() {
+                    return;
+                }
+                if app
+                    .emit_to(
+                        label,
+                        event,
+                        OutputChunk {
+                            stream: stream_name.into(),
+                            lines,
+                        },
+                    )
+                    .is_err()
+                {
+                    output_flow.acknowledge(1);
+                    return;
+                }
+            }
             Err(_) => break,
         }
     }
     if let Some(line) = splitter.finish() {
-        emit_output_chunk(app, label, event, stream_name, vec![line]);
+        if output_flow.reserve()
+            && app
+                .emit_to(
+                    label,
+                    event,
+                    OutputChunk {
+                        stream: stream_name.into(),
+                        lines: vec![line],
+                    },
+                )
+                .is_err()
+        {
+            output_flow.acknowledge(1);
+        }
     }
 }
 
@@ -1264,6 +1342,7 @@ pub fn run_process(
         run_key(&window, &id),
         state.runs.clone(),
         state.pending_cancel.clone(),
+        state.output_flows.clone(),
         state.teardowns.clone(),
         format!("run:output:{id}"),
         format!("run:exit:{id}"),
@@ -1323,6 +1402,7 @@ pub fn run_julia(
         run_key(&window, &id),
         state.runs.clone(),
         state.pending_cancel.clone(),
+        state.output_flows.clone(),
         state.teardowns.clone(),
         format!("julia:output:{id}"),
         format!("julia:exit:{id}"),
@@ -1342,21 +1422,34 @@ pub(crate) fn stream_child(
     key: String,
     runs: RunMap,
     pending_cancel: Arc<Mutex<HashMap<String, u64>>>,
+    output_flows: Arc<Mutex<HashMap<String, Arc<crate::output_flow::OutputFlow>>>>,
     teardowns: TeardownTracker,
     out_event: String,
     exit_event: String,
 ) {
+    let output_flow = Arc::new(crate::output_flow::OutputFlow::new(
+        MAX_IN_FLIGHT_RUN_OUTPUT_EVENTS,
+    ));
+    if let Some(replaced_flow) = output_flows
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(key.clone(), output_flow.clone())
+    {
+        replaced_flow.cancel();
+    }
     let out_handle = child.stdout.take().map(|stdout| {
         let app = app.clone();
         let label = label.clone();
         let event = out_event.clone();
-        std::thread::spawn(move || pump(stdout, &app, &label, &event, "stdout"))
+        let output_flow = output_flow.clone();
+        std::thread::spawn(move || pump(stdout, &app, &label, &event, "stdout", &output_flow))
     });
     let err_handle = child.stderr.take().map(|stderr| {
         let app = app.clone();
         let label = label.clone();
         let event = out_event.clone();
-        std::thread::spawn(move || pump(stderr, &app, &label, &event, "stderr"))
+        let output_flow = output_flow.clone();
+        std::thread::spawn(move || pump(stderr, &app, &label, &event, "stderr", &output_flow))
     });
     let child = own_child_in_new_process_group(child);
     // Register the child, but honor a cancel that arrived during the spawn window
@@ -1401,8 +1494,16 @@ pub(crate) fn stream_child(
             }
             let _ = drained_tx.send(());
         });
-        let (status, _output_drained) =
+        let (status, output_drained) =
             wait_for_owned_child_and_output_drain(&child, &drained_rx, Duration::from_secs(2));
+        // A hidden/unresponsive WebView can leave both pumps waiting for an
+        // acknowledgement after the child already exited. The drain window
+        // preserves normal tail output; after it expires, cancel the flow so
+        // the pump joiner cannot leak forever.
+        if !output_drained {
+            output_flow.cancel();
+            let _ = drained_rx.recv_timeout(Duration::from_secs(1));
+        }
         let code = status.and_then(|status| status.code()).unwrap_or(-1);
         // Remove only after coordinated drain/termination has completed. A late
         // run_cancel that sees an already-reaped OwnedChild is harmless: the
@@ -1418,6 +1519,17 @@ pub(crate) fn stream_child(
                 .is_some_and(|registered| Arc::ptr_eq(registered, &child))
             {
                 runs.remove(&key);
+            }
+        }
+        {
+            let mut flows = output_flows
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if flows
+                .get(&key)
+                .is_some_and(|registered| Arc::ptr_eq(registered, &output_flow))
+            {
+                flows.remove(&key);
             }
         }
         let _ = app.emit_to(label.as_str(), &exit_event, code);
@@ -1443,6 +1555,14 @@ pub fn run_cancel(
     id: String,
 ) -> Result<(), String> {
     let key = run_key(&window, &id);
+    if let Some(flow) = state
+        .output_flows
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&key)
+    {
+        flow.cancel();
+    }
     // Take the `runs` lock as the outer lock for both the remove and the
     // tombstone insert, matching `stream_child`'s ordering, so a cancel that
     // races the spawn cannot slip through a gap: if the child isn't registered
@@ -1474,6 +1594,30 @@ pub fn run_cancel(
         });
     } else if let Some(token) = pending_expiry {
         expire_pending_cancel(state.pending_cancel.clone(), key, token);
+    }
+    Ok(())
+}
+
+/// Acknowledge streamed run/build output after the owning WebView callback has
+/// accepted it. Late acknowledgements after exit/cancel are harmless.
+#[tauri::command]
+pub fn run_ack_output(
+    window: tauri::Window,
+    state: State<RunManager>,
+    id: String,
+    count: usize,
+) -> Result<(), String> {
+    if count == 0 {
+        return Ok(());
+    }
+    if let Some(flow) = state
+        .output_flows
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&run_key(&window, &id))
+        .cloned()
+    {
+        flow.acknowledge(count);
     }
     Ok(())
 }

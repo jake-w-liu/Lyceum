@@ -64,7 +64,7 @@ pub(crate) fn read_bytes_capped(path: &Path, limit: u64) -> std::io::Result<Vec<
 /// still be opened and viewed rather than failing the open outright. Files
 /// above `MAX_TEXT_FILE_SIZE` are refused (stat'd before reading) so a huge
 /// log/dataset cannot wedge the editor.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_file(
     app: AppHandle,
     window: tauri::Window,
@@ -315,7 +315,7 @@ fn read_file_bytes_impl(path: &Path) -> Result<Vec<u8>, String> {
 /// Read a file's raw bytes as a binary IPC `Response` (`InvokeResponseBody::Raw`)
 /// so the bytes travel as an `ArrayBuffer` — not a JSON `number[]` that would be
 /// materialized once as boxed numbers and copied again into a `Uint8Array`.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_file_bytes(
     app: AppHandle,
     window: tauri::Window,

@@ -601,7 +601,7 @@ fn read_dir_entries_for_workspace(
 
 /// Read the immediate children of a directory path. Used by the file explorer
 /// to lazily expand folders.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_directory(
     app: AppHandle,
     window: tauri::Window,

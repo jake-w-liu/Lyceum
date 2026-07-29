@@ -105,7 +105,7 @@ pub fn list_files(root: &Path, max: usize) -> Result<Vec<String>, String> {
 
 /// List workspace files (absolute paths) under `root` for quick-open, capped at
 /// 5000 entries.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_workspace_files(
     app: AppHandle,
     window: tauri::Window,

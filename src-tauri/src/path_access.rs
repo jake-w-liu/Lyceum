@@ -45,7 +45,7 @@ impl PathAccessManager {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn authorize_workspace_root(
     app: AppHandle,
     window: tauri::Window,

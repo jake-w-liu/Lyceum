@@ -12,7 +12,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -32,6 +32,9 @@ const MAX_CONTENT_LENGTH: usize = 16 * 1024 * 1024;
 /// Kept small because Lyceum syncs whole documents (`contentChanges: [{ text }]`),
 /// so one entry can be the size of the edited file.
 const INPUT_QUEUE_CAPACITY: usize = 64;
+/// At most this many complete server messages may wait in Tauri/WebView. A
+/// single message is capped separately by `MAX_CONTENT_LENGTH`.
+const MAX_IN_FLIGHT_OUTPUT_MESSAGES: usize = 4;
 
 fn lsp_input_channel() -> (
     std::sync::mpsc::SyncSender<Vec<u8>>,
@@ -152,6 +155,7 @@ struct LspSession {
     // single didChange on a large file can exceed the 64 KiB pipe buffer: any
     // server that paused reading would freeze the window mid-keystroke.
     input: std::sync::mpsc::SyncSender<Vec<u8>>,
+    output_flow: Arc<crate::output_flow::OutputFlow>,
     child: crate::julia::OwnedRun,
     gen: u64,
 }
@@ -180,6 +184,7 @@ impl LspManager {
             servers.drain().map(|(_, session)| session).collect()
         };
         for session in removed {
+            session.output_flow.cancel();
             crate::julia::terminate_owned_child(&session.child);
             let _ = crate::julia::wait_owned_child(&session.child);
         }
@@ -215,6 +220,7 @@ impl LspManager {
         // command can observe or race them.
         self.teardowns.spawn(move || {
             for session in removed {
+                session.output_flow.cancel();
                 crate::julia::terminate_owned_child(&session.child);
                 // Reap so the exited server does not linger as a zombie process.
                 let _ = crate::julia::wait_owned_child(&session.child);
@@ -290,6 +296,9 @@ pub fn lsp_start(
     let key_for_thread = key.clone();
     let message_event = format!("lsp:message:{id}");
     let exit_event = format!("lsp:exit:{id}");
+    let output_flow = Arc::new(crate::output_flow::OutputFlow::new(
+        MAX_IN_FLIGHT_OUTPUT_MESSAGES,
+    ));
 
     // Insert the session before starting the reader thread. A server can exit
     // immediately after spawn; if the reader observed EOF before the map entry
@@ -308,11 +317,13 @@ pub fn lsp_start(
             key,
             LspSession {
                 input: input_tx,
+                output_flow: output_flow.clone(),
                 child,
                 gen,
             },
         );
     if let Some(old) = displaced {
+        old.output_flow.cancel();
         state.teardowns.spawn(move || {
             crate::julia::terminate_owned_child(&old.child);
             let _ = crate::julia::wait_owned_child(&old.child);
@@ -323,13 +334,22 @@ pub fn lsp_start(
     std::thread::spawn(move || {
         let mut decoder = LspDecoder::default();
         let mut buf = [0u8; 4096];
-        loop {
+        'read: loop {
             match stdout.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
                     decoder.push(&buf[..n]);
                     while let Some(body) = decoder.next_message() {
-                        let _ = app_for_thread.emit_to(label.as_str(), &message_event, body);
+                        if !output_flow.reserve() {
+                            break 'read;
+                        }
+                        if app_for_thread
+                            .emit_to(label.as_str(), &message_event, body)
+                            .is_err()
+                        {
+                            output_flow.acknowledge(1);
+                            break 'read;
+                        }
                     }
                 }
                 Err(_) => break,
@@ -354,6 +374,7 @@ pub fn lsp_start(
                 }
             };
             if let Some(session) = removed {
+                session.output_flow.cancel();
                 manager.teardowns.spawn(move || {
                     crate::julia::terminate_owned_child(&session.child);
                     let _ = crate::julia::wait_owned_child(&session.child);
@@ -435,6 +456,30 @@ pub fn lsp_send(
     enqueue_lsp_input(&input, encode_message(&message))
 }
 
+/// Acknowledge one server-to-client message after the JSON-RPC callback accepts
+/// it. Late acknowledgements after stop/exit are harmless.
+#[tauri::command]
+pub fn lsp_ack_output(
+    window: tauri::Window,
+    state: State<LspManager>,
+    id: String,
+    count: usize,
+) -> Result<(), String> {
+    if count == 0 {
+        return Ok(());
+    }
+    let flow = state
+        .servers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&session_key(&window, &id))
+        .map(|session| session.output_flow.clone());
+    if let Some(flow) = flow {
+        flow.acknowledge(count);
+    }
+    Ok(())
+}
+
 /// Kill and remove a server (idempotent).
 #[tauri::command]
 pub fn lsp_stop(window: tauri::Window, state: State<LspManager>, id: String) -> Result<(), String> {
@@ -448,6 +493,7 @@ pub fn lsp_stop(window: tauri::Window, state: State<LspManager>, id: String) -> 
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(&session_key(&window, &id));
     if let Some(session) = removed {
+        session.output_flow.cancel();
         // Termination can wait through the SIGTERM grace period. Keep it off the
         // synchronous command/UI thread, as the other LSP teardown paths do.
         state.teardowns.spawn(move || {

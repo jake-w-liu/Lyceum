@@ -12,11 +12,13 @@ const {
   setListener,
   getListener,
   gitStatusMock,
+  acknowledgeWorkspaceWatchMock,
 } = vi.hoisted(() => {
   let listener: ((event: Event<WorkspaceFsEvent>) => void) | null = null;
   const unlisten = vi.fn();
   return {
     gitStatusMock: vi.fn(),
+    acknowledgeWorkspaceWatchMock: vi.fn(),
     listenMock: vi.fn(
       (_name: string, cb: (event: Event<WorkspaceFsEvent>) => void) => {
         listener = cb;
@@ -36,6 +38,8 @@ const {
 
 vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
 vi.mock("../lib/ipc", () => ({
+  acknowledgeWorkspaceWatch: (...args: unknown[]) =>
+    acknowledgeWorkspaceWatchMock(...args),
   gitStatus: gitStatusMock,
   readFile: readFileMock,
   unwatchWorkspace: unwatchWorkspaceMock,
@@ -139,6 +143,42 @@ describe("useWorkspaceFileWatcher", () => {
       docs.find((doc) => doc.path === "/w/plot.png")?.reloadVersion,
     ).toBe(1);
     expect(readFileMock).not.toHaveBeenCalled();
+  });
+
+  it("acknowledges the exact watcher generation and rescans open docs after overflow", async () => {
+    useEditorStore.getState().openDoc({
+      path: "/w/paper.pdf",
+      content: "",
+      language: "pdf",
+      kind: "pdf",
+    });
+    renderHook(() => useWorkspaceFileWatcher());
+    await Promise.resolve();
+
+    act(() => {
+      getListener()?.({
+        event: "workspace:fs-change",
+        id: 1,
+        payload: {
+          root: "/w",
+          paths: [],
+          kind: "Coalesced",
+          gitChanged: true,
+          rescan: true,
+          watchId: 42,
+        },
+      });
+      vi.advanceTimersByTime(150);
+    });
+    await flushPromises();
+
+    expect(acknowledgeWorkspaceWatchMock).toHaveBeenCalledWith(42);
+    expect(useTreeStore.getState().refreshNonce).toBe(1);
+    expect(
+      useEditorStore.getState().docs.find((doc) => doc.path === "/w/paper.pdf")
+        ?.reloadVersion,
+    ).toBe(1);
+    expect(gitStatusMock).toHaveBeenCalledWith("/w");
   });
 
   it("ignores filesystem events from a stale workspace root", async () => {

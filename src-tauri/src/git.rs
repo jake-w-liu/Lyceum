@@ -253,7 +253,9 @@ fn path_is_within(path: &Path, root: &Path) -> bool {
 /// Return git status for the workspace as absolute-path -> status. Best-effort:
 /// when `root` is not inside or containing a git work tree (or git is unavailable) this
 /// returns `{ is_repo: false, files: {} }` rather than an error.
-#[tauri::command]
+// Focus-triggered refreshes must never run recursive repository discovery and
+// external `git status` processes on the macOS UI thread.
+#[tauri::command(async)]
 pub fn git_status(
     app: AppHandle,
     window: tauri::Window,

@@ -43,11 +43,25 @@ export async function lspStop(id: string): Promise<void> {
   await invoke("lsp_stop", { id });
 }
 
+async function acknowledgeLspOutput(id: string): Promise<void> {
+  try {
+    await invoke("lsp_ack_output", { id, count: 1 });
+  } catch {
+    // The server may exit between delivery and acknowledgement.
+  }
+}
+
 export function onLspMessage(
   id: string,
   cb: (raw: string) => void,
 ): Promise<UnlistenFn> {
-  return listenScoped<string>(`lsp:message:${id}`, (event) => cb(event.payload));
+  return listenScoped<string>(`lsp:message:${id}`, (event) => {
+    try {
+      cb(event.payload);
+    } finally {
+      void acknowledgeLspOutput(id);
+    }
+  });
 }
 
 export function onLspExit(id: string, cb: () => void): Promise<UnlistenFn> {

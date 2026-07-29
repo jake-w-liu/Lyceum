@@ -59,6 +59,10 @@ export interface WorkspaceFsEvent {
   root: string;
   paths: string[];
   kind: string;
+  /** Backend path accumulator overflowed while this WebView was suspended. */
+  rescan?: boolean;
+  /** Generation token used to acknowledge exactly this watcher's event. */
+  watchId?: number;
   /**
    * True when the watcher saw Git metadata change under `.git`. These events
    * should refresh decorations without forcing the visible Explorer tree to
@@ -147,6 +151,14 @@ export async function unwatchWorkspace(root?: string): Promise<void> {
   await invoke("unwatch_workspace", { root: root ?? null });
 }
 
+export async function acknowledgeWorkspaceWatch(watchId: number): Promise<void> {
+  try {
+    await invoke("workspace_watch_ack", { watchId });
+  } catch {
+    // The watcher may be replaced between delivery and acknowledgement.
+  }
+}
+
 /** List the immediate children of a directory (file explorer, M2). */
 export async function listWorkspaceFiles(root: string): Promise<string[]> {
   await authorizeWorkspaceRoot(root);
@@ -179,6 +191,18 @@ export async function readFileBytes(path: string): Promise<Uint8Array> {
 /** Cancel an in-flight Julia/build run by id (`run_cancel`). */
 export async function runCancel(id: string): Promise<void> {
   await invoke("run_cancel", { id });
+}
+
+/** Acknowledge one streamed run/build output event after JavaScript accepted it. */
+export async function acknowledgeRunOutput(
+  id: string,
+  count = 1,
+): Promise<void> {
+  try {
+    await invoke("run_ack_output", { id, count });
+  } catch {
+    // The run may exit between delivery and acknowledgement.
+  }
 }
 
 /** Create a new empty file (errors if it already exists). */

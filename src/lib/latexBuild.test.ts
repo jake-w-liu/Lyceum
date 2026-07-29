@@ -4,6 +4,7 @@ import { waitFor } from "@testing-library/react";
 const invokeMock = vi.fn();
 const listenMock = vi.fn();
 const writeFileMock = vi.fn();
+const acknowledgeRunOutputMock = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
 }));
@@ -11,6 +12,8 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: (...args: unknown[]) => listenMock(...args),
 }));
 vi.mock("./ipc", () => ({
+  acknowledgeRunOutput: (...args: unknown[]) =>
+    acknowledgeRunOutputMock(...args),
   writeFile: (...args: unknown[]) => writeFileMock(...args),
 }));
 
@@ -134,6 +137,7 @@ describe("runLatexBuild", () => {
       "[latex] removed stale /w/main.pdf",
     );
     expect(useOutputStore.getState().lines).toContain("[latex] compiling");
+    expect(acknowledgeRunOutputMock).toHaveBeenCalledTimes(1);
     const refreshAfterRemove = useTreeStore.getState().refreshNonce;
     expect(refreshAfterRemove).toBe(1);
 

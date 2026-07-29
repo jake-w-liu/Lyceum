@@ -286,7 +286,7 @@ pub fn search_in_dir(root: &Path, query: &str, max: usize) -> Result<Vec<SearchM
 
 /// Search workspace file contents under `root` for `query`, capped at 1000
 /// matches.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn search_workspace(
     app: AppHandle,
     window: tauri::Window,

@@ -15,6 +15,7 @@ mod lsp;
 #[cfg(target_os = "macos")]
 mod macos_service;
 mod menu;
+mod output_flow;
 mod path_access;
 mod search;
 mod terminal;
@@ -294,15 +295,18 @@ pub fn run() {
             terminal::terminal_close,
             julia::run_process,
             julia::run_julia,
+            julia::run_ack_output,
             julia::run_cancel,
             latex::run_latex_build,
             workspace_watch::watch_workspace,
+            workspace_watch::workspace_watch_ack,
             workspace_watch::unwatch_workspace,
             window_ops::new_window,
             window_ops::quit_app,
             window_ops::cancel_quit,
             lsp::lsp_start,
             lsp::lsp_send,
+            lsp::lsp_ack_output,
             lsp::lsp_stop
         ])
         .build({

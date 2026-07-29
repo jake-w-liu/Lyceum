@@ -20,7 +20,7 @@ import {
   useEditorStore,
 } from "../state/editorStore";
 import { useTreeStore } from "../state/treeStore";
-import { writeFile } from "./ipc";
+import { acknowledgeRunOutput, writeFile } from "./ipc";
 import { isTexSourcePath } from "./fileTypes";
 import {
   deriveOutputPdf,
@@ -135,9 +135,13 @@ export async function runLatexBuild(
     offData = await listenScoped<{ stream: string; lines: string[] }>(
       `build:output:${id}`,
       (event) => {
-        const stderr = event.payload.stream === "stderr";
-        for (const line of event.payload.lines) {
-          appendOutputBuffered(stderr ? `[stderr] ${line}` : line);
+        try {
+          const stderr = event.payload.stream === "stderr";
+          for (const line of event.payload.lines) {
+            appendOutputBuffered(stderr ? `[stderr] ${line}` : line);
+          }
+        } finally {
+          void acknowledgeRunOutput(id);
         }
       },
     );

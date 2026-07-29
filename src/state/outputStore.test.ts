@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  MAX_OUTPUT_CHARS,
   MAX_OUTPUT_LINES,
   appendOutputBuffered,
   bufferedOutputLineCount,
@@ -63,5 +64,41 @@ describe("outputStore", () => {
     expect(get().lines[get().lines.length - 1]).toBe(
       `stream ${MAX_OUTPUT_LINES * 3 - 1}`,
     );
+  });
+
+  it("caps retained output by text size, keeping the newest tail", () => {
+    const chunk = "x".repeat(Math.floor(MAX_OUTPUT_CHARS / 3));
+    for (let i = 0; i < 5; i += 1) get().append(`${i}${chunk}`);
+
+    const lines = get().lines;
+    expect(lines.reduce((sum, line) => sum + line.length, 0)).toBeLessThanOrEqual(
+      MAX_OUTPUT_CHARS,
+    );
+    expect(lines[lines.length - 1]?.startsWith("4")).toBe(true);
+    expect(lines.some((line) => line.startsWith("0"))).toBe(false);
+  });
+
+  it("caps buffered output by text size while animation frames are suspended", () => {
+    const chunk = "y".repeat(Math.floor(MAX_OUTPUT_CHARS / 2));
+    appendOutputBuffered(`old${chunk}`);
+    appendOutputBuffered(`middle${chunk}`);
+    appendOutputBuffered(`new${chunk}`);
+    flushOutputBuffer();
+
+    const lines = get().lines;
+    expect(lines.reduce((sum, line) => sum + line.length, 0)).toBeLessThanOrEqual(
+      MAX_OUTPUT_CHARS,
+    );
+    expect(lines[lines.length - 1]?.startsWith("new")).toBe(true);
+    expect(lines.some((line) => line.startsWith("old"))).toBe(false);
+  });
+
+  it("truncates one oversized line without splitting a surrogate pair", () => {
+    get().append(`old${"z".repeat(MAX_OUTPUT_CHARS)}😀`);
+    const [line] = get().lines;
+
+    expect(line.length).toBeLessThanOrEqual(MAX_OUTPUT_CHARS);
+    expect(line.endsWith("😀")).toBe(true);
+    expect(line.charCodeAt(0)).not.toBeGreaterThanOrEqual(0xdc00);
   });
 });

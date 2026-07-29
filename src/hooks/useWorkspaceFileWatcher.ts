@@ -3,6 +3,7 @@ import { type UnlistenFn } from "@tauri-apps/api/event";
 import type { Event } from "@tauri-apps/api/event";
 import { listenScoped } from "../lib/windowEvents";
 import {
+  acknowledgeWorkspaceWatch,
   unwatchWorkspace,
   watchWorkspace,
   type WorkspaceFsEvent,
@@ -59,9 +60,11 @@ export function useWorkspaceFileWatcher(): void {
           }
         }
       }
+      const rescan = event.payload.rescan === true;
+      reloadAllOpenDocs ||= rescan;
       const gitChanged = Boolean(event.payload.gitChanged);
       pendingGitRefresh ||= gitChanged;
-      pendingTreeRefresh ||= event.payload.paths.length > 0 || !gitChanged;
+      pendingTreeRefresh ||= rescan || event.payload.paths.length > 0 || !gitChanged;
       clearRefreshTimer();
       refreshTimer = window.setTimeout(() => {
         refreshTimer = 0;
@@ -92,7 +95,15 @@ export function useWorkspaceFileWatcher(): void {
       try {
         const fn = await listenScoped<WorkspaceFsEvent>(
           "workspace:fs-change",
-          scheduleRefresh,
+          (event) => {
+            try {
+              scheduleRefresh(event);
+            } finally {
+              if (typeof event.payload.watchId === "number") {
+                void acknowledgeWorkspaceWatch(event.payload.watchId);
+              }
+            }
+          },
         );
         if (disposed) {
           fn();

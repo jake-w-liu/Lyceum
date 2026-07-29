@@ -1,23 +1,57 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const invokeMock = vi.fn();
+let messageHandler: ((event: { payload: string }) => void) | null = null;
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
 }));
 vi.mock("../lib/windowEvents", () => ({
-  listenScoped: vi.fn(),
+  listenScoped: vi.fn(
+    async (_event: string, handler: (event: { payload: string }) => void) => {
+      messageHandler = handler;
+      return () => {};
+    },
+  ),
 }));
 
-import { lspSend } from "./lspBridge";
+import { lspSend, onLspMessage } from "./lspBridge";
 
 beforeEach(() => {
-  invokeMock.mockReset();
+  invokeMock.mockReset().mockResolvedValue(undefined);
+  messageHandler = null;
   vi.spyOn(console, "debug").mockImplementation(() => {});
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+describe("lspBridge output flow control", () => {
+  it("acknowledges a message after delivering it to JSON-RPC", async () => {
+    const callback = vi.fn();
+    await onLspMessage("lsp-typescript-1", callback);
+
+    messageHandler?.({ payload: '{"jsonrpc":"2.0"}' });
+
+    expect(callback).toHaveBeenCalledWith('{"jsonrpc":"2.0"}');
+    expect(invokeMock).toHaveBeenCalledWith("lsp_ack_output", {
+      id: "lsp-typescript-1",
+      count: 1,
+    });
+  });
+
+  it("still acknowledges malformed input when the consumer throws", async () => {
+    await onLspMessage("lsp-rust-2", () => {
+      throw new Error("bad JSON");
+    });
+
+    expect(() => messageHandler?.({ payload: "{" })).toThrow("bad JSON");
+    expect(invokeMock).toHaveBeenCalledWith("lsp_ack_output", {
+      id: "lsp-rust-2",
+      count: 1,
+    });
+  });
 });
 
 describe("lspSend", () => {

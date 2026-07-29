@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::mem;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use notify::event::{EventKind, MetadataKind, ModifyKind};
@@ -16,6 +16,7 @@ use crate::workspace_paths::{
 };
 
 const WORKSPACE_FS_CHANGE_EVENT: &str = "workspace:fs-change";
+static WATCH_FLOW_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Active watchers keyed by window label: each window owns at most one watcher,
 /// and watching/unwatching in one window never disturbs another window's.
@@ -87,7 +88,15 @@ impl WorkspaceWatchManager {
 struct ActiveWatcher {
     root: PathBuf,
     requested_root: String,
+    watch_id: u64,
+    output_flow: Arc<crate::output_flow::OutputFlow>,
     _watcher: RecommendedWatcher,
+}
+
+impl Drop for ActiveWatcher {
+    fn drop(&mut self) {
+        self.output_flow.cancel();
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -97,6 +106,11 @@ pub struct WorkspaceFsEvent {
     paths: Vec<String>,
     kind: String,
     git_changed: bool,
+    /// The bounded path accumulator overflowed while the WebView was asleep.
+    /// The frontend must reload every open document instead of only `paths`.
+    rescan: bool,
+    /// Generation-safe acknowledgement token for this watcher.
+    watch_id: u64,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -176,25 +190,94 @@ fn spawn_fs_event_coalescer(
     app: AppHandle,
     label: String,
     root: String,
+    watch_id: u64,
+    output_flow: Arc<crate::output_flow::OutputFlow>,
 ) -> std::sync::mpsc::SyncSender<WorkspaceEventPaths> {
     let (tx, rx) = std::sync::mpsc::sync_channel::<WorkspaceEventPaths>(FS_EVENT_QUEUE_CAPACITY);
     let label_for_error = label.clone();
     let spawned = std::thread::Builder::new()
         .name("lyceum-fs-coalesce".to_string())
         .spawn(move || {
-            while let Ok(first) = rx.recv() {
+            let mut pending: Option<(Vec<String>, HashSet<String>, bool, bool)> = None;
+            loop {
+                if pending.is_none() {
+                    let Ok(first) = rx.recv() else { break };
+                    let merged = coalesce_fs_events(
+                        &rx,
+                        first,
+                        FS_EVENT_COALESCE_WINDOW,
+                        MAX_COALESCED_PATHS,
+                    );
+                    let rescan = merged.paths.len() > MAX_COALESCED_PATHS;
+                    let seen = if rescan {
+                        HashSet::new()
+                    } else {
+                        merged.paths.iter().cloned().collect()
+                    };
+                    pending = Some((
+                        if rescan { Vec::new() } else { merged.paths },
+                        seen,
+                        merged.git_changed,
+                        rescan,
+                    ));
+                }
+
+                if output_flow.try_reserve() {
+                    let Some((paths, _, git_changed, rescan)) = pending.take() else {
+                        output_flow.acknowledge(1);
+                        continue;
+                    };
+                    if app
+                        .emit_to(
+                            label.as_str(),
+                            WORKSPACE_FS_CHANGE_EVENT,
+                            WorkspaceFsEvent {
+                                root: root.clone(),
+                                paths,
+                                kind: COALESCED_EVENT_KIND.to_string(),
+                                git_changed,
+                                rescan,
+                                watch_id,
+                            },
+                        )
+                        .is_err()
+                    {
+                        output_flow.acknowledge(1);
+                        break;
+                    }
+                    continue;
+                }
+                if output_flow.is_cancelled() {
+                    break;
+                }
+
+                // JavaScript has not acknowledged the prior event. Keep
+                // consuming native notifications and fold them into one bounded
+                // pending payload instead of filling either the Rust channel or
+                // Tauri's unbounded WebView queue.
+                let first = match rx.recv_timeout(FS_EVENT_COALESCE_WINDOW) {
+                    Ok(first) => first,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                };
                 let merged =
                     coalesce_fs_events(&rx, first, FS_EVENT_COALESCE_WINDOW, MAX_COALESCED_PATHS);
-                let _ = app.emit_to(
-                    label.as_str(),
-                    WORKSPACE_FS_CHANGE_EVENT,
-                    WorkspaceFsEvent {
-                        root: root.clone(),
-                        paths: merged.paths,
-                        kind: COALESCED_EVENT_KIND.to_string(),
-                        git_changed: merged.git_changed,
-                    },
-                );
+                if let Some((paths, seen, git_changed, rescan)) = pending.as_mut() {
+                    *git_changed |= merged.git_changed;
+                    if !*rescan {
+                        for path in merged.paths {
+                            if seen.insert(path.clone()) {
+                                paths.push(path);
+                                if paths.len() > MAX_COALESCED_PATHS {
+                                    paths.clear();
+                                    seen.clear();
+                                    *rescan = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
             }
         });
     if spawned.is_err() {
@@ -206,7 +289,7 @@ fn spawn_fs_event_coalescer(
     tx
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn watch_workspace(
     app: AppHandle,
     window: tauri::Window,
@@ -278,7 +361,15 @@ pub fn watch_workspace(
     // notification let a build (or an npm install) inside the workspace enqueue
     // thousands of script evaluations and freeze the window. The frontend
     // already debounces these by 150 ms, so merging them costs it nothing.
-    let events_tx = spawn_fs_event_coalescer(app.clone(), label.clone(), root.clone());
+    let watch_id = WATCH_FLOW_SEQ.fetch_add(1, Ordering::Relaxed);
+    let output_flow = Arc::new(crate::output_flow::OutputFlow::new(1));
+    let events_tx = spawn_fs_event_coalescer(
+        app.clone(),
+        label.clone(),
+        root.clone(),
+        watch_id,
+        output_flow.clone(),
+    );
     let watcher_result =
         notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
             let Ok(event) = event else { return };
@@ -322,6 +413,8 @@ pub fn watch_workspace(
     let next = ActiveWatcher {
         root: root_path.clone(),
         requested_root: root.clone(),
+        watch_id,
+        output_flow,
         _watcher: watcher,
     };
     // Re-acquire only to install the finished watcher, re-checking the dedup in
@@ -362,7 +455,7 @@ pub fn watch_workspace(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn unwatch_workspace(
     app: AppHandle,
     window: tauri::Window,
@@ -448,6 +541,28 @@ pub fn unwatch_workspace(
         removed
     };
     drop(removed);
+    Ok(())
+}
+
+/// Acknowledge the latest coalesced filesystem event. `watch_id` prevents a
+/// delayed callback from an old root/generation from releasing the new watcher.
+#[tauri::command]
+pub fn workspace_watch_ack(
+    window: tauri::Window,
+    state: State<'_, WorkspaceWatchManager>,
+    watch_id: u64,
+) -> Result<(), String> {
+    let flow = state
+        .state
+        .lock()
+        .map_err(|_| "workspace watcher lock poisoned".to_string())?
+        .active
+        .get(window.label())
+        .filter(|watcher| watcher.watch_id == watch_id)
+        .map(|watcher| watcher.output_flow.clone());
+    if let Some(flow) = flow {
+        flow.acknowledge(1);
+    }
     Ok(())
 }
 

@@ -22,7 +22,7 @@ import { useLayoutStore } from "../state/layoutStore";
 import { useWorkspaceStore } from "../state/workspaceStore";
 import { useSettingsStore, type Settings } from "../state/settingsStore";
 import { resolveTerminalCwd } from "./terminalCwd";
-import { writeFile } from "./ipc";
+import { acknowledgeRunOutput, writeFile } from "./ipc";
 import {
   buildRunProfileCommand,
   missingRuntimeMessage,
@@ -115,9 +115,13 @@ export async function runActiveCode(): Promise<void> {
     offData = await listenScoped<{ stream: string; lines: string[] }>(
       `run:output:${id}`,
       (event) => {
-        const stderr = event.payload.stream === "stderr";
-        for (const line of event.payload.lines) {
-          appendOutputBuffered(stderr ? `[stderr] ${line}` : line);
+        try {
+          const stderr = event.payload.stream === "stderr";
+          for (const line of event.payload.lines) {
+            appendOutputBuffered(stderr ? `[stderr] ${line}` : line);
+          }
+        } finally {
+          void acknowledgeRunOutput(id);
         }
       },
     );

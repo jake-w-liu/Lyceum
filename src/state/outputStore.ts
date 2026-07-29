@@ -30,6 +30,11 @@ export const initialOutputData: OutputData = {
 // Cap the retained output so a very chatty/long run can't grow the buffer (and
 // the rendered <pre>) without bound; we keep the most recent lines.
 export const MAX_OUTPUT_LINES = 5000;
+// A line-count cap alone is not a memory bound: the backend permits a 1 MiB
+// newline-less line, so 5,000 retained lines could approach 5 GiB. JavaScript
+// strings use at most two bytes per UTF-16 code unit; two million code units
+// therefore keep retained text near 4 MiB (plus small array/string overhead).
+export const MAX_OUTPUT_CHARS = 2 * 1024 * 1024;
 
 export const useOutputStore = create<OutputState>()((set) => ({
   ...initialOutputData,
@@ -53,16 +58,49 @@ export const useOutputStore = create<OutputState>()((set) => ({
 }));
 
 function appendCapped(existing: string[], incoming: string[]): string[] {
-  const tail =
-    incoming.length > MAX_OUTPUT_LINES
-      ? incoming.slice(incoming.length - MAX_OUTPUT_LINES)
-      : incoming;
-  const keepExisting = MAX_OUTPUT_LINES - tail.length;
-  const prefix =
-    existing.length > keepExisting
-      ? existing.slice(existing.length - keepExisting)
-      : existing;
-  return [...prefix, ...tail];
+  const reversed: string[] = [];
+  let chars = 0;
+  const takeNewest = (source: string[]): boolean => {
+    for (let i = source.length - 1; i >= 0; i -= 1) {
+      if (
+        reversed.length >= MAX_OUTPUT_LINES ||
+        chars >= MAX_OUTPUT_CHARS
+      ) {
+        return false;
+      }
+      const remaining = MAX_OUTPUT_CHARS - chars;
+      const original = source[i];
+      const line =
+        original.length > remaining
+          ? unicodeSafeTail(original, remaining)
+          : original;
+      reversed.push(line);
+      chars += line.length;
+      if (line.length !== original.length) return false;
+    }
+    return true;
+  };
+  if (takeNewest(incoming)) takeNewest(existing);
+  reversed.reverse();
+  return reversed;
+}
+
+function unicodeSafeTail(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  if (maxChars <= 0) return "";
+  let start = value.length - maxChars;
+  // Do not begin with the low half of a surrogate pair.
+  const first = value.charCodeAt(start);
+  const previous = start > 0 ? value.charCodeAt(start - 1) : 0;
+  if (
+    first >= 0xdc00 &&
+    first <= 0xdfff &&
+    previous >= 0xd800 &&
+    previous <= 0xdbff
+  ) {
+    start += 1;
+  }
+  return value.slice(start);
 }
 
 // Coalesce a burst of streamed output lines into one store update per animation
@@ -70,6 +108,7 @@ function appendCapped(existing: string[], incoming: string[]): string[] {
 // (which was quadratic with the full-buffer re-join in OutputView).
 let outputBuffer: string[] = [];
 let outputBufferStart = 0;
+let outputBufferChars = 0;
 let flushScheduled = false;
 
 function scheduleFlush(): void {
@@ -85,13 +124,24 @@ function scheduleFlush(): void {
 
 /** Buffer a streamed output line for batched flushing (see scheduleFlush). */
 export function appendOutputBuffered(line: string): void {
+  if (line.length > MAX_OUTPUT_CHARS) {
+    line = unicodeSafeTail(line, MAX_OUTPUT_CHARS);
+  }
   outputBuffer.push(line);
-  if (outputBuffer.length - outputBufferStart > MAX_OUTPUT_LINES) {
+  outputBufferChars += line.length;
+  while (
+    outputBuffer.length - outputBufferStart > MAX_OUTPUT_LINES ||
+    outputBufferChars > MAX_OUTPUT_CHARS
+  ) {
+    outputBufferChars -= outputBuffer[outputBufferStart].length;
     outputBufferStart += 1;
   }
   // A hidden WebView can defer animation frames indefinitely. Keep the backing
   // array bounded too, not just its logical live suffix.
-  if (outputBufferStart >= MAX_OUTPUT_LINES) {
+  if (
+    outputBufferStart >= 256 ||
+    outputBufferStart * 2 >= outputBuffer.length
+  ) {
     outputBuffer = outputBuffer.slice(outputBufferStart);
     outputBufferStart = 0;
   }
@@ -104,6 +154,7 @@ export function appendOutputBuffered(line: string): void {
 export function resetOutputBuffer(): void {
   outputBuffer = [];
   outputBufferStart = 0;
+  outputBufferChars = 0;
 }
 
 /** Number of retained streamed lines awaiting the next flush. */
@@ -118,5 +169,6 @@ export function flushOutputBuffer(): void {
   const batch = outputBuffer.slice(outputBufferStart);
   outputBuffer = [];
   outputBufferStart = 0;
+  outputBufferChars = 0;
   useOutputStore.getState().appendMany(batch);
 }
