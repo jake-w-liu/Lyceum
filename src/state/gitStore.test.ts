@@ -217,7 +217,7 @@ describe("computeFolders", () => {
 });
 
 describe("gitStore", () => {
-  it("ignores stale git status responses after the workspace changes", async () => {
+  it("runs a trailing git query for a workspace change during an active refresh", async () => {
     let resolveOld!: (value: GitStatus) => void;
     let resolveNew!: (value: GitStatus) => void;
     gitStatusMock
@@ -238,7 +238,10 @@ describe("gitStore", () => {
     const oldRefresh = useGitStore.getState().refresh();
     useWorkspaceStore.getState().openWorkspace("/new");
     const newRefresh = useGitStore.getState().refresh();
+    expect(gitStatusMock).toHaveBeenCalledTimes(1);
 
+    resolveOld({ isRepo: true, files: { "/old/stale.ts": "deleted" } });
+    await vi.waitFor(() => expect(gitStatusMock).toHaveBeenCalledTimes(2));
     resolveNew({
       isRepo: true,
       rootRepo: "/new",
@@ -246,23 +249,17 @@ describe("gitStore", () => {
       files: { "/new/a.ts": "modified" },
       fileRepos: { "/new/a.ts": "/new" },
     });
-    await newRefresh;
+    await Promise.all([oldRefresh, newRefresh]);
+
     expect(useGitStore.getState().files).toEqual({
       "/new/a.ts": "modified",
     });
     expect(useGitStore.getState().fileScopes).toEqual({
       "/new/a.ts": "workspace",
     });
-
-    resolveOld({ isRepo: true, files: { "/old/stale.ts": "deleted" } });
-    await oldRefresh;
-
-    expect(useGitStore.getState().files).toEqual({
-      "/new/a.ts": "modified",
-    });
   });
 
-  it("ignores out-of-order responses within the SAME root (staleness guard)", async () => {
+  it("coalesces concurrent refresh requests into one trailing query", async () => {
     let resolveFirst!: (value: GitStatus) => void;
     let resolveSecond!: (value: GitStatus) => void;
     gitStatusMock
@@ -282,13 +279,15 @@ describe("gitStore", () => {
     useWorkspaceStore.getState().openWorkspace("/repo");
     const first = useGitStore.getState().refresh();
     const second = useGitStore.getState().refresh();
+    const third = useGitStore.getState().refresh();
 
-    // The NEWER request resolves first; the older one must not clobber it.
-    resolveSecond({ isRepo: true, files: { "/repo/new.ts": "modified" } });
-    await second;
+    expect(gitStatusMock).toHaveBeenCalledTimes(1);
     resolveFirst({ isRepo: true, files: { "/repo/stale.ts": "deleted" } });
-    await first;
+    await vi.waitFor(() => expect(gitStatusMock).toHaveBeenCalledTimes(2));
+    resolveSecond({ isRepo: true, files: { "/repo/new.ts": "modified" } });
+    await Promise.all([first, second, third]);
 
+    expect(gitStatusMock).toHaveBeenCalledTimes(2);
     expect(useGitStore.getState().files).toEqual({
       "/repo/new.ts": "modified",
     });

@@ -12,25 +12,54 @@ import {
 } from "../keybindings/keybindingRegistry";
 import { commandRegistry } from "../commands/commandRegistry";
 import { useUiStore } from "../state/uiStore";
-import { useEditorStore } from "../state/editorStore";
 import { useKeymapStore } from "../state/keymapStore";
 
-/** Snapshot the `when`-clause context from the relevant stores. */
-function buildContext(): KeyContext {
+function eventTargetElement(target: EventTarget | null): Element | null {
+  if (target instanceof Element) return target;
+  return document.activeElement instanceof Element
+    ? document.activeElement
+    : null;
+}
+
+function isTextInput(element: Element | null): boolean {
+  if (!element) return false;
+  if (
+    element instanceof HTMLInputElement ||
+    element instanceof HTMLTextAreaElement
+  ) {
+    return true;
+  }
+  const editable = element.closest<HTMLElement>("[contenteditable]");
+  return editable?.isContentEditable === true;
+}
+
+/** Snapshot the `when`-clause context from the actual keyboard owner and stores. */
+function buildContext(target: EventTarget | null): KeyContext {
   const activeModal = useUiStore.getState().activeModal;
-  const hasActiveDoc = useEditorStore.getState().activePath !== null;
+  const element = eventTargetElement(target);
   return {
     paletteOpen: activeModal === "palette",
     quickOpenOpen: activeModal === "quickOpen",
     modalOpen: activeModal !== null,
-    editorFocus: activeModal === null && hasActiveDoc,
+    editorFocus:
+      activeModal === null &&
+      element !== null &&
+      element.closest(".monaco-host") !== null,
+    terminalFocus:
+      activeModal === null &&
+      element !== null &&
+      element.closest(".terminal-view") !== null,
+    textInputFocus: isTextInput(element),
+    findWidgetVisible:
+      activeModal === null &&
+      document.querySelector(".monaco-host .find-widget.visible") !== null,
   };
 }
 
 export function useCommandKeybindings(): void {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      const ctx = buildContext();
+      const ctx = buildContext(e.target);
       const id = matchKeybinding(
         e,
         ctx,

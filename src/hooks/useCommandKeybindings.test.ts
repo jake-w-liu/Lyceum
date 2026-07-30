@@ -82,4 +82,102 @@ describe("useCommandKeybindings", () => {
     expect(executeSpy).toHaveBeenCalledOnce();
     expect(executeSpy).toHaveBeenCalledWith("file.openFolder");
   });
+
+  it("does not report editorFocus when an Explorer input owns the keyboard", () => {
+    useEditorStore.getState().openDoc({
+      path: "/workspace/open.ts",
+      content: "",
+      language: "typescript",
+    });
+    useKeymapStore.getState().setUserKeybindings([
+      {
+        key: "ctrl+k",
+        command: "outside-editor",
+        when: "!editorFocus && textInputFocus",
+      },
+    ]);
+    const explorer = document.createElement("div");
+    explorer.className = "explorer";
+    const input = document.createElement("input");
+    explorer.appendChild(input);
+    document.body.appendChild(explorer);
+    const { unmount } = renderHook(() => useCommandKeybindings());
+    const event = new KeyboardEvent("keydown", {
+      key: "k",
+      code: "KeyK",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    input.dispatchEvent(event);
+    unmount();
+    explorer.remove();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(executeSpy).toHaveBeenCalledOnce();
+    expect(executeSpy).toHaveBeenCalledWith("outside-editor");
+  });
+
+  it("reports terminal and text-input focus from the actual event target", () => {
+    useKeymapStore.getState().setUserKeybindings([
+      {
+        key: "ctrl+k",
+        command: "terminal-input",
+        when: "terminalFocus && textInputFocus && !editorFocus",
+      },
+    ]);
+    const terminal = document.createElement("div");
+    terminal.className = "terminal-view";
+    const textarea = document.createElement("textarea");
+    terminal.appendChild(textarea);
+    document.body.appendChild(terminal);
+    const { unmount } = renderHook(() => useCommandKeybindings());
+    const event = new KeyboardEvent("keydown", {
+      key: "k",
+      code: "KeyK",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    textarea.dispatchEvent(event);
+    unmount();
+    terminal.remove();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(executeSpy).toHaveBeenCalledOnce();
+    expect(executeSpy).toHaveBeenCalledWith("terminal-input");
+  });
+
+  it("reports editor and text-input focus inside the Monaco host", () => {
+    useKeymapStore.getState().setUserKeybindings([
+      {
+        key: "ctrl+k",
+        command: "editor-input",
+        when: "editorFocus && textInputFocus && !terminalFocus",
+      },
+    ]);
+    const editor = document.createElement("div");
+    editor.className = "monaco-host";
+    const textarea = document.createElement("textarea");
+    editor.appendChild(textarea);
+    document.body.appendChild(editor);
+    const { unmount } = renderHook(() => useCommandKeybindings());
+    const event = new KeyboardEvent("keydown", {
+      key: "k",
+      code: "KeyK",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    textarea.dispatchEvent(event);
+    unmount();
+    editor.remove();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(executeSpy).toHaveBeenCalledOnce();
+    expect(executeSpy).toHaveBeenCalledWith("editor-input");
+  });
 });

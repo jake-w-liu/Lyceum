@@ -164,15 +164,18 @@ export const initialGitData: GitData = {
   folderScopes: {},
 };
 
-// Monotonic refresh id: only the LATEST in-flight refresh may write state, so a
-// slow earlier git query can't clobber a newer one even within the same root
-// (e.g. refresh-on-save racing refresh-on-focus).
+// Monotonic refresh id guards workspace changes while a query is in flight.
 let refreshSeq = 0;
+// Git status recursively discovers repositories and launches external Git
+// commands. Filesystem bursts can request refreshes faster than that work
+// completes, so serialize them and collapse every overlapping burst into one
+// trailing query. This prevents N Tokio workers from scanning the same tree and
+// spawning Git concurrently while still guaranteeing a final up-to-date pass.
+let refreshInFlight: Promise<void> | null = null;
+let refreshQueued = false;
 
-export const useGitStore = create<GitState>()((set) => ({
-  ...initialGitData,
-
-  refresh: async () => {
+export const useGitStore = create<GitState>()((set) => {
+  const refreshOnce = async (): Promise<void> => {
     const root = useWorkspaceStore.getState().rootPath;
     const seq = (refreshSeq += 1);
     const isCurrent = () =>
@@ -206,7 +209,36 @@ export const useGitStore = create<GitState>()((set) => ({
       // No Tauri backend (web/dev) or git error: show no decorations.
       set(initialGitData);
     }
-  },
+  };
 
-  clear: () => set(initialGitData),
-}));
+  const runRefreshQueue = async (): Promise<void> => {
+    while (refreshQueued) {
+      refreshQueued = false;
+      await refreshOnce();
+    }
+  };
+
+  return {
+    ...initialGitData,
+
+    refresh: () => {
+      refreshQueued = true;
+      if (!refreshInFlight) {
+        const cycle = runRefreshQueue();
+        refreshInFlight = cycle.finally(() => {
+          refreshInFlight = null;
+          // JavaScript cannot normally interleave between the queue loop's
+          // final condition and this callback, but keep the handoff complete if
+          // a host callback does enqueue at that boundary.
+          if (refreshQueued) void useGitStore.getState().refresh();
+        });
+      }
+      return refreshInFlight;
+    },
+
+    clear: () => {
+      refreshSeq += 1;
+      set(initialGitData);
+    },
+  };
+});

@@ -20,7 +20,9 @@ export function useOpenFileBridge(): void {
   useEffect(() => {
     if (!pendingOpenPath) return;
     const path = pendingOpenPath;
-    const position = useWorkspaceStore.getState().pendingOpenPosition;
+    const workspaceAtRequest = useWorkspaceStore.getState();
+    const position = workspaceAtRequest.pendingOpenPosition;
+    const rootPath = workspaceAtRequest.rootPath;
 
     if (isPdfPath(path)) {
       useEditorStore.getState().openDoc({
@@ -51,9 +53,21 @@ export function useOpenFileBridge(): void {
     // this read is in flight, the resolved file must STILL open — it just must
     // not steal the active tab or clear the newer request's pending state.
     let superseded = false;
+    // Record whether this read has ever outlived its originating workspace.
+    // Comparing only the root at resolution misses A → B → A, while using
+    // rootChangeSeq incorrectly rejects an explicit same-folder reopen.
+    let workspaceInvalidated = false;
+    const unwatchWorkspace = useWorkspaceStore.subscribe((state) => {
+      if (state.rootPath !== rootPath) workspaceInvalidated = true;
+    });
     (async () => {
       try {
         const content = await readFile(path);
+        // A newer FILE request in the same workspace should still let this read
+        // open in the background (the superseded behavior below). A WORKSPACE
+        // switch is different: its lifecycle reset intentionally discarded all
+        // tabs from the old root, so a late read must not repopulate one.
+        if (workspaceInvalidated) return;
         useEditorStore.getState().openDoc({
           path,
           content,
@@ -66,8 +80,13 @@ export function useOpenFileBridge(): void {
             .setPendingReveal(path, position.line, position.column ?? 1);
         }
       } catch (e) {
-        console.error("Failed to open", path, e);
+        // A workspace switch invalidates this request; errors from its old path
+        // are no longer actionable and should not pollute the current workspace.
+        if (!workspaceInvalidated) {
+          console.error("Failed to open", path, e);
+        }
       } finally {
+        unwatchWorkspace();
         if (!superseded) useWorkspaceStore.getState().clearPendingOpen();
       }
     })();

@@ -144,6 +144,96 @@ describe("useOpenFileBridge", () => {
     expect(useWorkspaceStore.getState().pendingOpenPath).toBeNull();
   });
 
+  it("does not reopen a file from a workspace that changed during the read", async () => {
+    let resolveRead!: (content: string) => void;
+    vi.mocked(readFile).mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveRead = resolve;
+        }),
+    );
+
+    render(<Harness />);
+    act(() => {
+      useWorkspaceStore.getState().openWorkspace("/workspace-a");
+      useWorkspaceStore.getState().requestOpenFile("/workspace-a/slow.py");
+    });
+    await waitFor(() =>
+      expect(readFile).toHaveBeenCalledWith("/workspace-a/slow.py"),
+    );
+
+    act(() => {
+      useWorkspaceStore.getState().openWorkspace("/workspace-b");
+      resolveRead("stale workspace contents");
+    });
+
+    await waitFor(() =>
+      expect(useWorkspaceStore.getState().rootPath).toBe("/workspace-b"),
+    );
+    expect(useEditorStore.getState().docs).toEqual([]);
+    expect(useWorkspaceStore.getState().pendingOpenPath).toBeNull();
+  });
+
+  it("does not revive an old read after switching away and back", async () => {
+    let resolveRead!: (content: string) => void;
+    vi.mocked(readFile).mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveRead = resolve;
+        }),
+    );
+
+    render(<Harness />);
+    act(() => {
+      useWorkspaceStore.getState().openWorkspace("/workspace-a");
+      useWorkspaceStore.getState().requestOpenFile("/workspace-a/slow.py");
+    });
+    await waitFor(() =>
+      expect(readFile).toHaveBeenCalledWith("/workspace-a/slow.py"),
+    );
+
+    act(() => {
+      useWorkspaceStore.getState().openWorkspace("/workspace-b");
+      useWorkspaceStore.getState().openWorkspace("/workspace-a");
+      resolveRead("stale workspace contents");
+    });
+
+    expect(useEditorStore.getState().docs).toEqual([]);
+  });
+
+  it("keeps an in-flight read when the same workspace is explicitly reopened", async () => {
+    let resolveRead!: (content: string) => void;
+    vi.mocked(readFile).mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveRead = resolve;
+        }),
+    );
+
+    render(<Harness />);
+    act(() => {
+      useWorkspaceStore.getState().openWorkspace("/workspace-a");
+      useWorkspaceStore.getState().requestOpenFile("/workspace-a/slow.py");
+    });
+    await waitFor(() =>
+      expect(readFile).toHaveBeenCalledWith("/workspace-a/slow.py"),
+    );
+
+    act(() => {
+      useWorkspaceStore.getState().openWorkspace("/workspace-a");
+      resolveRead("current workspace contents");
+    });
+
+    await waitFor(() =>
+      expect(useEditorStore.getState().docs).toEqual([
+        expect.objectContaining({
+          path: "/workspace-a/slow.py",
+          content: "current workspace contents",
+        }),
+      ]),
+    );
+  });
+
   it("opens images as viewer tabs without reading as text", async () => {
     render(<Harness />);
     act(() => {

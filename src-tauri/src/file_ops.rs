@@ -163,8 +163,8 @@ fn read_file_impl(path: &Path) -> Result<String, String> {
 /// renamed over the target, so the on-disk file is always either the complete
 /// old or the complete new version — never a truncated mix.
 // The atomic write path reads the old file, flushes and fsyncs the replacement,
-// renames it, and syncs its parent directory. Run that blocking filesystem work
-// on Tauri's command thread pool rather than the macOS UI thread.
+// renames it, and syncs its parent directory on Unix. Run that blocking
+// filesystem work on Tauri's command thread pool rather than the macOS UI thread.
 #[tauri::command(async)]
 pub fn write_file(
     app: AppHandle,
@@ -234,6 +234,27 @@ fn write_atomic_with_sequence(
     path: &Path,
     bytes: &[u8],
     sequence: &AtomicU64,
+) -> std::io::Result<()> {
+    write_atomic_with_sequence_and_parent_sync(path, bytes, sequence, sync_parent_directory)
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(parent: &Path) -> std::io::Result<()> {
+    std::fs::File::open(parent)?.sync_all()
+}
+
+// Windows does not support opening a directory with the ordinary File API.
+// The replacement file itself is fsynced before the rename on every platform.
+#[cfg(not(unix))]
+fn sync_parent_directory(_parent: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+fn write_atomic_with_sequence_and_parent_sync(
+    path: &Path,
+    bytes: &[u8],
+    sequence: &AtomicU64,
+    sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
     // If `path` is a symlink, write through to its real target. `std::fs::rename`
     // does NOT follow a final-component symlink — renaming over the link would
@@ -336,6 +357,10 @@ fn write_atomic_with_sequence(
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
+    // The replacement's contents are durable after the temp-file fsync, but
+    // the rename itself is directory metadata. On Unix, sync the containing
+    // directory so success also makes that name-to-file update durable.
+    sync_parent(&parent)?;
     Ok(())
 }
 
@@ -569,6 +594,27 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains("lyceum-tmp"))
             .collect();
         assert!(leftovers.is_empty(), "temp file leaked: {leftovers:?}");
+    }
+
+    #[test]
+    fn atomic_write_syncs_parent_after_the_replacement_is_visible() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let target = tmp.path().join("doc.txt");
+        std::fs::write(&target, b"old").expect("seed target");
+        let sequence = AtomicU64::new(0);
+        let mut synced_parent = None;
+
+        write_atomic_with_sequence_and_parent_sync(&target, b"new", &sequence, |parent| {
+            assert_eq!(
+                std::fs::read(&target).expect("replacement must be visible"),
+                b"new"
+            );
+            synced_parent = Some(parent.to_path_buf());
+            Ok(())
+        })
+        .expect("atomic write");
+
+        assert_eq!(synced_parent.as_deref(), Some(tmp.path()));
     }
 
     // Non-Windows: this exercises the per-component NAME_MAX (255-byte) clamp. On
