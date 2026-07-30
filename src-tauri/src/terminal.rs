@@ -277,12 +277,27 @@ impl TerminalManager {
 /// either run this synchronously during app exit or register it with the
 /// manager's teardown tracker for window/tab close.
 fn kill_and_reap(sessions: Vec<Session>) {
-    for mut session in sessions {
+    for session in sessions {
+        let Session {
+            master,
+            input,
+            mut child,
+            gen: _,
+        } = session;
+        // Release the manager's PTY handles before waiting. In particular, the
+        // writer thread blocks on `input.recv()` while this sender exists; keeping
+        // it inside `Session` until after wait created a teardown cycle on macOS:
+        // the writer/PTY stayed open, the shell remained in kernel exit state,
+        // and ExitRequested joined this teardown forever. Dropping the channel
+        // wakes an idle writer (which releases its duplicated PTY fd), while
+        // dropping the master initiates the normal terminal hangup.
+        drop(input);
+        drop(master);
         // child.kill() escalates SIGHUP -> grace -> SIGKILL (portable_pty),
         // so a shell that traps/ignores SIGHUP can't block child.wait()
         // forever and leak this thread, the process, and the PTY fds.
-        let _ = session.child.kill();
-        let _ = session.child.wait();
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
 
@@ -658,6 +673,133 @@ pub fn terminal_close(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug)]
+    struct NoopChildKiller;
+
+    impl portable_pty::ChildKiller for NoopChildKiller {
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(Self)
+        }
+    }
+
+    #[derive(Debug)]
+    struct WriterChannelAwareChild {
+        input: Mutex<std::sync::mpsc::Receiver<Vec<u8>>>,
+        writer_channel_closed_before_wait: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl portable_pty::ChildKiller for WriterChannelAwareChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(NoopChildKiller)
+        }
+    }
+
+    impl portable_pty::Child for WriterChannelAwareChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            Ok(None)
+        }
+
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            let input_disconnected = matches!(
+                self.input
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Disconnected)
+            );
+            self.writer_channel_closed_before_wait
+                .store(input_disconnected, Ordering::Release);
+            Ok(portable_pty::ExitStatus::with_exit_code(0))
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            None
+        }
+    }
+
+    #[test]
+    fn terminal_teardown_closes_writer_channel_before_waiting_for_child() {
+        let writer_channel_closed_before_wait = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (input, input_rx) = terminal_input_channel();
+        let pair = native_pty_system()
+            .openpty(PtySize::default())
+            .expect("open test PTY");
+        drop(pair.slave);
+        let session = Session {
+            master: pair.master,
+            input,
+            child: Box::new(WriterChannelAwareChild {
+                input: Mutex::new(input_rx),
+                writer_channel_closed_before_wait: writer_channel_closed_before_wait.clone(),
+            }),
+            gen: 0,
+        };
+
+        kill_and_reap(vec![session]);
+
+        assert!(
+            writer_channel_closed_before_wait.load(Ordering::Acquire),
+            "the writer channel must close before child.wait()"
+        );
+    }
+
+    #[test]
+    fn idle_real_pty_session_teardown_completes_promptly() {
+        let pair = native_pty_system()
+            .openpty(PtySize::default())
+            .expect("open test PTY");
+        let child = pair
+            .slave
+            .spawn_command(terminal_command(None, std::env::var("SHELL").ok()))
+            .expect("spawn test shell");
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().expect("clone PTY reader");
+        let writer = pair.master.take_writer().expect("take PTY writer");
+        let (input, input_rx) = terminal_input_channel();
+        spawn_terminal_writer(writer, input_rx).expect("spawn PTY writer");
+
+        // Model the production reader: drain until closing the master and killing
+        // the slave produces EOF/EIO. Keeping this clone live exercises the same
+        // resource topology as a real terminal tab.
+        let reader_thread = std::thread::spawn(move || {
+            let mut output = Vec::new();
+            let _ = reader.read_to_end(&mut output);
+        });
+        // Ensure the shell has reached its prompt before starting teardown.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let session = Session {
+            master: pair.master,
+            input,
+            child,
+            gen: 0,
+        };
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let teardown = std::thread::spawn(move || {
+            kill_and_reap(vec![session]);
+            let _ = done_tx.send(());
+        });
+
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("idle PTY teardown must not hang");
+        teardown.join().expect("teardown thread");
+        reader_thread.join().expect("reader thread");
+    }
 
     #[test]
     fn terminal_output_queue_is_strictly_bounded() {

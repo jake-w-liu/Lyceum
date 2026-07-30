@@ -31,9 +31,6 @@ vi.mock("../lib/settingsPersistence", () => ({
   flushSettingsPersistence: flushSettingsPersistenceMock,
 }));
 
-const cancelQuitMock = vi.hoisted(() => vi.fn(async () => {}));
-vi.mock("../lib/ipc", () => ({ cancelQuit: cancelQuitMock }));
-
 import { initialEditorData, useEditorStore } from "../state/editorStore";
 import { initialGitData, useGitStore } from "../state/gitStore";
 import {
@@ -108,7 +105,6 @@ describe("useWorkspaceLifecycle", () => {
     flushSettingsPersistenceMock.mockReset().mockResolvedValue(undefined);
     onCloseRequestedMock.mockClear();
     destroyMock.mockClear();
-    cancelQuitMock.mockReset().mockResolvedValue(undefined);
   });
   afterEach(() => vi.unstubAllGlobals());
 
@@ -321,87 +317,6 @@ describe("useWorkspaceLifecycle", () => {
       expect(preventDefault).toHaveBeenCalledTimes(1);
       expect(flushSettingsPersistenceMock).not.toHaveBeenCalled();
       expect(destroyMock).not.toHaveBeenCalled();
-      // Declining aborts any in-progress quit so the QUIT_REQUESTED latch clears.
-      expect(cancelQuitMock).toHaveBeenCalledTimes(1);
-    });
-
-    it("keeps repeated closes gated until quit cancellation is acknowledged", async () => {
-      const cancellation = deferred<void>();
-      cancelQuitMock.mockReturnValueOnce(cancellation.promise);
-      askMock.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
-      seedWorkspaceScopedUi("/old", true);
-      renderHook(() => useWorkspaceLifecycle());
-      await waitFor(() => expect(getCloseHandler()).not.toBeNull());
-
-      const firstPreventDefault = vi.fn();
-      const secondPreventDefault = vi.fn();
-      act(() => {
-        getCloseHandler()!({ preventDefault: firstPreventDefault });
-      });
-      await waitFor(() => expect(cancelQuitMock).toHaveBeenCalledTimes(1));
-
-      act(() => {
-        getCloseHandler()!({ preventDefault: secondPreventDefault });
-      });
-
-      expect(firstPreventDefault).toHaveBeenCalledTimes(1);
-      expect(secondPreventDefault).toHaveBeenCalledTimes(1);
-      expect(askMock).toHaveBeenCalledTimes(1);
-      expect(flushSettingsPersistenceMock).not.toHaveBeenCalled();
-      expect(destroyMock).not.toHaveBeenCalled();
-
-      await act(async () => {
-        cancellation.resolve();
-        await cancellation.promise;
-      });
-
-      // Once cancellation is confirmed, a fresh user request can safely follow
-      // the normal confirmation/flush/destroy path.
-      const thirdPreventDefault = vi.fn();
-      act(() => {
-        getCloseHandler()!({ preventDefault: thirdPreventDefault });
-      });
-      await waitFor(() => expect(destroyMock).toHaveBeenCalledTimes(1));
-      expect(thirdPreventDefault).toHaveBeenCalledTimes(1);
-      expect(askMock).toHaveBeenCalledTimes(2);
-    });
-
-    it("retries a failed quit cancellation before allowing another close", async () => {
-      const retry = deferred<void>();
-      cancelQuitMock
-        .mockRejectedValueOnce(new Error("backend unavailable"))
-        .mockReturnValueOnce(retry.promise);
-      askMock.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
-      seedWorkspaceScopedUi("/old", true);
-      renderHook(() => useWorkspaceLifecycle());
-      await waitFor(() => expect(getCloseHandler()).not.toBeNull());
-
-      act(() => {
-        getCloseHandler()!({ preventDefault: vi.fn() });
-      });
-      await waitFor(() => expect(cancelQuitMock).toHaveBeenCalledTimes(1));
-      // Let the rejected first flow release its per-request gate while retaining
-      // the fail-closed cancellation requirement.
-      await act(async () => Promise.resolve());
-
-      const retryPreventDefault = vi.fn();
-      act(() => {
-        getCloseHandler()!({ preventDefault: retryPreventDefault });
-      });
-      await waitFor(() => expect(cancelQuitMock).toHaveBeenCalledTimes(2));
-
-      expect(retryPreventDefault).toHaveBeenCalledTimes(1);
-      expect(askMock).toHaveBeenCalledTimes(1);
-      expect(flushSettingsPersistenceMock).not.toHaveBeenCalled();
-      expect(destroyMock).not.toHaveBeenCalled();
-
-      await act(async () => {
-        retry.resolve();
-        await retry.promise;
-      });
-
-      await waitFor(() => expect(destroyMock).toHaveBeenCalledTimes(1));
-      expect(askMock).toHaveBeenCalledTimes(2);
     });
 
     it("allows the close when the discard is confirmed", async () => {
@@ -417,8 +332,6 @@ describe("useWorkspaceLifecycle", () => {
 
       expect(preventDefault).toHaveBeenCalledTimes(1);
       await waitFor(() => expect(destroyMock).toHaveBeenCalledTimes(1));
-      // Confirming a close is not a quit-abort, so the latch must be left alone.
-      expect(cancelQuitMock).not.toHaveBeenCalled();
     });
 
     it("coalesces repeated close requests while a discard prompt is pending", async () => {

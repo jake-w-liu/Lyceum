@@ -110,6 +110,19 @@ fn teardown_window_workspace_ownership(
     clear_path_access();
 }
 
+/// Tauri may report a destroyed window either just before or just after removing
+/// its label from `webview_windows()`. In both cases, the window was the last one
+/// exactly when every label still visible to the callback is its own label.
+fn destroyed_window_was_last<I, S>(labels: I, destroyed_label: &str) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    labels
+        .into_iter()
+        .all(|label| label.as_ref() == destroyed_label)
+}
+
 /// Returns basic information about the running app and host platform.
 /// Used by the status bar (M1) and the command palette / about view later.
 #[tauri::command]
@@ -344,7 +357,6 @@ pub fn run() {
             workspace_watch::unwatch_workspace,
             window_ops::new_window,
             window_ops::quit_app,
-            window_ops::cancel_quit,
             lsp::lsp_start,
             lsp::lsp_send,
             lsp::lsp_ack_output,
@@ -376,17 +388,16 @@ pub fn run() {
                     app.state::<workspace_watch::WorkspaceWatchManager>()
                         .shutdown_all();
                 }
-                // During a Quit, exit the whole app once the last window has run
-                // its own close guard and been destroyed — so no window's unsaved
-                // work is discarded, and so macOS (which keeps the process alive
-                // after the last window closes) still actually quits.
+                // Exit once the last window has run its own close guard and been
+                // destroyed. Do this for a traffic-light close as well as Cmd+Q:
+                // relying on Tauri's original ExitRequested after an async
+                // frontend close guard can leave a zero-window, half-shutdown
+                // process on macOS. Other windows still keep the app alive.
                 RunEvent::WindowEvent {
                     label,
                     event: tauri::WindowEvent::Destroyed,
                     ..
-                } if window_ops::quit_requested()
-                    && app.webview_windows().into_keys().all(|l| l == label) =>
-                {
+                } if destroyed_window_was_last(app.webview_windows().into_keys(), &label) => {
                     app.exit(0);
                 }
                 #[cfg(target_os = "macos")]
@@ -410,8 +421,26 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{first_dir_arg_from, teardown_window_workspace_ownership, LaunchDir};
+    use super::{
+        destroyed_window_was_last, first_dir_arg_from, teardown_window_workspace_ownership,
+        LaunchDir,
+    };
     use std::cell::RefCell;
+
+    #[test]
+    fn destroyed_window_is_last_before_or_after_runtime_map_removal() {
+        assert!(destroyed_window_was_last(["main"], "main"));
+        assert!(destroyed_window_was_last(
+            std::iter::empty::<&str>(),
+            "main"
+        ));
+    }
+
+    #[test]
+    fn destroyed_window_is_not_last_while_any_other_window_remains() {
+        assert!(!destroyed_window_was_last(["main", "main1"], "main"));
+        assert!(!destroyed_window_was_last(["main1"], "main"));
+    }
 
     #[test]
     fn relative_second_instance_directory_uses_the_launching_process_cwd() {

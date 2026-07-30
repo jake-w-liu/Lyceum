@@ -1,11 +1,8 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tauri::{AppHandle, Manager, Runtime, WebviewWindow, WebviewWindowBuilder};
 
 static WINDOW_SEQUENCE: AtomicU64 = AtomicU64::new(1);
-// Set while a Quit is in progress so the run loop knows to exit the whole app
-// once the last window has finished its own close guard (see `quit_requested`).
-static QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 fn window_label(id: u64) -> String {
     format!("main{id}")
@@ -124,7 +121,7 @@ pub fn new_window(app: AppHandle) -> Result<(), String> {
 /// would silently discard unsaved edits in the other (unfocused) windows, since
 /// their `onCloseRequested` discard guards never run. Instead we close each other
 /// window so its guard prompts, and exit only once the last window is destroyed
-/// (handled in the run loop, gated on `quit_requested`). The calling window has
+/// (handled by the run loop's last-window invariant). The calling window has
 /// already been dirty-checked and had its settings flushed by the `quit` command,
 /// so we destroy it directly rather than re-firing its guard.
 #[tauri::command]
@@ -134,7 +131,6 @@ pub fn quit_app(window: WebviewWindow, app: AppHandle) {
         app.exit(0);
         return;
     }
-    QUIT_REQUESTED.store(true, Ordering::SeqCst);
     let calling_label = window.label();
     for (label, win) in windows {
         if label == calling_label {
@@ -145,19 +141,6 @@ pub fn quit_app(window: WebviewWindow, app: AppHandle) {
             let _ = win.close();
         }
     }
-}
-
-/// Whether a Quit is in progress, so the run loop exits once all windows close.
-pub fn quit_requested() -> bool {
-    QUIT_REQUESTED.load(Ordering::SeqCst)
-}
-
-/// Abort an in-progress Quit. The frontend calls this when a window's user
-/// declines its discard prompt: without it the QUIT_REQUESTED latch would stay
-/// set and a later, unrelated last-window close could force-exit the app.
-#[tauri::command]
-pub fn cancel_quit() {
-    QUIT_REQUESTED.store(false, Ordering::SeqCst);
 }
 
 #[cfg(test)]
