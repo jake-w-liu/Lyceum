@@ -8,6 +8,10 @@
 import { useEffect, useRef } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import {
+  readText as readClipboardText,
+  writeText as writeClipboardText,
+} from "@tauri-apps/plugin-clipboard-manager";
 import "@xterm/xterm/css/xterm.css";
 import {
   acknowledgePtyOutput,
@@ -25,6 +29,7 @@ import { getActiveDoc, useEditorStore } from "../state/editorStore";
 import { useTerminalStore } from "../state/terminalStore";
 import { resolveTerminalCwd } from "../lib/terminalCwd";
 import { createOutputBatcher } from "../lib/terminalOutputBatcher";
+import { createClipboardPasteQueue } from "../lib/clipboardPasteQueue";
 import {
   suppressesNativeTextInsertion,
   terminalKeyOverride,
@@ -143,12 +148,19 @@ export function TerminalView({
     textarea?.addEventListener("compositionend", onCompositionEnd);
     textarea?.addEventListener("paste", onPaste);
 
-    // Clipboard: copy the selection (Cmd/Ctrl+C with a selection). Paste is left
-    // to xterm's native `paste` event so Cmd/Ctrl+V inserts exactly once and does
-    // not trip the macOS clipboard-permission prompt. Ctrl+C with no selection
-    // still reaches the PTY (interrupt). Backspace is sent explicitly because
-    // some WebView/browser key events can be mis-mapped before xterm turns them
-    // into terminal bytes.
+    const pasteQueue = createClipboardPasteQueue({
+      readText: readClipboardText,
+      // xterm's public paste API normalizes newlines and honors the shell's
+      // bracketed-paste mode before emitting through the ordinary onData path.
+      paste: (text) => term.paste(text),
+      onError: (error) => console.error("terminal clipboard paste failed", error),
+    });
+
+    // Clipboard: own Cmd/Ctrl+C and Cmd/Ctrl+V explicitly because WKWebView does
+    // not reliably synthesize native clipboard events for terminal textareas.
+    // Ctrl+C with no selection still reaches the PTY (interrupt). Backspace is
+    // sent explicitly because some WebView/browser key events can be mis-mapped
+    // before xterm turns them into terminal bytes.
     term.attachCustomKeyEventHandler((e) => {
       // Not ours to handle — xterm sends the character itself from `keypress`,
       // regardless of defaultPrevented — but the native insertion into the
@@ -165,7 +177,12 @@ export function TerminalView({
           sendInput(override.data);
           break;
         case "copy":
-          navigator.clipboard?.writeText(term.getSelection()).catch(() => {});
+          void writeClipboardText(term.getSelection()).catch((error) =>
+            console.error("terminal clipboard copy failed", error),
+          );
+          break;
+        case "paste":
+          void pasteQueue.enqueue();
           break;
       }
       // Returning false makes xterm bail out of its keydown handler *before* the
@@ -304,6 +321,7 @@ export function TerminalView({
       // Cancel any pending batched flush before disposing the terminal so a
       // queued animation frame can't write into a disposed xterm instance.
       outputBatcher.dispose();
+      pasteQueue.dispose();
       useTerminalStore.getState().clearBackendPtyId(id, ptyId);
       void closePty(ptyId);
       term.dispose();

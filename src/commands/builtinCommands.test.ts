@@ -8,6 +8,11 @@ import { initialThemeData, useThemeStore } from "../state/themeStore";
 import { initialEditorData, useEditorStore } from "../state/editorStore";
 import { initialPreviewData, usePreviewStore } from "../state/previewStore";
 import { initialSettingsData, useSettingsStore } from "../state/settingsStore";
+import { initialTreeData, useTreeStore } from "../state/treeStore";
+import {
+  initialWorkspaceData,
+  useWorkspaceStore,
+} from "../state/workspaceStore";
 
 const runLatexBuildMock = vi.hoisted(() => vi.fn());
 const runActiveCodeMock = vi.hoisted(() => vi.fn());
@@ -21,6 +26,9 @@ const invokeMock = vi.hoisted(() =>
   vi.fn(async (..._args: unknown[]) => undefined),
 );
 const askMock = vi.hoisted(() => vi.fn(async (..._args: unknown[]) => true));
+const writeClipboardTextMock = vi.hoisted(() =>
+  vi.fn(async (..._args: unknown[]) => undefined),
+);
 vi.mock("../lib/latexBuild", () => ({
   runLatexBuild: (...args: unknown[]) => runLatexBuildMock(...args),
 }));
@@ -42,6 +50,9 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
   ask: (...args: unknown[]) => askMock(...args),
   open: vi.fn(),
 }));
+vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({
+  writeText: (...args: unknown[]) => writeClipboardTextMock(...args),
+}));
 
 beforeEach(() => {
   registerBuiltinCommands(); // idempotent; ensures the registry is populated
@@ -51,6 +62,8 @@ beforeEach(() => {
   useEditorStore.setState(initialEditorData, false);
   usePreviewStore.setState(initialPreviewData, false);
   useSettingsStore.setState(initialSettingsData, false);
+  useTreeStore.setState(initialTreeData, false);
+  useWorkspaceStore.setState(initialWorkspaceData, false);
   runLatexBuildMock.mockClear();
   runActiveCodeMock.mockClear();
   writePtyMock.mockClear();
@@ -62,6 +75,7 @@ beforeEach(() => {
   persistenceMock.settingsFilePath.mockResolvedValue("/config/settings.json");
   invokeMock.mockClear();
   askMock.mockReset().mockResolvedValue(true);
+  writeClipboardTextMock.mockClear();
 });
 
 describe("builtinCommands", () => {
@@ -248,6 +262,25 @@ describe("builtinCommands", () => {
     expect(useLayoutStore.getState().pdfPanelVisible).toBe(false);
     expect(usePreviewStore.getState().pdfPath).toBeNull();
     expect(usePreviewStore.getState().imagePath).toBeNull();
+  });
+
+  it("file.copyPath writes the Explorer selection through the native clipboard", async () => {
+    useTreeStore.getState().setSelection(["/workspace/src/a.ts"]);
+
+    await commandRegistry.execute("file.copyPath");
+
+    expect(writeClipboardTextMock).toHaveBeenCalledOnce();
+    expect(writeClipboardTextMock).toHaveBeenCalledWith("/workspace/src/a.ts");
+  });
+
+  it("file.copyRelativePath writes a path relative to the current workspace", async () => {
+    useWorkspaceStore.getState().openWorkspace("/workspace");
+    useTreeStore.getState().setSelection(["/workspace/src/a.ts"]);
+
+    await commandRegistry.execute("file.copyRelativePath");
+
+    expect(writeClipboardTextMock).toHaveBeenCalledOnce();
+    expect(writeClipboardTextMock).toHaveBeenCalledWith("src/a.ts");
   });
 
   describe("quit", () => {

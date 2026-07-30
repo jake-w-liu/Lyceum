@@ -42,6 +42,7 @@ import {
 } from "../state/settingsStore";
 import { writePty } from "../lib/terminal";
 import { isInlinePreviewPath, isTexSourcePath, relativePath } from "../lib/fileTypes";
+import { writeText as writeClipboardText } from "@tauri-apps/plugin-clipboard-manager";
 
 let registered = false;
 
@@ -385,10 +386,10 @@ export function registerBuiltinCommands(): void {
     useTreeStore.getState().requestCreate(kind);
   };
   // Copy Path / Copy Relative Path: target the Explorer's selected entry, else
-  // the active editor document. Clipboard write is best-effort.
+  // the active editor document.
   const copyToClipboard = async (text: string) => {
     try {
-      await navigator.clipboard?.writeText(text);
+      await writeClipboardText(text);
     } catch (e) {
       console.error("clipboard write failed", e);
     }

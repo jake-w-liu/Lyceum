@@ -3,7 +3,8 @@
 
 export type TerminalKeyOverride =
   | { type: "send"; data: string }
-  | { type: "copy" };
+  | { type: "copy" }
+  | { type: "paste" };
 
 type KeyLike = Pick<
   KeyboardEvent,
@@ -30,10 +31,10 @@ export function terminalKeyOverride(
 
   const key = event.key.toLowerCase();
   if (key === "c" && hasSelection) return { type: "copy" };
-  // Paste is intentionally NOT overridden: xterm pastes natively from the
-  // browser `paste` event (Cmd/Ctrl+V on the focused textarea). Reading the
-  // clipboard ourselves here both double-pasted (our send + xterm's native
-  // paste) and triggered the macOS clipboard-permission "Paste" prompt.
+  // WKWebView does not reliably synthesize a DOM `paste` event for the native
+  // menu accelerator. Own the chord and read through Tauri's native clipboard
+  // plugin; TerminalView cancels the keydown so xterm cannot also paste it.
+  if (key === "v") return { type: "paste" };
   return null;
 }
 

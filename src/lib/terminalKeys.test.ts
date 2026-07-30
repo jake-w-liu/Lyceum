@@ -46,9 +46,17 @@ describe("terminalKeyOverride", () => {
     });
   });
 
-  it("does not override paste (xterm pastes natively, avoiding double-paste)", () => {
-    expect(terminalKeyOverride(ev({ key: "v", metaKey: true }), true, false)).toBeNull();
-    expect(terminalKeyOverride(ev({ key: "v", ctrlKey: true }), false, false)).toBeNull();
+  it("owns paste on the platform modifier so native clipboard input is reliable", () => {
+    expect(terminalKeyOverride(ev({ key: "v", metaKey: true }), true, false)).toEqual({
+      type: "paste",
+    });
+    expect(terminalKeyOverride(ev({ key: "v", ctrlKey: true }), false, false)).toEqual({
+      type: "paste",
+    });
+  });
+
+  it("does not treat Ctrl+V as paste on macOS", () => {
+    expect(terminalKeyOverride(ev({ key: "v", ctrlKey: true }), true, false)).toBeNull();
   });
 
   it("ignores non-keydown events so keypress/keyup never re-send a key", () => {
