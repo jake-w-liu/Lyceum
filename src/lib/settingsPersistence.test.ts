@@ -17,6 +17,7 @@ vi.mock("./ipc", () => ({
 import {
   flushSettingsPersistence,
   initSettingsPersistence,
+  initializeWorkspace,
   legacyConfigPath,
   resetSettingsPersistenceForTests,
   saveLayout,
@@ -28,6 +29,10 @@ import {
   initialSettingsData,
   useSettingsStore,
 } from "../state/settingsStore";
+import {
+  initialWorkspaceData,
+  useWorkspaceStore,
+} from "../state/workspaceStore";
 
 beforeEach(() => {
   invokeMock.mockReset();
@@ -42,6 +47,7 @@ afterEach(() => {
   vi.useRealTimers();
   useLayoutStore.setState(initialLayoutData, false);
   useSettingsStore.setState(initialSettingsData, false);
+  useWorkspaceStore.setState(initialWorkspaceData, false);
 });
 
 async function flushPromises(times = 4): Promise<void> {
@@ -51,6 +57,113 @@ async function flushPromises(times = 4): Promise<void> {
 }
 
 describe("settingsPersistence", () => {
+  it("opens a launch directory instead of the persisted workspace", async () => {
+    invokeMock.mockImplementation(async (command: string, args?: { name: string }) => {
+      if (command === "get_launch_dir") return "/launch";
+      if (command === "app_config_path") return `/config/${args?.name}`;
+      return undefined;
+    });
+    readFileMock.mockResolvedValue(JSON.stringify({ rootPath: "/restored" }));
+
+    await initializeWorkspace();
+
+    expect(useWorkspaceStore.getState().rootPath).toBe("/launch");
+    expect(readFileMock).not.toHaveBeenCalled();
+  });
+
+  it("shares one startup resolution across concurrent StrictMode mounts", async () => {
+    invokeMock.mockResolvedValue("/launch");
+
+    await Promise.all([initializeWorkspace(), initializeWorkspace()]);
+
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect(invokeMock).toHaveBeenCalledWith("get_launch_dir");
+    expect(useWorkspaceStore.getState().rootPath).toBe("/launch");
+    expect(useWorkspaceStore.getState().rootChangeSeq).toBe(1);
+  });
+
+  it("restores the persisted workspace when there is no launch directory", async () => {
+    vi.stubGlobal("__TAURI_INTERNALS__", {});
+    invokeMock.mockImplementation(async (command: string, args?: { name: string }) => {
+      if (command === "get_launch_dir") return null;
+      if (command === "app_config_path") return `/config/${args?.name}`;
+      return undefined;
+    });
+    readFileMock.mockResolvedValue(JSON.stringify({ rootPath: "/restored" }));
+
+    await initializeWorkspace();
+
+    expect(useWorkspaceStore.getState().rootPath).toBe("/restored");
+  });
+
+  it("does not overwrite a folder explicitly opened while startup I/O is pending", async () => {
+    let resolveLaunch!: (path: string | null) => void;
+    invokeMock.mockImplementation(
+      (command: string) =>
+        command === "get_launch_dir"
+          ? new Promise<string | null>((resolve) => {
+              resolveLaunch = resolve;
+            })
+          : Promise.resolve(undefined),
+    );
+
+    const startup = initializeWorkspace();
+    await flushPromises();
+    useWorkspaceStore.getState().openWorkspace("/chosen");
+    resolveLaunch("/late-launch");
+    await startup;
+
+    expect(useWorkspaceStore.getState().rootPath).toBe("/chosen");
+  });
+
+  it("does not restore after an explicit open-then-close during startup", async () => {
+    vi.stubGlobal("__TAURI_INTERNALS__", {});
+    let resolveLaunch!: (path: string | null) => void;
+    invokeMock.mockImplementation(async (command: string, args?: { name: string }) => {
+      if (command === "get_launch_dir") {
+        return await new Promise<string | null>((resolve) => {
+          resolveLaunch = resolve;
+        });
+      }
+      if (command === "app_config_path") return `/config/${args?.name}`;
+      return undefined;
+    });
+    readFileMock.mockResolvedValue(JSON.stringify({ rootPath: "/restored" }));
+
+    const startup = initializeWorkspace();
+    await flushPromises();
+    useWorkspaceStore.getState().openWorkspace("/chosen");
+    useWorkspaceStore.getState().closeWorkspace();
+    resolveLaunch(null);
+    await startup;
+
+    expect(useWorkspaceStore.getState().rootPath).toBeNull();
+  });
+
+  it("does not overwrite a folder opened while persisted-workspace I/O is pending", async () => {
+    vi.stubGlobal("__TAURI_INTERNALS__", {});
+    let resolvePersisted!: (value: string) => void;
+    invokeMock.mockImplementation(async (command: string, args?: { name: string }) => {
+      if (command === "get_launch_dir") return null;
+      if (command === "app_config_path") return `/config/${args?.name}`;
+      return undefined;
+    });
+    readFileMock.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          resolvePersisted = resolve;
+        }),
+    );
+
+    const startup = initializeWorkspace();
+    await flushPromises();
+    useWorkspaceStore.getState().openWorkspace("/chosen");
+    resolvePersisted(JSON.stringify({ rootPath: "/restored" }));
+    await startup;
+
+    expect(useWorkspaceStore.getState().rootPath).toBe("/chosen");
+  });
+
   it("maps the old bundle-id config directory to the new one for migration", () => {
     expect(
       legacyConfigPath(

@@ -42,4 +42,26 @@ describe("useCommandKeybindings", () => {
     expect(event.defaultPrevented).toBe(true);
     expect(executeSpy).not.toHaveBeenCalled();
   });
+
+  it("dispatches workbench shortcuts before a focused editor widget stops bubbling", () => {
+    const editorWidget = document.createElement("textarea");
+    editorWidget.addEventListener("keydown", (event) => event.stopPropagation());
+    document.body.appendChild(editorWidget);
+    const { unmount } = renderHook(() => useCommandKeybindings());
+    const event = new KeyboardEvent("keydown", {
+      key: "s",
+      code: "KeyS",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    editorWidget.dispatchEvent(event);
+    unmount();
+    editorWidget.remove();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(executeSpy).toHaveBeenCalledOnce();
+    expect(executeSpy).toHaveBeenCalledWith("file.save");
+  });
 });

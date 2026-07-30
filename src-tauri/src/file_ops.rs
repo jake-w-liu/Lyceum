@@ -5,9 +5,11 @@
 // leave the user's document truncated or half-written. Errors are mapped to
 // strings that include the offending path so the frontend can surface a message.
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use tauri::{AppHandle, State};
 
@@ -15,6 +17,63 @@ use crate::path_access::{self, PathAccessManager};
 
 /// Monotonic counter making temp-file names unique within this process.
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Serializes atomic replacements of the same resolved file within this
+/// process. Tauri may run async commands concurrently, including commands from
+/// separate windows, and two simultaneous rename-based saves must not race.
+///
+/// Gates are removed once the final active/waiting writer releases them, so
+/// editing many files does not leave an unbounded per-path cache behind.
+#[derive(Default)]
+pub struct FileWriteManager {
+    path_gates: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
+}
+
+impl FileWriteManager {
+    fn gate_for(&self, path: &Path) -> Result<Arc<Mutex<()>>, String> {
+        let mut gates = self
+            .path_gates
+            .lock()
+            .map_err(|_| "file-write gate registry is poisoned".to_string())?;
+        Ok(Arc::clone(
+            gates
+                .entry(path.to_path_buf())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        ))
+    }
+
+    fn release_gate(&self, path: &Path, gate: &Arc<Mutex<()>>) {
+        // Cleanup is intentionally best-effort. The write has already finished,
+        // so a poisoned registry must not report a false save failure and tempt
+        // the caller to repeat a successfully committed write.
+        let Ok(mut gates) = self.path_gates.lock() else {
+            return;
+        };
+        let is_current_gate = gates
+            .get(path)
+            .is_some_and(|current| Arc::ptr_eq(current, gate));
+        // At two references, only this function and the registry own the gate:
+        // there are no queued writers that could still depend on the entry.
+        if is_current_gate && Arc::strong_count(gate) == 2 {
+            gates.remove(path);
+        }
+    }
+
+    fn with_path_gate<T>(
+        &self,
+        path: &Path,
+        operation: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let gate = self.gate_for(path)?;
+        let guard = gate
+            .lock()
+            .map_err(|_| format!("file-write gate is poisoned: {}", path.display()))?;
+        let result = operation();
+        drop(guard);
+        self.release_gate(path, &gate);
+        result
+    }
+}
 
 /// Largest file the text editor will open. Beyond this a read is refused with a
 /// clear error instead of slurping gigabytes into the webview.
@@ -103,17 +162,23 @@ fn read_file_impl(path: &Path) -> Result<String, String> {
 /// atomic: contents go to a sibling temp file that is flushed and fsynced, then
 /// renamed over the target, so the on-disk file is always either the complete
 /// old or the complete new version — never a truncated mix.
-#[tauri::command]
+// The atomic write path reads the old file, flushes and fsyncs the replacement,
+// renames it, and syncs its parent directory. Run that blocking filesystem work
+// on Tauri's command thread pool rather than the macOS UI thread.
+#[tauri::command(async)]
 pub fn write_file(
     app: AppHandle,
     window: tauri::Window,
     access: State<'_, PathAccessManager>,
+    writes: State<'_, FileWriteManager>,
     path: String,
     content: String,
 ) -> Result<(), String> {
     let target =
         path_access::ensure_write_target_allowed(&app, &window, &access, Path::new(&path))?;
-    write_file_impl(&target, &content).map_err(|e| format!("{path}: {e}"))
+    writes
+        .with_path_gate(&target, || write_file_impl(&target, &content))
+        .map_err(|e| format!("{path}: {e}"))
 }
 
 fn write_file_impl(path_ref: &Path, content: &str) -> Result<(), String> {
@@ -330,6 +395,67 @@ pub fn read_file_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_write_manager_shares_a_gate_per_path_and_reclaims_it() {
+        let manager = FileWriteManager::default();
+        let path = Path::new("/workspace/document.txt");
+        let first = manager.gate_for(path).expect("first gate");
+        let second = manager.gate_for(path).expect("second gate");
+
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "the same target must share one serialization gate"
+        );
+        let guard = first.lock().expect("lock first gate");
+        assert!(
+            matches!(second.try_lock(), Err(std::sync::TryLockError::WouldBlock)),
+            "a concurrent save of the same target must be excluded"
+        );
+        drop(guard);
+
+        manager.release_gate(path, &first);
+        assert_eq!(
+            manager.path_gates.lock().unwrap().len(),
+            1,
+            "a gate with another writer reference must remain registered"
+        );
+        drop(second);
+        manager.release_gate(path, &first);
+        assert!(
+            manager.path_gates.lock().unwrap().is_empty(),
+            "an idle gate must not leak into the registry"
+        );
+    }
+
+    #[test]
+    fn file_write_manager_does_not_serialize_distinct_paths() {
+        let manager = FileWriteManager::default();
+        let first = manager
+            .gate_for(Path::new("/workspace/first.txt"))
+            .expect("first gate");
+        let second = manager
+            .gate_for(Path::new("/workspace/second.txt"))
+            .expect("second gate");
+
+        assert!(!Arc::ptr_eq(&first, &second));
+        let _first_guard = first.lock().expect("lock first gate");
+        let _second_guard = second
+            .try_lock()
+            .expect("a distinct target must have an independent gate");
+    }
+
+    #[test]
+    fn file_write_manager_cleans_up_after_an_operation() {
+        let manager = FileWriteManager::default();
+        let path = Path::new("/workspace/document.txt");
+
+        manager
+            .with_path_gate(path, || Ok::<_, String>(()))
+            .expect("operation");
+
+        assert!(manager.path_gates.lock().unwrap().is_empty());
+    }
 
     #[cfg(unix)]
     #[test]

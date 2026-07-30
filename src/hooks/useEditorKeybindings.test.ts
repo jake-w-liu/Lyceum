@@ -39,6 +39,14 @@ describe("saveActiveDoc", () => {
     expect(writeFile).not.toHaveBeenCalled();
   });
 
+  it("does not rewrite a clean active document", async () => {
+    get().openDoc({ path: "/w/a.ts", content: "x", language: "typescript" });
+
+    await saveActiveDoc();
+
+    expect(writeFile).not.toHaveBeenCalled();
+  });
+
   it("does not save viewer tabs", async () => {
     get().openDoc({
       path: "/w/paper.pdf",

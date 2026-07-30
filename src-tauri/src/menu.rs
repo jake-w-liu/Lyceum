@@ -6,8 +6,8 @@
 // handled natively in Rust because they must work without a live webview. Items
 // that already have a frontend keybinding are intentionally left without an
 // accelerator so the existing (tested) keyboard handling stays the single source
-// for those chords — only `Open Folder…` gets a new accelerator (Cmd/Ctrl+O),
-// which is otherwise unbound.
+// for those chords. `Open Folder…` gets Cmd/Ctrl+O (otherwise unbound), while
+// Close Lyceum Window uses Cmd/Ctrl+Shift+W so Cmd/Ctrl+W remains Close Editor.
 
 use tauri::menu::{AboutMetadata, Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Runtime};
@@ -42,8 +42,6 @@ pub fn build_app_menu<R: Runtime>(handle: &AppHandle<R>) -> tauri::Result<Menu<R
         )
         .item(&MenuItemBuilder::with_id("file.save", "Save").build(handle)?)
         .item(&MenuItemBuilder::with_id("editor.closeTab", "Close Editor").build(handle)?)
-        .separator()
-        .close_window()
         .build()?;
 
     let edit_menu = SubmenuBuilder::new(handle, "Edit")
@@ -105,7 +103,14 @@ pub fn build_app_menu<R: Runtime>(handle: &AppHandle<R>) -> tauri::Result<Menu<R
         .separator()
         .minimize()
         .separator()
-        .close_window()
+        .item(
+            // With the exact standard title "Close Window", macOS exposed this
+            // item as bare Cmd+W despite the requested Shift modifier. Use an
+            // app-specific title so the custom accelerator remains distinct.
+            &MenuItemBuilder::with_id("window.close", "Close Lyceum Window")
+                .accelerator("CmdOrCtrl+Shift+W")
+                .build(handle)?,
+        )
         .build()?;
 
     MenuBuilder::new(handle)

@@ -21,7 +21,9 @@ export async function saveActiveDoc(): Promise<void> {
   // Commit any debounced editor->store write so we save the latest buffer.
   flushPendingEdits();
   const doc = getActiveDoc(useEditorStore.getState());
-  if (!doc || !isTextDoc(doc)) return;
+  // A clean buffer has nothing to persist. Avoid a redundant atomic rewrite,
+  // fsync, and git-status refresh every time Cmd/Ctrl+S is pressed.
+  if (!doc || !isTextDoc(doc) || !isDirty(doc)) return;
   try {
     await writeFile(doc.path, doc.content);
     // Pass the exact content written: if the user kept typing during the async

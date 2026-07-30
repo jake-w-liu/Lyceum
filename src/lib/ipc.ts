@@ -171,10 +171,26 @@ export async function readFile(path: string): Promise<string> {
   return invoke<string>("read_file", { path });
 }
 
+// Writes to one path must reach the backend in call order. Tauri runs the
+// blocking atomic-write command on its worker pool, so without this per-path
+// tail two rapid saves could complete out of order and put older bytes on disk.
+// Different files remain independent.
+const fileWriteTails = new Map<string, Promise<void>>();
+
 /** Write a UTF-8 file's contents (editor save, M3). */
-export async function writeFile(path: string, content: string): Promise<void> {
-  await ensureCurrentWorkspaceAccess(path);
-  await invoke("write_file", { path, content });
+export function writeFile(path: string, content: string): Promise<void> {
+  const previous = fileWriteTails.get(path);
+  const write = (previous ?? Promise.resolve())
+    // A failed earlier write must not permanently poison this path's queue.
+    .catch(() => undefined)
+    .then(async () => {
+      await ensureCurrentWorkspaceAccess(path);
+      await invoke("write_file", { path, content });
+    });
+  fileWriteTails.set(path, write);
+  return write.finally(() => {
+    if (fileWriteTails.get(path) === write) fileWriteTails.delete(path);
+  });
 }
 
 /**

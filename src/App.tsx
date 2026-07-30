@@ -27,10 +27,9 @@ import {
 import { applyThemeAttribute, useThemeStore } from "./state/themeStore";
 import {
   initSettingsPersistence,
+  initializeWorkspace,
   loadKeybindings,
   loadSettings,
-  openLaunchDir,
-  restoreWorkspace,
 } from "./lib/settingsPersistence";
 import { initZoom } from "./lib/zoom";
 import "./commands/builtinCommands";
@@ -104,11 +103,11 @@ export default function App() {
       await loadKeybindings();
       // Apply the persisted window zoom and keep it synced to the setting.
       initZoom();
-      await restoreWorkspace();
       initSettingsPersistence();
-      // A launch-dir (`lyceum /path`) overrides the restored workspace; runs
-      // after persistence init so the opened folder is remembered next time.
-      await openLaunchDir();
+      // Resolve a launch-dir or persisted workspace as one guarded startup
+      // operation. An explicit Open Folder action made while startup I/O is
+      // pending must never be overwritten by the late result.
+      await initializeWorkspace();
     })();
   }, []);
 

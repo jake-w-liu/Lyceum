@@ -90,6 +90,15 @@ describe("matchKeybinding tab cycling (Ctrl on every platform)", () => {
 });
 
 describe("matchKeybinding Option/Alt letter remap (macOS)", () => {
+  it("⌘S matches file.save", () => {
+    const e = new KeyboardEvent("keydown", {
+      key: "s",
+      code: "KeyS",
+      metaKey: true,
+    });
+    expect(matchKeybinding(e, {}, true)).toBe("file.save");
+  });
+
   it("⌥⌘S matches file.saveAll even when Option remaps e.key", () => {
     // macOS reports the Option-remapped glyph for e.key (Option+S => "ß") while
     // e.code stays the physical "KeyS". The binding must still match.

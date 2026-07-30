@@ -22,6 +22,8 @@ export interface OpenFilePosition {
 
 export interface WorkspaceData {
   rootPath: string | null;
+  /** Increments for every explicit open/close request, including same-path ones. */
+  rootChangeSeq: number;
   pendingOpenPath: string | null;
   pendingOpenPosition: OpenFilePosition | null;
   /** Monotonic id so repeated requests for the same path still re-trigger. */
@@ -39,6 +41,7 @@ export type WorkspaceState = WorkspaceData & WorkspaceActions;
 
 export const initialWorkspaceData: WorkspaceData = {
   rootPath: null,
+  rootChangeSeq: 0,
   pendingOpenPath: null,
   pendingOpenPosition: null,
   pendingOpenSeq: 0,
@@ -48,9 +51,19 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   ...initialWorkspaceData,
 
   openWorkspace: (path) =>
-    set({ rootPath: path, pendingOpenPath: null, pendingOpenPosition: null }),
+    set((s) => ({
+      rootPath: path,
+      rootChangeSeq: s.rootChangeSeq + 1,
+      pendingOpenPath: null,
+      pendingOpenPosition: null,
+    })),
   closeWorkspace: () =>
-    set({ rootPath: null, pendingOpenPath: null, pendingOpenPosition: null }),
+    set((s) => ({
+      rootPath: null,
+      rootChangeSeq: s.rootChangeSeq + 1,
+      pendingOpenPath: null,
+      pendingOpenPosition: null,
+    })),
   requestOpenFile: (path, position) =>
     set((s) => ({
       pendingOpenPath: path,

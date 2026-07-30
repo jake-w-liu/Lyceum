@@ -20,6 +20,7 @@ import {
   readDirectory,
   readFileBytes,
   renamePath,
+  writeFile,
 } from "./ipc";
 import { useWorkspaceStore } from "../state/workspaceStore";
 
@@ -99,6 +100,35 @@ describe("readDirectory", () => {
       root: "/workspace",
       path: "/workspace/subdirectory",
     });
+  });
+});
+
+describe("writeFile", () => {
+  it("serializes rapid writes to the same path in call order", async () => {
+    useWorkspaceStore.getState().openWorkspace("/workspace");
+    let releaseFirst!: () => void;
+    const firstWrite = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const written: string[] = [];
+    invokeMock.mockImplementation(
+      async (command: string, args?: { content?: string; root?: string }) => {
+        if (command === "authorize_workspace_root") return args?.root;
+        if (command === "write_file") {
+          written.push(args?.content ?? "");
+          if (written.length === 1) await firstWrite;
+        }
+        return undefined;
+      },
+    );
+
+    const first = writeFile("/workspace/note.txt", "first");
+    const second = writeFile("/workspace/note.txt", "second");
+    await vi.waitFor(() => expect(written).toEqual(["first"]));
+    releaseFirst();
+    await Promise.all([first, second]);
+
+    expect(written).toEqual(["first", "second"]);
   });
 });
 

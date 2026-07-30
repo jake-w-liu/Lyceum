@@ -12,10 +12,21 @@ describe("workspaceStore", () => {
   beforeEach(reset);
 
   it("opens and closes a workspace", () => {
+    const before = get().rootChangeSeq;
     get().openWorkspace("/tmp/project");
     expect(get().rootPath).toBe("/tmp/project");
     get().closeWorkspace();
     expect(get().rootPath).toBeNull();
+    expect(get().rootChangeSeq).toBe(before + 2);
+  });
+
+  it("records repeated same-path and already-closed workspace requests", () => {
+    get().openWorkspace("/tmp/project");
+    get().openWorkspace("/tmp/project");
+    get().closeWorkspace();
+    get().closeWorkspace();
+
+    expect(get().rootChangeSeq).toBe(4);
   });
 
   it("records and clears an open-file intent", () => {

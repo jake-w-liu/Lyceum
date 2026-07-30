@@ -43,6 +43,28 @@ use tauri::{Emitter, Manager, RunEvent};
 /// the *calling* window's label, so each window always gets its own folder.
 struct LaunchDir(Mutex<HashMap<String, String>>);
 
+impl LaunchDir {
+    fn seeded(window_label: &str, dir: Option<String>) -> Self {
+        let mut dirs = HashMap::new();
+        if let Some(dir) = dir {
+            dirs.insert(window_label.to_string(), dir);
+        }
+        Self(Mutex::new(dirs))
+    }
+
+    fn insert(&self, window_label: &str, dir: String) -> Result<(), String> {
+        self.0
+            .lock()
+            .map_err(|_| "launch directory lock poisoned".to_string())?
+            .insert(window_label.to_string(), dir);
+        Ok(())
+    }
+
+    fn remove(&self, window_label: &str) -> Option<String> {
+        self.0.lock().ok()?.remove(window_label)
+    }
+}
+
 /// First argv entry that is an existing directory, canonicalized to an absolute
 /// path. Filtering on `is_dir` skips the program name and macOS-injected flags
 /// like `-psn_0_12345`, so a plain launch yields `None`.
@@ -100,7 +122,7 @@ fn get_app_info() -> AppInfo {
 /// entry so the folder opens exactly once for the window it was meant for.
 #[tauri::command]
 fn get_launch_dir(window: tauri::Window, state: tauri::State<'_, LaunchDir>) -> Option<String> {
-    state.0.lock().ok()?.remove(window.label())
+    state.remove(window.label())
 }
 
 #[derive(serde::Serialize)]
@@ -135,13 +157,15 @@ fn native_window_content_inset() -> NativeWindowContentInset {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // The configured initial window label is `main`. Seed its launch directory
+    // before Tauri constructs the WebView, so even an immediate frontend invoke
+    // cannot beat setup and observe a false `None`.
+    let initial_launch_dir = LaunchDir::seeded("main", launch_dir_from_args());
     tauri::Builder::default()
         // Must be the first plugin: a second launch (double-click or `lyceum .`)
         // hands its argv to the already-running process and exits, so macOS keeps
         // one dock icon. We open a window for it and record any folder it carried.
         .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
-            // Open the window first so we know its label, then record the folder
-            // (if any) against that exact window — never a different one.
             // Relative argv entries belong to the SECOND process's cwd, not the
             // already-running GUI process's cwd. The plugin forwards that cwd
             // explicitly; ignoring it makes `lyceum .` open the wrong folder (or
@@ -151,27 +175,43 @@ pub fn run() {
             } else {
                 first_dir_arg_from(argv, std::path::Path::new(&cwd))
             };
-            match window_ops::open_new_window(app) {
-                Ok(window) => {
-                    if let Some(dir) = dir {
-                        if let Some(state) = app.try_state::<LaunchDir>() {
-                            if let Ok(mut map) = state.0.lock() {
-                                map.insert(window.label().to_string(), dir);
-                            }
+            // Reserve the label and publish the launch directory BEFORE building
+            // the WebView. Building first allowed the frontend's one-shot
+            // `get_launch_dir` invoke to win the race and leave a blank window.
+            let has_launch_dir = dir.is_some();
+            let state = app.try_state::<LaunchDir>();
+            let result = window_ops::open_new_window_prepared(
+                app,
+                |label| match (dir, state.as_ref()) {
+                    (Some(dir), Some(state)) => state.insert(label, dir),
+                    (Some(_), None) => Err("launch directory state unavailable".to_string()),
+                    (None, _) => Ok(()),
+                },
+                |label| {
+                    if has_launch_dir {
+                        if let Some(state) = state.as_ref() {
+                            state.remove(label);
                         }
                     }
+                },
+            );
+            if let Err(err) = result {
+                if has_launch_dir && state.is_none() {
+                    eprintln!("failed to prepare second-instance window: {err}");
+                } else {
+                    eprintln!("failed to open window for second instance: {err}");
                 }
-                Err(err) => eprintln!("failed to open window for second instance: {err}"),
-            }
+            };
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .manage(LaunchDir(Mutex::new(HashMap::new())))
+        .manage(initial_launch_dir)
         .manage(terminal::TerminalManager::default())
         .manage(lsp::LspManager::default())
         .manage(julia::RunManager::default())
         .manage(workspace_watch::WorkspaceWatchManager::default())
         .manage(path_access::PathAccessManager::default())
+        .manage(file_ops::FileWriteManager::default())
         .setup(|app| {
             let menu = menu::build_app_menu(app.handle())?;
             app.set_menu(menu)?;
@@ -180,15 +220,6 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             if let Err(err) = macos_service::ensure_installed() {
                 eprintln!("failed to install Finder Quick Action: {err}");
-            }
-            // Route the cold-start folder (`lyceum .`) to the initial window by
-            // its label, so its frontend — and no other window — opens it.
-            if let Some(dir) = launch_dir_from_args() {
-                if let Some(window) = app.webview_windows().into_values().next() {
-                    if let Ok(mut map) = app.state::<LaunchDir>().0.lock() {
-                        map.insert(window.label().to_string(), dir);
-                    }
-                }
             }
             Ok(())
         })
@@ -231,9 +262,7 @@ pub fn run() {
                 // destroyed before its webview mounts (load failure / rapid close)
                 // would otherwise leak the entry forever (labels are never reused).
                 if let Some(state) = window.try_state::<LaunchDir>() {
-                    if let Ok(mut map) = state.0.lock() {
-                        map.remove(label);
-                    }
+                    state.remove(label);
                 }
             }
         })
@@ -244,6 +273,18 @@ pub fn run() {
             if id == "app.newWindow" {
                 if let Err(err) = window_ops::open_new_window(app) {
                     eprintln!("failed to open new window: {err}");
+                }
+                return;
+            }
+            if id == "window.close" {
+                // Cmd/Ctrl+Shift+W closes only the focused native window and
+                // still enters its frontend dirty-document close guard.
+                if let Some((_, window)) = app
+                    .webview_windows()
+                    .into_iter()
+                    .find(|(_, win)| win.is_focused().unwrap_or(false))
+                {
+                    let _ = window.close();
                 }
                 return;
             }
@@ -369,7 +410,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{first_dir_arg_from, teardown_window_workspace_ownership};
+    use super::{first_dir_arg_from, teardown_window_workspace_ownership, LaunchDir};
     use std::cell::RefCell;
 
     #[test]
@@ -386,6 +427,25 @@ mod tests {
             resolved.as_deref(),
             Some(expected.to_string_lossy().as_ref())
         );
+    }
+
+    #[test]
+    fn cold_start_launch_directory_is_available_before_window_setup() {
+        let launch_dirs = LaunchDir::seeded("main", Some("/workspace".to_string()));
+
+        assert_eq!(launch_dirs.remove("main").as_deref(), Some("/workspace"));
+        assert_eq!(launch_dirs.remove("main"), None);
+    }
+
+    #[test]
+    fn second_instance_launch_directory_is_keyed_before_consumption() {
+        let launch_dirs = LaunchDir::seeded("main", None);
+        launch_dirs
+            .insert("main7", "/second".to_string())
+            .expect("insert launch directory");
+
+        assert_eq!(launch_dirs.remove("main7").as_deref(), Some("/second"));
+        assert_eq!(launch_dirs.remove("main"), None);
     }
 
     #[test]

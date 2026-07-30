@@ -288,19 +288,24 @@ async function saveLastWorkspace(path: string | null): Promise<void> {
   }
 }
 
-export async function restoreWorkspace(): Promise<void> {
-  if (!useSettingsStore.getState().settings.restoreWorkspaceOnStartup) return;
+async function restoredWorkspacePath(): Promise<string | null> {
+  if (!useSettingsStore.getState().settings.restoreWorkspaceOnStartup) return null;
   try {
     const data = JSON.parse(await readConfigFile(WORKSPACE_FILE));
     if (data && typeof data.rootPath === "string") {
       // Canonicalize so the tree, git decorations, search, and watcher all key
       // off one symlink-free root (see canonicalizePath).
-      const root = await canonicalizePath(data.rootPath);
-      useWorkspaceStore.getState().openWorkspace(root);
+      return await canonicalizePath(data.rootPath);
     }
   } catch {
     // no saved workspace
   }
+  return null;
+}
+
+export async function restoreWorkspace(): Promise<void> {
+  const root = await restoredWorkspacePath();
+  if (root) useWorkspaceStore.getState().openWorkspace(root);
 }
 
 /**
@@ -308,15 +313,54 @@ export async function restoreWorkspace(): Promise<void> {
  * --args /path`), open it as the workspace — overriding any restored workspace.
  * No-op for a plain launch or outside Tauri.
  */
-export async function openLaunchDir(): Promise<void> {
+async function launchDirPath(): Promise<string | null> {
   try {
     const dir = await invoke<string | null>("get_launch_dir");
     if (typeof dir === "string" && dir.length > 0) {
-      useWorkspaceStore.getState().openWorkspace(dir);
+      // Rust canonicalizes launch arguments before publishing them.
+      return dir;
     }
   } catch {
     // not in Tauri, or no launch dir
   }
+  return null;
+}
+
+export async function openLaunchDir(): Promise<void> {
+  const dir = await launchDirPath();
+  if (dir) useWorkspaceStore.getState().openWorkspace(dir);
+}
+
+/**
+ * Resolve startup workspace state once. A launch argument wins over persistence,
+ * but any folder the user explicitly opens/closes while I/O is pending wins over
+ * both. `rootPath` alone is insufficient as a guard because open-then-close
+ * returns it to null; `rootChangeSeq` records that user intent.
+ */
+let workspaceInitialization: Promise<void> | null = null;
+
+async function doInitializeWorkspace(): Promise<void> {
+  const expectedSeq = useWorkspaceStore.getState().rootChangeSeq;
+  const launchDir = await launchDirPath();
+  let state = useWorkspaceStore.getState();
+  if (state.rootChangeSeq !== expectedSeq) return;
+  if (launchDir) {
+    state.openWorkspace(launchDir);
+    return;
+  }
+  const restored = await restoredWorkspacePath();
+  state = useWorkspaceStore.getState();
+  if (restored && state.rootChangeSeq === expectedSeq) {
+    state.openWorkspace(restored);
+  }
+}
+
+export function initializeWorkspace(): Promise<void> {
+  // React StrictMode mounts effects twice in development. Share one startup
+  // operation so concurrent mounts cannot race a consumed launch directory
+  // against persisted-workspace restore.
+  workspaceInitialization ??= doInitializeWorkspace();
+  return workspaceInitialization;
 }
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -339,6 +383,7 @@ export function resetSettingsPersistenceForTests(): void {
   settingsDirtyRevision = 0;
   layoutDirtyRevision = 0;
   applyingPersistedLayout = false;
+  workspaceInitialization = null;
 }
 
 export async function flushSettingsPersistence(): Promise<void> {

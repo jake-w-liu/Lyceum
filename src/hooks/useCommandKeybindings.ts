@@ -54,7 +54,11 @@ export function useCommandKeybindings(): void {
       e.preventDefault();
       void commandRegistry.execute(id);
     };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    // Workbench shortcuts must be observed before focused widgets (including
+    // Monaco contributions such as completion/rename inputs) can stop bubbling.
+    // Capture still preserves the keymap's modal/when guards above, so commands
+    // are neither duplicated nor allowed through while a modal owns the keys.
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
   }, []);
 }
