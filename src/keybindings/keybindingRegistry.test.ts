@@ -26,6 +26,11 @@ describe("formatChord", () => {
 describe("matchKeybinding (isMacOs=false, ctx={})", () => {
   const ctx = {};
 
+  it("ctrl+o => file.openFolder", () => {
+    const e = new KeyboardEvent("keydown", { key: "o", ctrlKey: true });
+    expect(matchKeybinding(e, ctx, false)).toBe("file.openFolder");
+  });
+
   it("ctrl+b => workbench.toggleSidebar", () => {
     const e = new KeyboardEvent("keydown", { key: "b", ctrlKey: true });
     expect(matchKeybinding(e, ctx, false)).toBe("workbench.toggleSidebar");
@@ -90,6 +95,15 @@ describe("matchKeybinding tab cycling (Ctrl on every platform)", () => {
 });
 
 describe("matchKeybinding Option/Alt letter remap (macOS)", () => {
+  it("⌘O matches file.openFolder", () => {
+    const e = new KeyboardEvent("keydown", {
+      key: "o",
+      code: "KeyO",
+      metaKey: true,
+    });
+    expect(matchKeybinding(e, {}, true)).toBe("file.openFolder");
+  });
+
   it("⌘S matches file.save", () => {
     const e = new KeyboardEvent("keydown", {
       key: "s",

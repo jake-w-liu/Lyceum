@@ -64,4 +64,22 @@ describe("useCommandKeybindings", () => {
     expect(executeSpy).toHaveBeenCalledOnce();
     expect(executeSpy).toHaveBeenCalledWith("file.save");
   });
+
+  it("dispatches Open Folder through the central workbench keymap", () => {
+    const { unmount } = renderHook(() => useCommandKeybindings());
+    const event = new KeyboardEvent("keydown", {
+      key: "o",
+      code: "KeyO",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    window.dispatchEvent(event);
+    unmount();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(executeSpy).toHaveBeenCalledOnce();
+    expect(executeSpy).toHaveBeenCalledWith("file.openFolder");
+  });
 });

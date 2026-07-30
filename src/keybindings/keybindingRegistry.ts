@@ -10,6 +10,7 @@ export type KeyContext = Record<string, boolean>;
 
 // The active workbench keymap (editor-internal chords like find/comment/move-line are handled by Monaco itself and are intentionally NOT here):
 export const DEFAULT_KEYMAP: Keybinding[] = [
+  { key: "mod+o", command: "file.openFolder" },
   { key: "mod+p", command: "quickOpen.show" },
   { key: "mod+shift+p", command: "commandPalette.show" },
   { key: "mod+n", command: "explorer.newFile" },

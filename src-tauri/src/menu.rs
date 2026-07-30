@@ -6,8 +6,8 @@
 // handled natively in Rust because they must work without a live webview. Items
 // that already have a frontend keybinding are intentionally left without an
 // accelerator so the existing (tested) keyboard handling stays the single source
-// for those chords. `Open Folder…` gets Cmd/Ctrl+O (otherwise unbound), while
-// Close Lyceum Window uses Cmd/Ctrl+Shift+W so Cmd/Ctrl+W remains Close Editor.
+// for those chords. Close Lyceum Window uses Cmd/Ctrl+Shift+W so Cmd/Ctrl+W
+// remains Close Editor.
 
 use tauri::menu::{AboutMetadata, Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Runtime};
@@ -35,11 +35,9 @@ pub fn build_app_menu<R: Runtime>(handle: &AppHandle<R>) -> tauri::Result<Menu<R
         .item(&MenuItemBuilder::with_id("explorer.newFile", "New File").build(handle)?)
         .item(&MenuItemBuilder::with_id("explorer.newFolder", "New Folder").build(handle)?)
         .separator()
-        .item(
-            &MenuItemBuilder::with_id("file.openFolder", "Open Folder…")
-                .accelerator("CmdOrCtrl+O")
-                .build(handle)?,
-        )
+        // Cmd/Ctrl+O belongs to the frontend workbench keymap. A native
+        // accelerator did not fire consistently while focus was in the WebView.
+        .item(&MenuItemBuilder::with_id("file.openFolder", "Open Folder…").build(handle)?)
         .item(&MenuItemBuilder::with_id("file.save", "Save").build(handle)?)
         .item(&MenuItemBuilder::with_id("editor.closeTab", "Close Editor").build(handle)?)
         .build()?;
