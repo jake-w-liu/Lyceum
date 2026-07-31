@@ -24,7 +24,7 @@ use tauri::{AppHandle, State};
 
 use crate::path_access::{self, PathAccessManager};
 use crate::workspace_paths::{
-    path_resolves_into_workspace_trash, path_resolves_through_workspace_names,
+    path_resolves_into_workspace_trash, path_resolves_through_workspace_names, INDEX_EXCLUDED_DIRS,
 };
 
 /// Result of a workspace git-status query. `files` maps absolute paths to a
@@ -177,12 +177,7 @@ fn has_git_marker(dir: &Path) -> bool {
 
 fn is_skipped_walk_dir(root: &Path, path: &Path) -> bool {
     path_resolves_into_workspace_trash(root, path)
-        || path_resolves_through_workspace_names(
-            root,
-            path,
-            &[],
-            &[".git", "node_modules", "target", "dist", ".vite"],
-        )
+        || path_resolves_through_workspace_names(root, path, &[".git"], &INDEX_EXCLUDED_DIRS)
 }
 
 /// Absolute paths the repository ignores (git collapses fully-ignored directories to

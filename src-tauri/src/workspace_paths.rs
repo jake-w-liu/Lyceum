@@ -3,6 +3,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) const LYCEUM_TRASH_DIR: &str = ".lyceum-trash";
+/// High-churn dependency/build trees excluded from recursive indexing and
+/// background filesystem refreshes. Keep this vocabulary shared so quick-open,
+/// search, Git discovery, and the native watcher cannot drift apart.
+pub(crate) const INDEX_EXCLUDED_DIRS: [&str; 4] = ["node_modules", "target", "dist", ".vite"];
 static CASE_PROBE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// True only for Lyceum's reserved trash entry directly under `root`.

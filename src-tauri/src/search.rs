@@ -13,11 +13,8 @@ use tauri::{AppHandle, State};
 
 use crate::path_access::{self, PathAccessManager};
 use crate::workspace_paths::{
-    path_resolves_into_workspace_trash, path_resolves_through_workspace_names,
+    path_resolves_into_workspace_trash, path_resolves_through_workspace_names, INDEX_EXCLUDED_DIRS,
 };
-
-/// Directory names that are skipped entirely (not descended into).
-const SKIP_DIRS: [&str; 4] = ["node_modules", "target", "dist", ".vite"];
 
 /// Files larger than this are skipped, so a single huge file (a multi-GB log or
 /// dataset that happens to be valid UTF-8) cannot be slurped wholesale into a
@@ -166,7 +163,12 @@ pub fn search_in_dir(root: &Path, query: &str, max: usize) -> Result<Vec<SearchM
             };
             let path = entry.path();
             if path_resolves_into_workspace_trash(root, &path)
-                || path_resolves_through_workspace_names(root, &path, &[".git"], &SKIP_DIRS)
+                || path_resolves_through_workspace_names(
+                    root,
+                    &path,
+                    &[".git"],
+                    &INDEX_EXCLUDED_DIRS,
+                )
             {
                 continue;
             }

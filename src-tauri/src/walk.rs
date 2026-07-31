@@ -11,11 +11,8 @@ use tauri::{AppHandle, State};
 
 use crate::path_access::{self, PathAccessManager};
 use crate::workspace_paths::{
-    path_resolves_into_workspace_trash, path_resolves_through_workspace_names,
+    path_resolves_into_workspace_trash, path_resolves_through_workspace_names, INDEX_EXCLUDED_DIRS,
 };
-
-/// Directory names that are skipped entirely (not descended into).
-const SKIP_DIRS: [&str; 4] = ["node_modules", "target", "dist", ".vite"];
 
 /// Recursively collect absolute file paths under `root`, skipping a fixed set of
 /// directories. Stops once `max` files have been collected, then sorts the
@@ -54,7 +51,12 @@ pub fn list_files(root: &Path, max: usize) -> Result<Vec<String>, String> {
             };
             let path = entry.path();
             if path_resolves_into_workspace_trash(root, &path)
-                || path_resolves_through_workspace_names(root, &path, &[".git"], &SKIP_DIRS)
+                || path_resolves_through_workspace_names(
+                    root,
+                    &path,
+                    &[".git"],
+                    &INDEX_EXCLUDED_DIRS,
+                )
             {
                 continue;
             }

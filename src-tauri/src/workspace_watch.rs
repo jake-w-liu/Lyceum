@@ -13,6 +13,7 @@ use crate::git;
 use crate::path_access::{self, PathAccessManager};
 use crate::workspace_paths::{
     path_resolves_into_workspace_trash, path_resolves_through_workspace_name,
+    path_resolves_through_workspace_names, INDEX_EXCLUDED_DIRS,
 };
 
 const WORKSPACE_FS_CHANGE_EVENT: &str = "workspace:fs-change";
@@ -767,6 +768,9 @@ fn workspace_event_paths_with_git_roots(
             git_changed = true;
             continue;
         }
+        if path_is_in_index_excluded_dir(canonical_root, path) {
+            continue;
+        }
         match internal_workspace_path_kind(canonical_root, requested_root, path) {
             Some(InternalWorkspacePath::Git) => {
                 git_changed = true;
@@ -793,6 +797,48 @@ fn workspace_event_paths_with_git_roots(
     } else {
         None
     }
+}
+
+/// Cheaply classify paths inside the same high-churn trees that quick-open,
+/// search, and Git discovery exclude.
+///
+/// The common descendant case is purely lexical: doing canonicalize/stat work
+/// for every compiler notification was itself enough to saturate a core. A leaf
+/// named `target` is checked with metadata so an ordinary file with that name
+/// remains visible. Case-only aliases take the slower identity-aware route only
+/// when their spelling actually resembles an excluded name; this preserves
+/// distinct uppercase directories on case-sensitive filesystems.
+fn path_is_in_index_excluded_dir(root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return false;
+    };
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        let Component::Normal(component) = component else {
+            continue;
+        };
+        let Some(name) = component.to_str() else {
+            continue;
+        };
+        // Git/trash bookkeeping has stricter semantics than generated-tree
+        // suppression. Let the identity-aware classifier below handle it even
+        // when a later component happens to be named `target` or `dist`.
+        if name.eq_ignore_ascii_case(".git")
+            || name.eq_ignore_ascii_case(crate::workspace_paths::LYCEUM_TRASH_DIR)
+        {
+            return false;
+        }
+        if INDEX_EXCLUDED_DIRS.contains(&name) {
+            return components.peek().is_some() || path.is_dir();
+        }
+        if INDEX_EXCLUDED_DIRS
+            .iter()
+            .any(|excluded| name.eq_ignore_ascii_case(excluded))
+        {
+            return path_resolves_through_workspace_names(root, path, &[], &INDEX_EXCLUDED_DIRS);
+        }
+    }
+    false
 }
 
 fn ignores_workspace_event_kind(kind: &EventKind) -> bool {
@@ -1233,6 +1279,78 @@ mod tests {
             ),
             visible(&["/link/project/src/main.tex"])
         );
+    }
+
+    #[test]
+    fn generated_tree_events_do_not_refresh_workspace() {
+        for path in [
+            "/real/project/target/debug/object.o",
+            "/real/project/node_modules/pkg/index.js",
+            "/real/project/web/dist/bundle.js",
+            "/real/project/.vite/deps/chunk.js",
+        ] {
+            let event = Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Content)))
+                .add_path(PathBuf::from(path));
+
+            assert_eq!(
+                workspace_event_paths(
+                    Path::new("/real/project"),
+                    Path::new("/link/project"),
+                    &event
+                ),
+                None,
+                "{path} should be excluded"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_file_named_like_generated_directory_remains_visible() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let target = tmp.path().join("target");
+        std::fs::write(&target, b"ordinary file").unwrap();
+        let visible_path = target.to_string_lossy().into_owned();
+        let event =
+            Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Content))).add_path(target);
+
+        assert_eq!(
+            workspace_event_paths(tmp.path(), tmp.path(), &event),
+            visible(&[&visible_path])
+        );
+    }
+
+    #[test]
+    fn git_metadata_wins_over_a_later_generated_directory_name() {
+        let event = Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Content)))
+            .add_path(PathBuf::from("/real/project/.git/target/index"));
+
+        assert_eq!(
+            workspace_event_paths(
+                Path::new("/real/project"),
+                Path::new("/link/project"),
+                &event
+            ),
+            git_only()
+        );
+    }
+
+    #[test]
+    fn case_distinct_generated_name_remains_visible_on_case_sensitive_filesystems() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let upper = tmp.path().join("TARGET");
+        std::fs::create_dir(&upper).unwrap();
+        let event_path = upper.join("artifact");
+        std::fs::write(&event_path, b"artifact").unwrap();
+        let visible_path = event_path.to_string_lossy().into_owned();
+        let event = Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Content)))
+            .add_path(event_path);
+
+        let result = workspace_event_paths(tmp.path(), tmp.path(), &event);
+        if tmp.path().join("target").exists() {
+            assert_eq!(result, None);
+        } else {
+            assert_eq!(result, visible(&[&visible_path]));
+        }
     }
 
     #[test]
