@@ -23,7 +23,7 @@ import {
   useEditorStore,
 } from "../state/editorStore";
 import { usePreviewStore } from "../state/previewStore";
-import { newWindow } from "../lib/ipc";
+import { focusWindowRelative, newWindow } from "../lib/ipc";
 import { runActiveCode } from "../lib/codeRun";
 import { runLatexBuild } from "../lib/latexBuild";
 import { stopActiveRun } from "../lib/run";
@@ -86,6 +86,18 @@ export function registerBuiltinCommands(): void {
     title: "New Window",
     category: "Window",
     run: () => newWindow(),
+  });
+  commandRegistry.register({
+    id: "window.next",
+    title: "Next Window",
+    category: "Window",
+    run: () => focusWindowRelative(1),
+  });
+  commandRegistry.register({
+    id: "window.previous",
+    title: "Previous Window",
+    category: "Window",
+    run: () => focusWindowRelative(-1),
   });
   // Quit via the native menu (the Rust menu handler emits menu id "quit").
   // Mirrors the window-close guard: confirm discarding unsaved changes first.

@@ -9,7 +9,9 @@
 // for those chords. Close Lyceum Window uses Cmd/Ctrl+Shift+W so Cmd/Ctrl+W
 // remains Close Editor.
 
-use tauri::menu::{AboutMetadata, Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+use tauri::menu::{
+    AboutMetadata, Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder, WINDOW_SUBMENU_ID,
+};
 use tauri::{AppHandle, Runtime};
 
 pub fn build_app_menu<R: Runtime>(handle: &AppHandle<R>) -> tauri::Result<Menu<R>> {
@@ -96,11 +98,29 @@ pub fn build_app_menu<R: Runtime>(handle: &AppHandle<R>) -> tauri::Result<Menu<R
         )
         .build()?;
 
-    let window_menu = SubmenuBuilder::new(handle, "Window")
+    // Tauri registers this reserved id as NSApp's windowsMenu on macOS, which
+    // lets AppKit maintain the standard live window list.
+    let window_menu = SubmenuBuilder::with_id(handle, WINDOW_SUBMENU_ID, "Window")
         .item(&MenuItemBuilder::with_id("app.newWindow", "New Window").build(handle)?)
         .separator()
         .minimize()
-        .separator()
+        .separator();
+    #[cfg(target_os = "macos")]
+    let window_menu = window_menu
+        // Explicit native accelerators make the standard macOS window-cycle
+        // chords work even while WKWebView/xterm owns keyboard focus.
+        .item(
+            &MenuItemBuilder::with_id("window.next", "Next Window")
+                .accelerator("Cmd+Backquote")
+                .build(handle)?,
+        )
+        .item(
+            &MenuItemBuilder::with_id("window.previous", "Previous Window")
+                .accelerator("Cmd+Shift+Backquote")
+                .build(handle)?,
+        )
+        .separator();
+    let window_menu = window_menu
         .item(
             // With the exact standard title "Close Window", macOS exposed this
             // item as bare Cmd+W despite the requested Shift modifier. Use an

@@ -65,6 +65,31 @@ describe("useCommandKeybindings", () => {
     expect(executeSpy).toHaveBeenCalledWith("file.save");
   });
 
+  it("captures Cmd+` before a focused terminal textarea can consume it", () => {
+    const terminal = document.createElement("div");
+    terminal.className = "terminal-view";
+    const textarea = document.createElement("textarea");
+    textarea.addEventListener("keydown", (event) => event.stopPropagation());
+    terminal.appendChild(textarea);
+    document.body.appendChild(terminal);
+    const { unmount } = renderHook(() => useCommandKeybindings());
+    const event = new KeyboardEvent("keydown", {
+      key: "`",
+      code: "Backquote",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+
+    textarea.dispatchEvent(event);
+    unmount();
+    terminal.remove();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(executeSpy).toHaveBeenCalledOnce();
+    expect(executeSpy).toHaveBeenCalledWith("window.next");
+  });
+
   it("dispatches Open Folder through the central workbench keymap", () => {
     const { unmount } = renderHook(() => useCommandKeybindings());
     const event = new KeyboardEvent("keydown", {

@@ -177,9 +177,18 @@ describe("matchKeybinding mod resolution", () => {
     expect(matchKeybinding(e, {}, true)).toBe("terminal.toggle");
   });
 
-  it("mac meta+backquote => null", () => {
+  it("mac meta+backquote => window.next", () => {
     const e = new KeyboardEvent("keydown", { code: "Backquote", metaKey: true });
-    expect(matchKeybinding(e, {}, true)).toBeNull();
+    expect(matchKeybinding(e, {}, true)).toBe("window.next");
+  });
+
+  it("mac meta+shift+backquote => window.previous", () => {
+    const e = new KeyboardEvent("keydown", {
+      code: "Backquote",
+      metaKey: true,
+      shiftKey: true,
+    });
+    expect(matchKeybinding(e, {}, true)).toBe("window.previous");
   });
 });
 

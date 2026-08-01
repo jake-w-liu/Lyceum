@@ -18,6 +18,10 @@ export const DEFAULT_KEYMAP: Keybinding[] = [
   { key: "mod+b", command: "workbench.toggleSidebar" },
   { key: "ctrl+backquote", command: "terminal.toggle" },
   { key: "ctrl+shift+backquote", command: "terminal.new" },
+  // macOS reserves Cmd+Tab for switching applications. Cmd+` / Shift+Cmd+`
+  // cycle this app's windows and must be captured before xterm consumes them.
+  { key: "cmd+backquote", command: "window.next" },
+  { key: "cmd+shift+backquote", command: "window.previous" },
   { key: "mod+j", command: "workbench.toggleBottomPanel" },
   { key: "mod+s", command: "file.save" },
   { key: "mod+alt+s", command: "file.saveAll" },

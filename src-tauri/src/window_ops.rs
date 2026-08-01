@@ -27,6 +27,69 @@ fn next_window_label<R: Runtime>(app: &AppHandle<R>) -> String {
     )
 }
 
+fn label_sequence(label: &str) -> Option<u64> {
+    if label == "main" {
+        return Some(0);
+    }
+    label.strip_prefix("main")?.parse().ok()
+}
+
+fn adjacent_window_label<'a>(
+    labels: impl IntoIterator<Item = &'a str>,
+    focused: Option<&str>,
+    direction: i8,
+) -> Option<String> {
+    let mut labels: Vec<&str> = labels.into_iter().collect();
+    labels.sort_unstable_by(
+        |left, right| match (label_sequence(left), label_sequence(right)) {
+            (Some(left), Some(right)) => left.cmp(&right),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => left.cmp(right),
+        },
+    );
+    if labels.len() < 2 {
+        return None;
+    }
+
+    let current = focused.and_then(|focused| labels.iter().position(|label| *label == focused));
+    let next = match (current, direction < 0) {
+        (Some(current), true) => (current + labels.len() - 1) % labels.len(),
+        (Some(current), false) => (current + 1) % labels.len(),
+        // If the app is inactive or all windows are minimized, there is no
+        // current window to advance from. Focus the first/last window directly.
+        (None, true) => labels.len() - 1,
+        (None, false) => 0,
+    };
+    Some(labels[next].to_string())
+}
+
+pub fn focus_adjacent_window<R: Runtime>(app: &AppHandle<R>, direction: i8) -> Result<(), String> {
+    let windows = app.webview_windows();
+    let focused = windows
+        .iter()
+        .find(|(_, window)| window.is_focused().unwrap_or(false))
+        .map(|(label, _)| label.as_str());
+    let Some(label) = adjacent_window_label(windows.keys().map(String::as_str), focused, direction)
+    else {
+        return Ok(());
+    };
+    let window = windows
+        .get(&label)
+        .ok_or_else(|| format!("window {label} disappeared before it could be focused"))?;
+    window.unminimize().map_err(|err| err.to_string())?;
+    window.show().map_err(|err| err.to_string())?;
+    window.set_focus().map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub fn focus_window_relative(app: AppHandle, direction: i8) -> Result<(), String> {
+    if direction != -1 && direction != 1 {
+        return Err("window focus direction must be -1 or 1".to_string());
+    }
+    focus_adjacent_window(&app, direction)
+}
+
 #[cfg(target_os = "macos")]
 fn focus_first_window<R: Runtime>(app: &AppHandle<R>) -> bool {
     let Some(window) = app.webview_windows().into_values().next() else {
@@ -145,7 +208,9 @@ pub fn quit_app(window: WebviewWindow, app: AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{next_available_window_label, prepare_then_build, window_label};
+    use super::{
+        adjacent_window_label, next_available_window_label, prepare_then_build, window_label,
+    };
     use std::cell::RefCell;
 
     #[test]
@@ -166,6 +231,44 @@ mod tests {
         );
 
         assert_eq!(label, "main3");
+    }
+
+    #[test]
+    fn adjacent_window_labels_follow_creation_order_and_wrap() {
+        let labels = ["main10", "main2", "main", "utility"];
+
+        assert_eq!(
+            adjacent_window_label(labels, Some("main2"), 1).as_deref(),
+            Some("main10")
+        );
+        assert_eq!(
+            adjacent_window_label(labels, Some("utility"), 1).as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            adjacent_window_label(labels, Some("main"), -1).as_deref(),
+            Some("utility")
+        );
+    }
+
+    #[test]
+    fn adjacent_window_label_is_noop_without_an_alternative() {
+        assert_eq!(adjacent_window_label(["main"], Some("main"), 1), None);
+        assert_eq!(adjacent_window_label([], None, -1), None);
+    }
+
+    #[test]
+    fn adjacent_window_label_selects_an_endpoint_without_a_focused_window() {
+        let labels = ["main2", "main", "main1"];
+
+        assert_eq!(
+            adjacent_window_label(labels, None, 1).as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            adjacent_window_label(labels, None, -1).as_deref(),
+            Some("main2")
+        );
     }
 
     #[test]

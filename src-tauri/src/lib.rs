@@ -302,6 +302,13 @@ pub fn run() {
                 }
                 return;
             }
+            if id == "window.next" || id == "window.previous" {
+                let direction = if id == "window.next" { 1 } else { -1 };
+                if let Err(err) = window_ops::focus_adjacent_window(app, direction) {
+                    eprintln!("failed to focus adjacent window: {err}");
+                }
+                return;
+            }
             // The macOS menu bar is app-global, so deliver the command to the
             // focused window ONLY. Broadcasting with app.emit ran it in every
             // window at once — e.g. Open Folder fired in the first window even
@@ -357,6 +364,7 @@ pub fn run() {
             workspace_watch::workspace_watch_ack,
             workspace_watch::unwatch_workspace,
             window_ops::new_window,
+            window_ops::focus_window_relative,
             window_ops::quit_app,
             lsp::lsp_start,
             lsp::lsp_send,

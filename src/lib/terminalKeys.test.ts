@@ -59,6 +59,19 @@ describe("terminalKeyOverride", () => {
     expect(terminalKeyOverride(ev({ key: "v", ctrlKey: true }), true, false)).toBeNull();
   });
 
+  it("does not consume macOS app or window switching in the terminal override", () => {
+    expect(
+      terminalKeyOverride(ev({ key: "Tab", code: "Tab", metaKey: true }), true, false),
+    ).toBeNull();
+    expect(
+      terminalKeyOverride(
+        ev({ key: "`", code: "Backquote", metaKey: true }),
+        true,
+        false,
+      ),
+    ).toBeNull();
+  });
+
   it("ignores non-keydown events so keypress/keyup never re-send a key", () => {
     expect(
       terminalKeyOverride(ev({ type: "keypress", key: "Backspace" }), true, false),

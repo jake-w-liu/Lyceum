@@ -123,6 +123,11 @@ export async function newWindow(): Promise<void> {
   await invoke("new_window");
 }
 
+/** Focus the next (1) or previous (-1) Lyceum application window. */
+export async function focusWindowRelative(direction: -1 | 1): Promise<void> {
+  await invoke("focus_window_relative", { direction });
+}
+
 /** Exit the application (called after the frontend's unsaved-changes check). */
 export async function quitApp(): Promise<void> {
   await invoke("quit_app");

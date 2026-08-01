@@ -79,6 +79,19 @@ beforeEach(() => {
 });
 
 describe("builtinCommands", () => {
+  it("routes window cycling through the native window manager", async () => {
+    await commandRegistry.execute("window.next");
+    expect(invokeMock).toHaveBeenCalledWith("focus_window_relative", {
+      direction: 1,
+    });
+
+    invokeMock.mockClear();
+    await commandRegistry.execute("window.previous");
+    expect(invokeMock).toHaveBeenCalledWith("focus_window_relative", {
+      direction: -1,
+    });
+  });
+
   it("terminal.new creates a terminal and reveals the terminal panel", async () => {
     expect(useTerminalStore.getState().terminals).toHaveLength(0);
     await commandRegistry.execute("terminal.new");
