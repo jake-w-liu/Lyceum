@@ -56,12 +56,21 @@ fn adjacent_window_label<'a>(
     let next = match (current, direction < 0) {
         (Some(current), true) => (current + labels.len() - 1) % labels.len(),
         (Some(current), false) => (current + 1) % labels.len(),
-        // If the app is inactive or all windows are minimized, there is no
-        // current window to advance from. Focus the first/last window directly.
+        // No eligible focused window (app inactive, focus on a minimized
+        // window, etc.). Land on the first/last window in the cycle set.
         (None, true) => labels.len() - 1,
         (None, false) => 0,
     };
     Some(labels[next].to_string())
+}
+
+/// Whether a window may participate in keyboard window cycling.
+///
+/// Matches macOS AppKit / VS Code: a miniaturized window stays in the Dock and
+/// is not reached by Cmd+` / Cmd+Shift+` until the user restores it (Dock,
+/// Window menu, Mission Control, etc.).
+fn is_cycle_eligible<R: Runtime>(window: &WebviewWindow<R>) -> bool {
+    !window.is_minimized().unwrap_or(false)
 }
 
 pub fn focus_adjacent_window<R: Runtime>(app: &AppHandle<R>, direction: i8) -> Result<(), String> {
@@ -70,14 +79,22 @@ pub fn focus_adjacent_window<R: Runtime>(app: &AppHandle<R>, direction: i8) -> R
         .iter()
         .find(|(_, window)| window.is_focused().unwrap_or(false))
         .map(|(label, _)| label.as_str());
-    let Some(label) = adjacent_window_label(windows.keys().map(String::as_str), focused, direction)
-    else {
+    // Only non-minimized windows. Including miniaturized ones and calling
+    // unminimize() made Cmd+` restore windows the user deliberately hid with
+    // the yellow traffic light — unlike VS Code and native macOS apps.
+    let cycle_labels: Vec<&str> = windows
+        .iter()
+        .filter(|(_, window)| is_cycle_eligible(window))
+        .map(|(label, _)| label.as_str())
+        .collect();
+    let Some(label) = adjacent_window_label(cycle_labels, focused, direction) else {
         return Ok(());
     };
     let window = windows
         .get(&label)
         .ok_or_else(|| format!("window {label} disappeared before it could be focused"))?;
-    window.unminimize().map_err(|err| err.to_string())?;
+    // Target is already non-minimized (filtered above). Do not unminimize —
+    // that would reintroduce minimized windows into the cycle path.
     window.show().map_err(|err| err.to_string())?;
     window.set_focus().map_err(|err| err.to_string())
 }
@@ -268,6 +285,23 @@ mod tests {
         assert_eq!(
             adjacent_window_label(labels, None, -1).as_deref(),
             Some("main2")
+        );
+    }
+
+    #[test]
+    fn window_cycle_skips_minimized_windows_when_caller_filters_them() {
+        // focus_adjacent_window only passes non-minimized labels. If the only
+        // other window is minimized, the cycle set has a single entry and
+        // must be a no-op — never deminiaturize via this path.
+        assert_eq!(
+            adjacent_window_label(["main"], Some("main"), 1),
+            None
+        );
+        // Two visible windows still cycle; a third miniaturized label is simply
+        // omitted by the caller before this helper runs.
+        assert_eq!(
+            adjacent_window_label(["main", "main1"], Some("main"), 1).as_deref(),
+            Some("main1")
         );
     }
 
