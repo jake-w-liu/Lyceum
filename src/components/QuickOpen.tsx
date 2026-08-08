@@ -79,6 +79,15 @@ export function QuickOpen() {
     [activeModal, files, query],
   );
 
+  // A watcher refresh can replace the file list without changing the query.
+  // Keep the numeric selection valid when that refreshed result set shrinks;
+  // otherwise Enter indexes past the array and silently does nothing.
+  useEffect(() => {
+    setSelected((current) =>
+      Math.min(current, Math.max(results.length - 1, 0)),
+    );
+  }, [results.length]);
+
   // Keep the keyboard-selected row visible as ArrowUp/ArrowDown move it past
   // the list's scroll fold. `nearest` is a no-op when it's already in view.
   useEffect(() => {

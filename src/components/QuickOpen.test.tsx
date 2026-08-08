@@ -114,6 +114,26 @@ describe("QuickOpen", () => {
     expect(screen.getByLabelText("File search")).toHaveValue("new");
   });
 
+  it("keeps the keyboard selection in range when refreshed results shrink", async () => {
+    const user = userEvent.setup();
+    render(<QuickOpen />);
+
+    await screen.findByText("README.md");
+    await user.keyboard("{ArrowDown}");
+    expect(screen.getByText("README.md").closest("li")).toHaveClass("selected");
+
+    vi.mocked(listWorkspaceFiles).mockResolvedValue(["/w/replacement.ts"]);
+    act(() => useTreeStore.getState().refresh());
+
+    expect(await screen.findByText("replacement.ts")).toBeInTheDocument();
+    await user.keyboard("{Enter}");
+
+    expect(useWorkspaceStore.getState().pendingOpenPath).toBe(
+      "/w/replacement.ts",
+    );
+    expect(useUiStore.getState().activeModal).toBeNull();
+  });
+
   it("clears old file results while a new workspace listing is loading", async () => {
     const first = deferred<string[]>();
     const second = deferred<string[]>();

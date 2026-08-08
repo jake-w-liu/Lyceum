@@ -44,7 +44,17 @@ describe("outputStore", () => {
   });
 
   it("caps the buffer at MAX_OUTPUT_LINES, keeping the most recent lines", () => {
-    for (let i = 0; i < MAX_OUTPUT_LINES + 250; i += 1) get().append(`line ${i}`);
+    // Seed the near-cap history in one production batch, then exercise the
+    // single-line append at the boundary. Repeating thousands of immutable
+    // Zustand updates here only tests allocator speed and can time out when the
+    // suite shares a busy CI host; both actions use the same capping helper.
+    get().appendMany(
+      Array.from(
+        { length: MAX_OUTPUT_LINES + 249 },
+        (_, i) => `line ${i}`,
+      ),
+    );
+    get().append(`line ${MAX_OUTPUT_LINES + 249}`);
     const lines = get().lines;
     expect(lines).toHaveLength(MAX_OUTPUT_LINES);
     expect(lines[lines.length - 1]).toBe(`line ${MAX_OUTPUT_LINES + 249}`);

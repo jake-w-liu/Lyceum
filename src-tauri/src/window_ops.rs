@@ -293,10 +293,7 @@ mod tests {
         // focus_adjacent_window only passes non-minimized labels. If the only
         // other window is minimized, the cycle set has a single entry and
         // must be a no-op — never deminiaturize via this path.
-        assert_eq!(
-            adjacent_window_label(["main"], Some("main"), 1),
-            None
-        );
+        assert_eq!(adjacent_window_label(["main"], Some("main"), 1), None);
         // Two visible windows still cycle; a third miniaturized label is simply
         // omitted by the caller before this helper runs.
         assert_eq!(
