@@ -411,15 +411,14 @@ pub fn run() {
                 }
                 #[cfg(target_os = "macos")]
                 RunEvent::Reopen {
-                    has_visible_windows,
+                    has_visible_windows: false,
                     ..
                 } => {
-                    let result = if has_visible_windows {
-                        window_ops::focus_or_open_window(app)
-                    } else {
-                        window_ops::open_new_window(app).map(|_| ())
-                    };
-                    if let Err(err) = result {
+                    // Dock-icon click must never move focus between windows:
+                    // macOS activation already brings the key window forward,
+                    // and Cmd+` remains the explicit window switcher. Only
+                    // open a window when none are visible.
+                    if let Err(err) = window_ops::open_new_window(app).map(|_| ()) {
                         eprintln!("failed to handle app reopen: {err}");
                     }
                 }

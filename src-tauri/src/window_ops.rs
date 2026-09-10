@@ -107,15 +107,6 @@ pub fn focus_window_relative(app: AppHandle, direction: i8) -> Result<(), String
     focus_adjacent_window(&app, direction)
 }
 
-#[cfg(target_os = "macos")]
-fn focus_first_window<R: Runtime>(app: &AppHandle<R>) -> bool {
-    let Some(window) = app.webview_windows().into_values().next() else {
-        return false;
-    };
-    let _ = window.set_focus();
-    true
-}
-
 /// Reserve a unique label before a native window is built. Callers that need to
 /// publish per-window startup state must do so after this reservation and before
 /// `open_new_window_with_label`; otherwise the WebView can mount and consume the
@@ -177,15 +168,6 @@ pub(crate) fn open_new_window_prepared<R: Runtime>(
 
 pub fn open_new_window<R: Runtime>(app: &AppHandle<R>) -> Result<WebviewWindow<R>, String> {
     open_new_window_prepared(app, |_| Ok(()), |_| {})
-}
-
-#[cfg(target_os = "macos")]
-pub fn focus_or_open_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
-    if focus_first_window(app) {
-        Ok(())
-    } else {
-        open_new_window(app).map(|_| ())
-    }
 }
 
 #[tauri::command]
