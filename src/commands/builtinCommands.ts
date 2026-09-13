@@ -252,19 +252,13 @@ export function registerBuiltinCommands(): void {
         // Markdown/HTML previews render in place, replacing the editor view.
         layout().toggleEditorPreview();
       } else if (doc && doc.kind === "text" && isTexSourcePath(doc.path)) {
-        void runLatexBuild({ targetPath: doc.path, openOnSuccess: true });
+        void runLatexBuild({ targetPath: doc.path });
       } else if (doc && (doc.kind === "pdf" || doc.kind === "image")) {
         // PDF/image files are already rendered directly in their editor tab.
         preview.closePreview();
         layout().setPdfPanelVisible(false);
       }
     },
-  });
-  commandRegistry.register({
-    id: "latex.build",
-    title: "Compile LaTeX",
-    category: "Run",
-    run: () => runLatexBuild({ openOnSuccess: false }),
   });
   commandRegistry.register({
     id: "editor.run",

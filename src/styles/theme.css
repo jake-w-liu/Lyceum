@@ -47,21 +47,25 @@
   --pdf-highlight-active: rgba(174, 82, 36, 0.58);
   --pdf-highlight-active-border: rgba(174, 82, 36, 0.92);
 
-  /* Git decoration colors (Explorer): Nippon Colors semantic set. */
-  --git-modified: #ffb11b;
-  --git-added: #24936e;
+  /* Git decoration colors (Explorer): Nippon Colors semantic set.
+   * Workspace-repo entries use the warm family (yamabuki, tokiwa, akabeni,
+   * kakishibu, namari); nested-repo entries use a cool jewel family
+   * (sora, fuji-murasaki, botan, usubeni) so scope reads at a glance. */
+  --git-modified: #ffb11b; /* yamabuki */
+  --git-added: #24936e; /* tokiwa */
   --git-untracked: #24936e;
-  --git-deleted: #cb4042;
-  --git-conflict: #f75c2f;
+  --git-deleted: #cb4042; /* akabeni */
+  --git-conflict: #f75c2f; /* kakishibu */
   --git-renamed: #ffb11b;
-  --git-ignored: #91989f;
+  --git-ignored: #91989f; /* namari */
   --git-ignored-opacity: 0.72;
-  --git-nested-modified: #c7802d;
-  --git-nested-added: #268785;
-  --git-nested-untracked: #268785;
-  --git-nested-deleted: #9f353a;
-  --git-nested-conflict: #a36336;
-  --git-nested-renamed: #c7802d;
+  --git-nested-modified: #58b2dc; /* sora */
+  --git-nested-added: #8a6bbe; /* fuji-murasaki */
+  --git-nested-untracked: #8a6bbe;
+  --git-nested-deleted: #c1328e; /* botan */
+  --git-nested-conflict: #e87a90; /* usubeni */
+  --git-nested-renamed: #58b2dc;
+  --git-nested-ignored: #7d8fa3; /* cool slate */
 
   --ui-font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Helvetica Neue", sans-serif;
   --mono-font: "SF Mono", "JetBrains Mono", "Fira Code", "Cascadia Code", Menlo, Consolas, monospace;
@@ -100,21 +104,23 @@
   --pdf-highlight-active: rgba(174, 82, 36, 0.5);
   --pdf-highlight-active-border: rgba(174, 82, 36, 0.78);
 
-  /* Darker Nippon shades for contrast on a light background. */
-  --git-modified: #a36336;
-  --git-added: #227d51;
+  /* Darker Nippon shades for contrast on a light background. Nested
+   * entries stay in the cool family: konpeki, murasaki, ichigo, botan. */
+  --git-modified: #a36336; /* kuchiba */
+  --git-added: #227d51; /* midori */
   --git-untracked: #227d51;
-  --git-deleted: #9f353a;
-  --git-conflict: #a36336;
+  --git-deleted: #9f353a; /* suoh */
+  --git-conflict: #f35336; /* benihi */
   --git-renamed: #a36336;
   --git-ignored: #828282;
   --git-ignored-opacity: 0.78;
-  --git-nested-modified: #006284;
-  --git-nested-added: #2d6d4b;
-  --git-nested-untracked: #2d6d4b;
-  --git-nested-deleted: #8e354a;
-  --git-nested-conflict: #9a5034;
-  --git-nested-renamed: #006284;
+  --git-nested-modified: #007bbb; /* konpeki */
+  --git-nested-added: #6f3381; /* murasaki */
+  --git-nested-untracked: #6f3381;
+  --git-nested-deleted: #b5495b; /* ichigo */
+  --git-nested-conflict: #c1328e; /* botan */
+  --git-nested-renamed: #007bbb;
+  --git-nested-ignored: #627a8a; /* cool slate */
 }
 
 :root[data-theme="hc"] {
@@ -150,19 +156,21 @@
   --pdf-highlight-active: rgba(246, 140, 80, 0.66);
   --pdf-highlight-active-border: rgba(246, 140, 80, 0.95);
 
-  /* High-contrast: bright Nippon decoration colors against pure black. */
-  --git-modified: #ffb11b;
-  --git-added: #24936e;
+  /* High-contrast: bright Nippon decoration colors against pure black.
+   * Nested entries keep the cool family at maximum brightness. */
+  --git-modified: #ffb11b; /* yamabuki */
+  --git-added: #24936e; /* tokiwa */
   --git-untracked: #24936e;
-  --git-deleted: #f75c2f;
-  --git-conflict: #f75c2f;
+  --git-deleted: #e9546b; /* sohi */
+  --git-conflict: #f75c2f; /* kakishibu */
   --git-renamed: #ffb11b;
   --git-ignored: #91989f;
   --git-ignored-opacity: 0.92;
-  --git-nested-modified: #c7802d;
-  --git-nested-added: #268785;
-  --git-nested-untracked: #268785;
-  --git-nested-deleted: #cb4042;
-  --git-nested-conflict: #a36336;
-  --git-nested-renamed: #c7802d;
+  --git-nested-modified: #58b2dc; /* sora */
+  --git-nested-added: #bbbcde; /* fujiiro */
+  --git-nested-untracked: #bbbcde;
+  --git-nested-deleted: #e87a90; /* usubeni */
+  --git-nested-conflict: #e03c8a; /* tsutsuji */
+  --git-nested-renamed: #58b2dc;
+  --git-nested-ignored: #7d8fa3; /* cool slate */
 }

@@ -325,14 +325,14 @@ record and acceptance reference; current completion details live in
 **Scope:**
 - Markdown: live rendered preview; `Cmd/Ctrl+Shift+V` opens the preview.
 - HTML: rendered preview in a sandboxed iframe; `Cmd/Ctrl+Shift+V` opens the preview.
-- LaTeX: save and compile the active `.tex` file by retargeting `latexBuildCommand`
-  (e.g. `latexmk -pdf main.tex`) to that file; Compile writes the resulting PDF
-  beside the source, and Preview opens that PDF in the M6 PDF.js viewer.
+- LaTeX: Preview saves and compiles the active `.tex` file by retargeting
+  `latexBuildCommand` (e.g. `latexmk -pdf main.tex`) to that file, writes the
+  resulting PDF beside the source, and opens it in the M6 PDF.js viewer.
 - Surface build output/errors in the terminal/bottom panel.
 
 **Done when:**
 - `Cmd/Ctrl+Shift+V` shows a Markdown or HTML preview that updates as the document changes.
-- Running the LaTeX compile/preview flow for the active `.tex` file produces a
+- Running the LaTeX preview flow for the active `.tex` file produces a
   PDF; Preview opens it in the PDF viewer, and build errors are visible.
 
 **Tests that must pass:**

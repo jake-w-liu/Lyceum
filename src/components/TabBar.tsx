@@ -169,40 +169,19 @@ export function TabBar() {
           </button>
         )}
         {!canPreview && canLatexPreview && activeDoc && (
-          <>
-            <button
-              type="button"
-              className="tab-action"
-              aria-label="Compile LaTeX"
-              title="Compile LaTeX"
-              disabled={outputRunning}
-              onClick={() =>
-                void runLatexBuild({
-                  targetPath: activeDoc.path,
-                  openOnSuccess: false,
-                })
-              }
-            >
-              <Icon name="build" size={14} />
-              <span>Compile</span>
-            </button>
-            <button
-              type="button"
-              className="tab-action"
-              aria-label="Preview LaTeX PDF"
-              title="Compile and Preview LaTeX PDF"
-              disabled={outputRunning}
-              onClick={() =>
-                void runLatexBuild({
-                  targetPath: activeDoc.path,
-                  openOnSuccess: true,
-                })
-              }
-            >
-              <Icon name="preview" size={14} />
-              <span>Preview</span>
-            </button>
-          </>
+          <button
+            type="button"
+            className="tab-action"
+            aria-label="Preview LaTeX PDF"
+            title="Compile and Preview LaTeX PDF"
+            disabled={outputRunning}
+            onClick={() =>
+              void runLatexBuild({ targetPath: activeDoc.path })
+            }
+          >
+            <Icon name="preview" size={14} />
+            <span>Preview</span>
+          </button>
         )}
         {!canPreview && !canLatexPreview && canRun && (
           <button

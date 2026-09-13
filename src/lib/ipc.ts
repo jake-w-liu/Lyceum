@@ -308,6 +308,16 @@ export async function redoTrashBatch(
   await invoke("redo_trash_batch", { root, items });
 }
 
+/**
+ * Permanently delete everything in the workspace-local Lyceum trash.
+ * Returns the number of top-level trash entries removed. This cannot be
+ * undone — the caller is responsible for confirming with the user first.
+ */
+export async function emptyWorkspaceTrash(root: string): Promise<number> {
+  await authorizeWorkspaceRoot(root);
+  return invoke<number>("empty_workspace_trash", { root });
+}
+
 /** A single workspace content-search match, mirroring the Rust `SearchMatch`. */
 export interface SearchMatch {
   path: string;

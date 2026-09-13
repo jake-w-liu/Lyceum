@@ -78,10 +78,6 @@ to `Cmd` on macOS and `Ctrl` on Windows/Linux.
   Cmd/Ctrl-click toggles individual rows, Shift-click selects a visible range,
   Delete/Backspace deletes the current selection, Cmd/Ctrl+Z restores the last
   Explorer delete, and Cmd/Ctrl+Shift+Z or Ctrl+Y redoes it.
-- **Compile LaTeX** is also available from the command palette
-  (`Cmd/Ctrl+Shift+P`). With a `.tex` tab active, it compiles that file,
-  removes the previous same-name PDF first, writes the fresh PDF beside the
-  source, refreshes the Explorer, and leaves the `.tex` tab active.
 - **`editor.goToDefinition` / `editor.findReferences`** are served by the generic JSON-RPC LSP
   client (M9). They require an active language server. Built-in profiles cover Julia, Python,
   TypeScript/JavaScript, Rust, C/C++, Go, C#, and R.

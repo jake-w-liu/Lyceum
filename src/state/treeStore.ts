@@ -66,6 +66,8 @@ export interface TreeActions {
   popDeleteUndo: () => TrashBatch | null;
   /** Pop the latest redoable delete batch. */
   popDeleteRedo: () => TrashBatch | null;
+  /** Drop all delete history — e.g. after permanently emptying the trash. */
+  clearDeleteHistory: () => void;
   /** Ask the Explorer to start an inline create (file or folder). */
   requestCreate: (kind: "file" | "folder") => void;
   /** Clear a create request once the Explorer has started it. */
@@ -216,6 +218,7 @@ export const useTreeStore = create<TreeState>()((set, get) => ({
     if (batch) set({ deleteRedoStack: stack.slice(0, -1) });
     return batch;
   },
+  clearDeleteHistory: () => set({ deleteUndoStack: [], deleteRedoStack: [] }),
   requestCreate: (kind) => set({ createRequest: kind }),
   consumeCreateRequest: () => set({ createRequest: null }),
   reset: () => set(initialTreeData, false),

@@ -31,7 +31,6 @@ let buildSeq = 0;
 
 export interface LatexBuildOptions {
   targetPath?: string | null;
-  openOnSuccess?: boolean;
 }
 
 interface LatexBuildPlan {
@@ -62,7 +61,6 @@ export async function runLatexBuild(
   const targetDoc = targetPath
     ? editor.docs.find((doc) => doc.path === targetPath && isTextDoc(doc))
     : null;
-  const openOnSuccess = options.openOnSuccess === true;
   const out = useOutputStore.getState();
   useLayoutStore.getState().showBottomTab("output");
   out.clear();
@@ -124,11 +122,9 @@ export async function runLatexBuild(
     if (exitCode === 0) {
       useTreeStore.getState().refresh();
       store.append(`[latex] wrote ${pdfPathForSuccess}`);
-      if (openOnSuccess) {
-        useEditorStore.getState().closeDoc(pdfPathForSuccess);
-        useWorkspaceStore.getState().requestOpenFile(pdfPathForSuccess);
-        useLayoutStore.getState().setPdfPanelVisible(false);
-      }
+      useEditorStore.getState().closeDoc(pdfPathForSuccess);
+      useWorkspaceStore.getState().requestOpenFile(pdfPathForSuccess);
+      useLayoutStore.getState().setPdfPanelVisible(false);
     }
   };
   try {

@@ -60,12 +60,14 @@ vi.mock("../lib/ipc", () => ({
   })),
   restoreTrashBatch: vi.fn(async () => {}),
   redoTrashBatch: vi.fn(async () => {}),
+  emptyWorkspaceTrash: vi.fn(async () => 0),
   gitStatus: vi.fn(async () => ({ isRepo: false, files: {} })),
   nativeWindowContentInset: vi.fn(async () => ({ x: 0, y: 0 })),
 }));
 import {
   createDirectory,
   createFile,
+  emptyWorkspaceTrash,
   movePathsToTrash,
   copyPaths,
   movePaths,
@@ -191,6 +193,8 @@ beforeEach(() => {
   });
   vi.mocked(restoreTrashBatch).mockClear();
   vi.mocked(redoTrashBatch).mockClear();
+  vi.mocked(emptyWorkspaceTrash).mockReset();
+  vi.mocked(emptyWorkspaceTrash).mockResolvedValue(0);
   vi.mocked(gitStatus).mockReset();
   vi.mocked(gitStatus).mockResolvedValue({ isRepo: false, files: {} });
   vi.mocked(ask).mockClear();
@@ -223,8 +227,50 @@ describe("Explorer", () => {
     await waitFor(() =>
       expect(screen.getByRole("treeitem", { name: "src" })).toHaveAttribute(
         "title",
-        "src — Nested repo Modified",
+        "src — Nested repository root — Nested repo Modified",
       ),
+    );
+
+    // The nested repo root shows a permanent branch marker plus the hollow
+    // nested dot for the folder rollup.
+    const srcRow = srcLabel.closest(".tree-row")!;
+    const srcBadge = srcRow.querySelector(".git-badge")!;
+    expect(srcBadge.querySelector(".git-repo-marker")).not.toBeNull();
+    expect(srcBadge.textContent).toContain("○");
+    expect(srcBadge.textContent).not.toContain("●");
+
+    // Files inside the nested repo get a lowercase badge letter.
+    await userEvent.click(screen.getByRole("treeitem", { name: "src" }));
+    const fileLabel = await screen.findByText("main.tsx");
+    expect(fileLabel).toHaveClass("git-modified", "git-scope-nested");
+    const fileBadge = fileLabel.closest(".tree-row")!.querySelector(".git-badge")!;
+    expect(fileBadge.textContent).toBe("m");
+  });
+
+  it("marks clean nested repo roots with a branch marker only", async () => {
+    useWorkspaceStore.getState().openWorkspace(ROOT);
+    vi.mocked(gitStatus).mockResolvedValue({
+      isRepo: true,
+      rootRepo: ROOT,
+      repoRoots: [ROOT, "/ws/src"],
+      files: {},
+      fileRepos: {},
+    });
+
+    render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    const srcLabel = await screen.findByText("src");
+    const srcRow = srcLabel.closest(".tree-row")!;
+
+    await waitFor(() =>
+      expect(
+        srcRow.querySelector(".git-badge .git-repo-marker"),
+      ).not.toBeNull(),
+    );
+    expect(srcLabel).not.toHaveClass("git-modified");
+    expect(srcLabel).not.toHaveClass("git-scope-nested");
+    expect(screen.getByRole("treeitem", { name: "src" })).toHaveAttribute(
+      "title",
+      "src — Nested repository root",
     );
   });
 
@@ -1528,6 +1574,45 @@ describe("Explorer", () => {
 
     await waitFor(() => expect(ask).toHaveBeenCalled());
     expect(movePathsToTrash).not.toHaveBeenCalled();
+  });
+
+  it("empties the Lyceum trash after confirmation and clears delete history", async () => {
+    render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await screen.findByText("README.md");
+    fireEvent.click(screen.getByRole("treeitem", { name: "README.md" }), {
+      metaKey: true,
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Delete Selected" }));
+    await waitFor(() => expect(movePathsToTrash).toHaveBeenCalled());
+    expect(useTreeStore.getState().deleteUndoStack).toHaveLength(1);
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Empty Lyceum Trash" }),
+    );
+
+    await waitFor(() =>
+      expect(emptyWorkspaceTrash).toHaveBeenCalledWith(ROOT),
+    );
+    expect(ask).toHaveBeenLastCalledWith(
+      expect.stringContaining("cannot be restored"),
+      expect.objectContaining({ title: "Empty Trash", kind: "warning" }),
+    );
+    // Batches pointing into the deleted trash must not linger as broken undos.
+    expect(useTreeStore.getState().deleteUndoStack).toHaveLength(0);
+    expect(useTreeStore.getState().deleteRedoStack).toHaveLength(0);
+  });
+
+  it("does not empty the trash when the confirmation is declined", async () => {
+    vi.mocked(ask).mockResolvedValue(false);
+    render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await screen.findByText("README.md");
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Empty Lyceum Trash" }),
+    );
+
+    await waitFor(() => expect(ask).toHaveBeenCalled());
+    expect(emptyWorkspaceTrash).not.toHaveBeenCalled();
   });
 
   it("closes a clean open doc after delete without prompting to discard", async () => {

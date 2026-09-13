@@ -365,11 +365,6 @@ See [docs/KEYBINDINGS.md](docs/KEYBINDINGS.md) for the full reference.
   command (`latexmk -pdf main.tex`), Lyceum's Rust builder checks for installed
   TeX tools and can use `latexmk`, `tectonic`, `pdflatex`, `xelatex`, or
   `lualatex`.
-- **Compile LaTeX:** open a `.tex` file and click the tab-bar **Compile** button
-  (or run **Compile LaTeX** from the command palette). This runs the same real
-  PDF build, removes the previous same-name `.pdf` first, writes the fresh
-  `.pdf` beside the `.tex` file, refreshes the Explorer, and leaves the active
-  editor tab in source mode.
 
 ## Settings keys
 

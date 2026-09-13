@@ -10,6 +10,7 @@ import {
   copyPaths,
   createDirectory,
   createFile,
+  emptyWorkspaceTrash,
   movePaths,
   movePathsToTrash,
   nativeWindowContentInset,
@@ -45,25 +46,32 @@ import { Icon } from "./Icon";
 // Long enough that a double-click (which opens the file) cancels it first.
 const RENAME_CLICK_DELAY_MS = 400;
 
-// VS Code-style single-letter badge for a changed file; folders show a dot.
-function gitBadgeChar(status: string, isDir: boolean): string {
-  if (isDir) return "●";
-  switch (status) {
-    case "modified":
-      return "M";
-    case "added":
-      return "A";
-    case "untracked":
-      return "U";
-    case "deleted":
-      return "D";
-    case "renamed":
-      return "R";
-    case "conflict":
-      return "C";
-    default:
-      return "";
-  }
+// VS Code-style badge for a changed entry: files get a letter, folders a dot.
+// Nested-repository entries use lowercase letters and a hollow dot so the
+// workspace-vs-nested distinction does not rely on color alone (and stays
+// readable for color-blind users and on selected rows).
+function gitBadgeChar(status: string, isDir: boolean, scope: GitScope): string {
+  const nested = scope === "nested";
+  if (isDir) return nested ? "○" : "●";
+  const ch = (() => {
+    switch (status) {
+      case "modified":
+        return "M";
+      case "added":
+        return "A";
+      case "untracked":
+        return "U";
+      case "deleted":
+        return "D";
+      case "renamed":
+        return "R";
+      case "conflict":
+        return "C";
+      default:
+        return "";
+    }
+  })();
+  return nested ? ch.toLowerCase() : ch;
 }
 
 function gitStatusLabel(status: string, scope: GitScope = "workspace"): string {
@@ -215,6 +223,22 @@ function destinationConflictPaths(error: unknown): string[] | null {
     return parsed;
   } catch {
     return null;
+  }
+}
+
+async function confirmEmptyTrash(): Promise<boolean> {
+  const text =
+    "Permanently delete everything in the Lyceum trash? " +
+    "Trashed items cannot be restored.";
+  try {
+    return await ask(text, {
+      title: "Empty Trash",
+      kind: "warning",
+      okLabel: "Empty Trash",
+      cancelLabel: "Cancel",
+    });
+  } catch {
+    return confirm(text);
   }
 }
 
@@ -461,9 +485,28 @@ function TreeNode({
   const gitScope = useGitStore((s) =>
     gitScopeForEntry(s, entry.path, entry.isDir),
   );
+  // A directory that is itself a nested repository root gets a permanent
+  // branch marker so the boundary of a nested repo is visible even when the
+  // repo is clean (no status to decorate).
+  const isNestedRepoRoot = useGitStore(
+    (s) =>
+      entry.isDir &&
+      s.rootRepo !== entry.path &&
+      s.repoRoots.includes(entry.path),
+  );
   const [renaming, setRenaming] = useState(false);
   const selected = selectedPaths.includes(entry.path);
-  const gitClass = gitStatus ? ` git-${gitStatus} git-scope-${gitScope}` : "";
+  const displayScope: GitScope = isNestedRepoRoot ? "nested" : gitScope;
+  const gitClass = gitStatus
+    ? ` git-${gitStatus} git-scope-${displayScope}`
+    : "";
+  const rowTitle = [
+    entry.name,
+    isNestedRepoRoot ? "Nested repository root" : "",
+    gitStatus ? gitStatusLabel(gitStatus, displayScope) : "",
+  ]
+    .filter(Boolean)
+    .join(" — ");
   // Pending VS Code-style "slow click" rename: a second click on an
   // already-selected file starts a timer; a double-click (open) cancels it.
   const renameClickTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -687,11 +730,7 @@ function TreeNode({
           data-path={entry.path}
           data-isdir={entry.isDir ? "1" : ""}
           aria-expanded={entry.isDir ? expanded : undefined}
-          title={
-            gitStatus
-              ? `${entry.name} — ${gitStatusLabel(gitStatus, gitScope)}`
-              : entry.name
-          }
+          title={rowTitle}
           onClick={onActivate}
           onDoubleClick={() => {
             // A double-click opens the file; cancel any pending slow-click rename.
@@ -727,14 +766,23 @@ function TreeNode({
             </span>
           )}
         </button>
-        {!renaming && gitStatus && gitStatus !== "ignored" && (
-          <span
-            className={`git-badge${gitClass}`}
-            aria-hidden="true"
-          >
-            {gitBadgeChar(gitStatus, entry.isDir)}
-          </span>
-        )}
+        {!renaming &&
+          (isNestedRepoRoot || (gitStatus && gitStatus !== "ignored")) && (
+            <span
+              className={
+                `git-badge${gitClass}` +
+                (isNestedRepoRoot && !gitStatus ? " git-scope-nested" : "")
+              }
+              aria-hidden="true"
+            >
+              {isNestedRepoRoot && (
+                <Icon name="git-branch" size={9} className="git-repo-marker" />
+              )}
+              {gitStatus &&
+                gitStatus !== "ignored" &&
+                gitBadgeChar(gitStatus, entry.isDir, displayScope)}
+            </span>
+          )}
         {!renaming && (
           <span className="tree-actions">
             <button
@@ -1224,6 +1272,22 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
       tree.pushDeleteRedo(batch);
       console.error("redo delete failed", err);
       void message(`Redo delete failed: ${String(err)}`);
+    }
+  }
+
+  async function emptyTrash() {
+    if (!(await confirmEmptyTrash())) return;
+    try {
+      await emptyWorkspaceTrash(rootPath);
+      // Batches that pointed into the now-deleted trash can no longer be
+      // restored, so drop the undo/redo history rather than leaving
+      // guaranteed-to-fail entries behind.
+      useTreeStore.getState().clearDeleteHistory();
+      useTreeStore.getState().refresh();
+    } catch (err) {
+      console.error("empty trash failed", err);
+      useTreeStore.getState().refresh();
+      void message(`Empty trash failed: ${String(err)}`);
     }
   }
 
@@ -1912,6 +1976,15 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
           onClick={() => useTreeStore.getState().refresh()}
         >
           ⟳
+        </button>
+        <button
+          type="button"
+          className="icon-button"
+          aria-label="Empty Lyceum Trash"
+          title="Empty Lyceum Trash (permanent)"
+          onClick={() => void emptyTrash()}
+        >
+          <Icon name="trash" size={12} />
         </button>
         <button
           type="button"

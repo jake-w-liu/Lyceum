@@ -389,16 +389,17 @@ This satisfies `F12` (go to definition), `Shift+F12` (find references), and
   `ImageViewer.tsx`. `Cmd/Ctrl+Shift+V` toggles rendered preview for supported
   text documents; clicking a PDF/image in the explorer routes directly to a
   viewer tab.
-- **LaTeX compile/preview:** active `.tex` editor tabs expose Compile and
-  Preview actions. Both save the buffer, retarget `latexBuildCommand` to that
-  file's basename, run the command in the file's directory, and stream build
-  output to the Output panel. With the stock command unchanged, the Rust builder
-  discovers installed TeX tools using the same augmented PATH used for child
-  processes, deletes stale PDFs, and spawns the selected compiler directly
-  without a shell. Custom `latexBuildCommand` values still run through the OS
-  shell because they are user-authored shell commands. Compile leaves the source
-  tab active after writing the PDF; Preview opens the generated PDF as a viewer
-  tab.
+- **LaTeX preview:** active `.tex` editor tabs expose a Preview action
+  (tab-bar button, `preview.open` command, `Cmd/Ctrl+Shift+V`). It saves the
+  buffer, retargets `latexBuildCommand` to that file's basename, runs the
+  command in the file's directory, and streams build output to the Output
+  panel. With the stock command unchanged, the Rust builder discovers
+  installed TeX tools using the same augmented PATH used for child processes,
+  deletes stale PDFs, and spawns the selected compiler directly without a
+  shell. Custom `latexBuildCommand` values still run through the OS shell
+  because they are user-authored shell commands. On success Preview opens the
+  generated PDF as a viewer tab; on failure the build log stays in the Output
+  panel.
 
 ---
 

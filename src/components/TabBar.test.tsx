@@ -157,24 +157,6 @@ describe("TabBar", () => {
     expect(screen.getByRole("button", { name: "Open Preview" })).toBeInTheDocument();
   });
 
-  it("compiles the active LaTeX file without opening preview", async () => {
-    get().openDoc({
-      path: "/w/paper.tex",
-      content: "\\documentclass{article}",
-      language: "latex",
-    });
-    render(<TabBar />);
-
-    await userEvent.click(
-      screen.getByRole("button", { name: "Compile LaTeX" }),
-    );
-
-    expect(runLatexBuildMock).toHaveBeenCalledWith({
-      targetPath: "/w/paper.tex",
-      openOnSuccess: false,
-    });
-  });
-
   it("builds and opens the active LaTeX file from the Preview action", async () => {
     get().openDoc({
       path: "/w/paper.tex",
@@ -189,7 +171,6 @@ describe("TabBar", () => {
 
     expect(runLatexBuildMock).toHaveBeenCalledWith({
       targetPath: "/w/paper.tex",
-      openOnSuccess: true,
     });
   });
 

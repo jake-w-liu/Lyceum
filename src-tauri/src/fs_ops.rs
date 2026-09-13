@@ -882,6 +882,18 @@ pub fn redo_trash_batch(
     redo_trash_batch_impl(&root_path, items)
 }
 
+#[tauri::command]
+pub fn empty_workspace_trash(
+    app: AppHandle,
+    window: tauri::Window,
+    access: State<'_, PathAccessManager>,
+    root: String,
+) -> Result<u64, String> {
+    let root_path =
+        path_access::ensure_existing_dir_allowed(&app, &window, &access, Path::new(&root))?;
+    empty_workspace_trash_impl(&root_path)
+}
+
 fn move_paths_to_trash_impl(root: &Path, paths: Vec<String>) -> Result<TrashBatchDto, String> {
     let requested_root = root.to_path_buf();
     let root = canonical_dir(root)?;
@@ -1944,6 +1956,30 @@ fn redo_trash_batch_impl(root: &Path, items: Vec<TrashItemDto>) -> Result<(), St
         });
     }
     Ok(())
+}
+
+/// Permanently delete everything inside the workspace-local Lyceum trash,
+/// including stale `.replace-*` replacement staging directories. Batch records
+/// live only in the frontend, so there is no per-item manifest to validate;
+/// `ensure_safe_trash_root` is the safety boundary — it only accepts a real,
+/// non-symlink `.lyceum-trash` directory under the canonical workspace root,
+/// and `remove_dir_all` unlinks symlinked entries inside without following
+/// them. Returns the number of top-level trash entries removed.
+fn empty_workspace_trash_impl(root: &Path) -> Result<u64, String> {
+    let root = canonical_dir(root)?;
+    if !path_entry_exists(&root.join(LYCEUM_TRASH_DIR)) {
+        return Ok(0);
+    }
+    let (trash_root, _) = ensure_safe_trash_root(&root)?;
+    let removed = std::fs::read_dir(&trash_root)
+        .map_err(|e| format!("{}: {e}", trash_root.display()))?
+        .filter_map(Result::ok)
+        .count() as u64;
+    // Trashed trees keep their source permissions; a read-only directory must
+    // be made traversable before it can be unlinked.
+    make_tree_removable(&trash_root).map_err(|e| format!("{}: {e}", trash_root.display()))?;
+    std::fs::remove_dir_all(&trash_root).map_err(|e| format!("{}: {e}", trash_root.display()))?;
+    Ok(removed)
 }
 
 fn canonical_dir(path: &Path) -> Result<PathBuf, String> {
@@ -3596,6 +3632,81 @@ mod tests {
         let outside_result =
             move_paths_to_trash_impl(root, vec![outside.path().to_string_lossy().to_string()]);
         assert!(outside_result.unwrap_err().contains("outside workspace"));
+    }
+
+    #[test]
+    fn empty_workspace_trash_removes_batches_and_staging_dirs() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let file = root.join("note.txt");
+        fs::write(&file, b"note").unwrap();
+        let batch = move_paths_to_trash_impl(root, vec![file.to_string_lossy().to_string()])
+            .expect("move to trash");
+        // A leftover replacement-staging dir is trash content too.
+        let staging = root.join(LYCEUM_TRASH_DIR).join(".replace-stale");
+        fs::create_dir(&staging).unwrap();
+        fs::write(staging.join("old.txt"), b"old").unwrap();
+
+        let removed = empty_workspace_trash_impl(root).expect("empty trash");
+
+        assert_eq!(removed, 2);
+        assert!(!root.join(LYCEUM_TRASH_DIR).exists());
+        for item in &batch.items {
+            assert!(!Path::new(&item.trashed_path).exists());
+        }
+        // Emptying is not a restore: the original path stays deleted.
+        assert!(!file.exists());
+        // Deleting again after emptying recreates nothing and reports zero.
+        assert_eq!(empty_workspace_trash_impl(root).unwrap(), 0);
+    }
+
+    #[test]
+    fn empty_workspace_trash_without_trash_dir_is_a_noop() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        assert_eq!(empty_workspace_trash_impl(tmp.path()).unwrap(), 0);
+        assert!(!tmp.path().join(LYCEUM_TRASH_DIR).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn empty_workspace_trash_removes_read_only_trashed_directories() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let dir = root.join("locked");
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::write(dir.join("sub").join("leaf.txt"), b"leaf").unwrap();
+        let batch = move_paths_to_trash_impl(root, vec![dir.to_string_lossy().to_string()])
+            .expect("move to trash");
+        let trashed = PathBuf::from(&batch.items[0].trashed_path);
+        let mut mode = fs::metadata(&trashed).unwrap().permissions();
+        mode.set_mode(0o500);
+        fs::set_permissions(&trashed, mode).unwrap();
+
+        empty_workspace_trash_impl(root).expect("empty trash");
+
+        assert!(!root.join(LYCEUM_TRASH_DIR).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn empty_workspace_trash_refuses_a_symlinked_trash_root() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let root = tmp.path();
+        let elsewhere = tempfile::tempdir().expect("elsewhere dir");
+        fs::write(elsewhere.path().join("keep.txt"), b"keep").unwrap();
+        symlink(elsewhere.path(), root.join(LYCEUM_TRASH_DIR)).unwrap();
+
+        let result = empty_workspace_trash_impl(root);
+
+        assert!(result.unwrap_err().contains("not a safe directory"));
+        assert_eq!(
+            fs::read(elsewhere.path().join("keep.txt")).unwrap(),
+            b"keep"
+        );
     }
 
     #[cfg(unix)]

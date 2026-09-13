@@ -476,4 +476,85 @@ describe("PdfViewer", () => {
     });
     expect(await screen.findByText("No results")).toBeInTheDocument();
   });
+
+  it("scrolls the page pane on arrow/Page keys when the viewer is focused", async () => {
+    mockPdfDocument(3);
+
+    const { container } = render(<PdfViewer path="/w/keys.pdf" />);
+    await screen.findByLabelText("Page number");
+    const viewer = container.querySelector(".pdf-viewer") as HTMLElement;
+    const scroll = container.querySelector(".pdf-scroll") as HTMLDivElement;
+    Object.defineProperty(scroll, "clientHeight", {
+      configurable: true,
+      value: 600,
+    });
+
+    // Clicking a page must move focus to the viewer so keys reach the pane.
+    fireEvent.pointerDown(scroll);
+    expect(document.activeElement).toBe(viewer);
+
+    fireEvent.keyDown(viewer, { key: "ArrowDown" });
+    expect(scroll.scrollTop).toBe(48);
+    fireEvent.keyDown(viewer, { key: "PageDown" });
+    expect(scroll.scrollTop).toBe(48 + 552);
+    fireEvent.keyDown(viewer, { key: "ArrowRight" });
+    expect(scroll.scrollLeft).toBe(48);
+    fireEvent.keyDown(viewer, { key: "End" });
+    expect(scroll.scrollTop).toBe(scroll.scrollHeight);
+    fireEvent.keyDown(viewer, { key: "Home" });
+    expect(scroll.scrollTop).toBe(0);
+  });
+
+  it("does not scroll on Space when a toolbar button is focused", async () => {
+    mockPdfDocument(1);
+
+    const { container } = render(<PdfViewer path="/w/button-keys.pdf" />);
+    const next = await screen.findByLabelText("Next page");
+    const scroll = container.querySelector(".pdf-scroll") as HTMLDivElement;
+    next.focus();
+    fireEvent.keyDown(next, { key: " " });
+    expect(scroll.scrollTop).toBe(0);
+  });
+
+  it("blocks unsafe external link schemes in annotations", async () => {
+    pdfMocks.getAnnotations.mockResolvedValue([{ id: "link-1" }]);
+    pdfMocks.annotationLayerRender.mockImplementation(
+      async (
+        params: {
+          linkService: {
+            addLinkAttributes: (link: HTMLAnchorElement, url: string) => void;
+          };
+        },
+        div: HTMLDivElement,
+      ) => {
+        div.replaceChildren();
+        for (const url of [
+          "https://example.com",
+          "javascript:alert(1)",
+          "file:///etc/passwd",
+        ]) {
+          const link = document.createElement("a");
+          params.linkService.addLinkAttributes(link, url);
+          div.append(link);
+        }
+      },
+    );
+    mockPdfDocument(1);
+
+    const { container } = render(<PdfViewer path="/w/schemes.pdf" />);
+    await waitFor(() =>
+      expect(
+        container.querySelectorAll<HTMLAnchorElement>(
+          ".pdf-annotation-layer a",
+        ),
+      ).toHaveLength(3),
+    );
+    const [safe, js, file] = Array.from(
+      container.querySelectorAll<HTMLAnchorElement>(".pdf-annotation-layer a"),
+    );
+    expect(safe.href).toBe("https://example.com/");
+    expect(js.getAttribute("href")).toBe("");
+    expect(js.title).toBe("Disabled: javascript:alert(1)");
+    expect(file.getAttribute("href")).toBe("");
+  });
 });

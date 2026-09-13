@@ -15,6 +15,8 @@ export type IconName =
   | "preview"
   | "undo"
   | "redo"
+  | "trash"
+  | "git-branch"
   | "close"
   | "close-all"
   | "folder"
@@ -113,6 +115,26 @@ function glyph(name: IconName): ReactNode {
         <>
           <path d="M15 7h5v5" />
           <path d="M20 12c-2-4-6-6-10-4-3 1.5-5 4-5 8" />
+        </>
+      );
+    case "trash":
+      return (
+        <>
+          <path d="M4 7h16" />
+          <path d="M9 7V5h6v2" />
+          <path d="M6 7l1 13h10l1-13" />
+          <line x1="10" y1="11" x2="10" y2="17" />
+          <line x1="14" y1="11" x2="14" y2="17" />
+        </>
+      );
+    case "git-branch":
+      return (
+        <>
+          <circle cx="7" cy="5.5" r="2.3" />
+          <circle cx="7" cy="18.5" r="2.3" />
+          <path d="M7 7.8v8.4" />
+          <circle cx="17" cy="8.5" r="2.3" />
+          <path d="M17 10.8c0 4-4 5-8.5 5" />
         </>
       );
     case "close":

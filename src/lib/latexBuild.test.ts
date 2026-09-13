@@ -84,7 +84,7 @@ describe("runLatexBuild", () => {
       language: "latex",
     });
 
-    await runLatexBuild({ openOnSuccess: true });
+    await runLatexBuild();
 
     expect(invokeMock).toHaveBeenCalledWith(
       "run_latex_build",
@@ -108,7 +108,7 @@ describe("runLatexBuild", () => {
     expect(useLayoutStore.getState().pdfPanelVisible).toBe(false);
   });
 
-  it("removes stale output, compiles, refreshes explorer, and does not open the PDF by default", async () => {
+  it("removes stale output, compiles, refreshes explorer, and opens the PDF", async () => {
     invokeMock.mockResolvedValue(plan({ removedStalePdf: true }));
     useWorkspaceStore.getState().openWorkspace("/w");
     useEditorStore.getState().openDoc({
@@ -148,7 +148,7 @@ describe("runLatexBuild", () => {
 
     handlers.get(exitKey!)!({ payload: 0 });
 
-    expect(useWorkspaceStore.getState().pendingOpenPath).toBeNull();
+    expect(useWorkspaceStore.getState().pendingOpenPath).toBe("/w/main.pdf");
     expect(useTreeStore.getState().refreshNonce).toBe(2);
     expect(useOutputStore.getState().lines).toContain(
       "[latex] wrote /w/main.pdf",
@@ -170,7 +170,7 @@ describe("runLatexBuild", () => {
       language: "latex",
     });
 
-    await runLatexBuild({ openOnSuccess: true });
+    await runLatexBuild();
 
     expect(invokeMock).toHaveBeenCalledWith(
       "run_latex_build",
@@ -204,7 +204,7 @@ describe("runLatexBuild", () => {
       language: "latex",
     });
 
-    await runLatexBuild({ openOnSuccess: true });
+    await runLatexBuild();
 
     const exitKey = Array.from(handlers.keys()).find((key) =>
       key.startsWith("build:exit:"),
@@ -235,7 +235,7 @@ describe("runLatexBuild", () => {
       language: "latex",
     });
 
-    const buildPromise = runLatexBuild({ openOnSuccess: true });
+    const buildPromise = runLatexBuild();
     await waitFor(() =>
       expect(
         Array.from(handlers.keys()).some((key) =>

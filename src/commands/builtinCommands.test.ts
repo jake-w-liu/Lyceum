@@ -155,21 +155,8 @@ describe("builtinCommands", () => {
 
     expect(runLatexBuildMock).toHaveBeenCalledWith({
       targetPath: "/w/paper.tex",
-      openOnSuccess: true,
     });
     expect(useLayoutStore.getState().pdfPanelVisible).toBe(false);
-  });
-
-  it("latex.build compiles the active LaTeX file without opening preview", async () => {
-    useEditorStore.getState().openDoc({
-      path: "/w/paper.tex",
-      content: "\\documentclass{article}",
-      language: "latex",
-    });
-
-    await commandRegistry.execute("latex.build");
-
-    expect(runLatexBuildMock).toHaveBeenCalledWith({ openOnSuccess: false });
   });
 
   it("editor.run dispatches the generic code runner", async () => {

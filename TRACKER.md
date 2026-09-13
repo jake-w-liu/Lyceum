@@ -228,7 +228,7 @@ Primary progress tracker for the lightweight, VS Code-inspired research IDE buil
 ### M11 — Markdown/LaTeX build-and-preview workflow
 
 - [x] Markdown preview (Cmd/Ctrl+Shift+V → "Open Preview") rendered live from editor content (`MarkdownView`, lazy markdown-it, HTML escaped)
-- [x] LaTeX Preview tab action / Build LaTeX command saves and compiles the active `.tex` file using `latexBuildCommand` retargeted to that file
+- [x] LaTeX Preview tab action / `preview.open` command saves and compiles the active `.tex` file using `latexBuildCommand` retargeted to that file
 - [x] Open resulting PDF as an editor tab on success (`deriveOutputPdf` derives the output name)
 - [x] Surface build output/errors in the bottom-panel Output tab (stdout/stderr + exit code)
 - [x] Lightweight Rust LaTeX builder: installed-tool discovery, stale-PDF removal, direct process spawn for stock auto mode, shell fallback only for custom commands

@@ -246,6 +246,15 @@ kbd {
 .tree-row.git-ignored .tree-label {
   color: var(--git-ignored);
 }
+.tree-label.git-scope-nested.git-ignored {
+  color: var(--git-nested-ignored);
+}
+.tree-row.git-scope-nested.git-ignored .tree-row-main,
+.tree-row.git-scope-nested.git-ignored .tree-twisty,
+.tree-row.git-scope-nested.git-ignored .tree-icon,
+.tree-row.git-scope-nested.git-ignored .tree-label {
+  color: var(--git-nested-ignored);
+}
 .tree-label.git-scope-nested.git-modified,
 .tree-label.git-scope-nested.git-renamed {
   color: var(--git-nested-modified);
@@ -307,6 +316,16 @@ kbd {
 }
 .git-badge.git-scope-nested.git-conflict {
   color: var(--git-nested-conflict);
+}
+/* Nested-repo badges are italic and their letters lowercase (set in
+ * gitBadgeChar), so scope stays legible even without color. */
+.git-badge.git-scope-nested {
+  font-style: italic;
+}
+/* The branch marker always keeps the nested-family hue so a status letter
+ * next to it still shows the status color. */
+.git-badge .git-repo-marker {
+  color: var(--git-nested-modified);
 }
 
 .tree-loading,

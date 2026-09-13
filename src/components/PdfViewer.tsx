@@ -236,7 +236,20 @@ function isPdfRefProxy(value: unknown): value is RefProxy {
   );
 }
 
+// Only everyday web schemes may leave the app. A crafted PDF annotation can
+// carry javascript:/file:/custom-handler URIs; handing those to the OS opener
+// could invoke external handlers, so anything else is refused.
+function isAllowedExternalUrl(url: string): boolean {
+  try {
+    const scheme = new URL(url).protocol.toLowerCase();
+    return scheme === "http:" || scheme === "https:" || scheme === "mailto:";
+  } catch {
+    return false;
+  }
+}
+
 async function openExternalHref(href: string): Promise<void> {
+  if (!isAllowedExternalUrl(href)) return;
   try {
     const { openUrl } = await import("@tauri-apps/plugin-opener");
     await openUrl(href);
@@ -355,10 +368,16 @@ class LocalPdfLinkService implements LocalPdfLinkServiceContract {
     newWindow = false,
   ): void {
     if (!url || typeof url !== "string") return;
-    if (!this.externalLinkEnabled) {
+    if (!this.externalLinkEnabled || !isAllowedExternalUrl(url)) {
+      // Keep the URI text visible in the tooltip, but never put an unsafe or
+      // disabled URL in `href` where middle-click/context-menu opens could
+      // bypass the guarded click path.
       link.href = "";
       link.title = `Disabled: ${url}`;
-      link.onclick = () => false;
+      link.onclick = (event) => {
+        event.preventDefault();
+        return false;
+      };
       return;
     }
     link.href = url;
@@ -1408,7 +1427,9 @@ export default function PdfViewer({ path }: { path: string }) {
     // Text-entry keys do not cancel navigation from a PDF link.
     const target = event.target as HTMLElement;
     const isTextEntry =
-      target.tagName === "INPUT" || target.tagName === "TEXTAREA";
+      target.tagName === "INPUT" ||
+      target.tagName === "TEXTAREA" ||
+      target.isContentEditable;
     const isScrollKey =
       event.key === "ArrowUp" ||
       event.key === "ArrowDown" ||
@@ -1422,6 +1443,49 @@ export default function PdfViewer({ path }: { path: string }) {
     if (isScrollKey && !isTextEntry) {
       navigationRequestRef.current += 1;
       pendingDestinationRef.current = null;
+      // The focusable root is not itself scrollable and the scroll pane is a
+      // descendant rather than an ancestor, so key scrolling only reaches it
+      // when applied manually. Interactive children keep their native key
+      // behavior (Space activates a focused button; arrows scroll a focused
+      // link's scrollable ancestor).
+      const wrap = scrollRef.current;
+      const interactive = !!target.closest("button, a, select");
+      if (wrap && !interactive) {
+        event.preventDefault();
+        const lineStep = 48;
+        const pageStep = Math.max(lineStep, wrap.clientHeight - lineStep);
+        switch (event.key) {
+          case "ArrowUp":
+            wrap.scrollTop -= lineStep;
+            break;
+          case "ArrowDown":
+            wrap.scrollTop += lineStep;
+            break;
+          case "ArrowLeft":
+            wrap.scrollLeft -= lineStep;
+            break;
+          case "ArrowRight":
+            wrap.scrollLeft += lineStep;
+            break;
+          case "PageUp":
+            wrap.scrollTop -= pageStep;
+            break;
+          case "PageDown":
+            wrap.scrollTop += pageStep;
+            break;
+          case " ":
+            wrap.scrollTop += event.shiftKey ? -pageStep : pageStep;
+            break;
+          case "Home":
+            wrap.scrollTop = 0;
+            break;
+          case "End":
+            wrap.scrollTop = wrap.scrollHeight;
+            break;
+          default:
+            break;
+        }
+      }
     }
     if ((event.metaKey || event.ctrlKey) && (event.key === "f" || event.key === "F")) {
       event.preventDefault();
@@ -1481,6 +1545,16 @@ export default function PdfViewer({ path }: { path: string }) {
       ref={rootRef}
       tabIndex={0}
       onKeyDown={handleRootKeyDown}
+      onPointerDown={(event) => {
+        // Clicking a page does not focus anything (canvas/layers are not
+        // focusable), which would leave key scrolling unreachable. Move focus
+        // to the viewer root unless the press landed on something interactive.
+        const target = event.target as HTMLElement;
+        if (target.closest("input, textarea, button, a, select, [contenteditable]")) {
+          return;
+        }
+        rootRef.current?.focus();
+      }}
     >
       <div className="pdf-toolbar">
         <button

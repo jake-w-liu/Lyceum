@@ -343,6 +343,7 @@ pub fn run() {
             fs_ops::move_paths_to_trash,
             fs_ops::restore_trash_batch,
             fs_ops::redo_trash_batch,
+            fs_ops::empty_workspace_trash,
             search::search_workspace,
             git::git_status,
             file_ops::read_file,
