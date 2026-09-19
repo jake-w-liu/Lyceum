@@ -1087,11 +1087,33 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
   }, [rootPath, refreshNonce]);
 
   // Refresh when the window regains focus (catches external edits, terminal
-  // git commands, branch switches, etc.).
+  // git commands, branch switches, etc.). The DOM window "focus" event does not
+  // reliably fire on macOS WKWebView OS-window activation, so use Tauri's native
+  // window-focus event as the primary signal and keep the DOM listener as a
+  // fallback (and for tests / plain-browser dev where getCurrentWindow throws).
   useEffect(() => {
-    const onFocus = () => void useGitStore.getState().refresh();
-    window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
+    const refresh = () => void useGitStore.getState().refresh();
+    window.addEventListener("focus", refresh);
+    let disposed = false;
+    let unlistenNative: (() => void) | undefined;
+    void (async () => {
+      try {
+        const off = await getCurrentWindow().onFocusChanged(
+          ({ payload: focused }) => {
+            if (focused) refresh();
+          },
+        );
+        if (disposed) off();
+        else unlistenNative = off;
+      } catch {
+        /* not inside Tauri (tests / browser): the DOM listener is the fallback */
+      }
+    })();
+    return () => {
+      disposed = true;
+      window.removeEventListener("focus", refresh);
+      unlistenNative?.();
+    };
   }, []);
 
   // Start the inline create flow when a global command (New File / New Folder /

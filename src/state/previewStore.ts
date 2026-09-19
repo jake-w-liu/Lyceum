@@ -4,9 +4,14 @@
 
 import { create } from "zustand";
 
+export type PdfFitMode = "none" | "width" | "page";
+
 export interface PdfViewState {
   page: number;
   zoom: number;
+  // Persisted so a re-opened PDF keeps fitting its pane; optional keeps
+  // previously persisted entries (page+zoom only) valid.
+  fitMode?: PdfFitMode;
 }
 
 export interface PreviewData {

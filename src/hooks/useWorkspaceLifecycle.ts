@@ -8,7 +8,7 @@ import {
   isDirty,
   useEditorStore,
 } from "../state/editorStore";
-import { initialGitData, useGitStore } from "../state/gitStore";
+import { useGitStore } from "../state/gitStore";
 import {
   initialLspStatusData,
   useLspStatusStore,
@@ -24,7 +24,9 @@ export function resetWorkspaceScopedUi(): void {
   usePreviewStore.setState(initialPreviewData, false);
   useTreeStore.setState(initialTreeData, false);
   useSearchStore.setState(initialSearchData, false);
-  useGitStore.setState(initialGitData, false);
+  // clear() also bumps the git refresh sequence so an in-flight status query for
+  // the previous workspace root cannot land later and repaint stale decorations.
+  useGitStore.getState().clear();
   useLspStatusStore.setState(initialLspStatusData, false);
 }
 

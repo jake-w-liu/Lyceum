@@ -31,7 +31,7 @@ import * as pdfjsLib from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
 import { readFileBytes } from "../lib/ipc";
-import { usePreviewStore } from "../state/previewStore";
+import { usePreviewStore, type PdfFitMode } from "../state/previewStore";
 import { Icon } from "./Icon";
 import {
   capOutputScale,
@@ -820,12 +820,28 @@ export default function PdfViewer({ path }: { path: string }) {
   } | null>(null);
   const navigationRequestRef = useRef(0);
   const pageStateRef = useRef(saved?.page ?? 1);
+  // Latest fit re-applier, read by the ResizeObserver without re-subscribing.
+  const reapplyFitRef = useRef<() => void>(() => {});
+  // Live viewport anchor (top page + ratio), refreshed on scroll, used to keep
+  // the view pinned when a page box above the viewport is measured/resized
+  // (WKWebView has no CSS scroll anchoring, so this is done in JS).
+  const scrollAnchorRef = useRef<ViewportAnchor | null>(null);
+  // Last observed pane size, so the ResizeObserver re-fits only on real changes.
+  const lastPaneSizeRef = useRef<{ w: number; h: number } | null>(null);
 
   const [doc, setDoc] = useState<PDFDocumentProxy | null>(null);
   const [numPages, setNumPages] = useState(0);
   const [pageSizes, setPageSizes] = useState<Record<number, PageSize>>({});
   const [page, setPage] = useState(saved?.page ?? 1);
   const [zoom, setZoom] = useState(saved?.zoom ?? 1);
+  // Active fit mode. When not "none", the zoom is re-derived from the pane size
+  // whenever the surrounding layout (Explorer/terminal/preview) resizes, so the
+  // page keeps fitting. Manual zoom (buttons/wheel/pinch) drops back to "none".
+  const [fitMode, setFitMode] = useState<PdfFitMode>(saved?.fitMode ?? "none");
+  const fitModeRef = useRef(fitMode);
+  useEffect(() => {
+    fitModeRef.current = fitMode;
+  }, [fitMode]);
   const [visiblePages, setVisiblePages] = useState<Set<number>>(new Set());
   // A fatal load error replaces the whole viewer; per-page render errors are
   // shown inline by each PdfPage so the rest of the document stays usable.
@@ -897,6 +913,9 @@ export default function PdfViewer({ path }: { path: string }) {
         setVisiblePages(fallbackVisiblePages(found, numPages));
       }
     }
+    // Remember where the viewport sits so a later page-box measurement above it
+    // can re-pin to the same content (see the pageSizes layout effect).
+    scrollAnchorRef.current = captureViewportAnchor(wrap, pageRefs, numPages);
   }, [numPages]);
 
   const setZoomPreservingAnchor = useCallback(
@@ -913,6 +932,16 @@ export default function PdfViewer({ path }: { path: string }) {
       });
     },
     [numPages],
+  );
+
+  // Any explicit user zoom (buttons, ctrl/cmd+wheel, pinch) leaves fit mode so
+  // the page no longer snaps back on the next layout resize.
+  const manualZoom = useCallback(
+    (next: (current: number) => number) => {
+      setFitMode("none");
+      setZoomPreservingAnchor(next);
+    },
+    [setZoomPreservingAnchor],
   );
 
   const destinationZoom = useCallback(
@@ -1053,7 +1082,13 @@ export default function PdfViewer({ path }: { path: string }) {
       const requestId = ++navigationRequestRef.current;
       setVisiblePages((prev) => new Set(prev).add(pageNumber));
       setPage(pageNumber);
-      const nextZoom = destinationZoom(pageNumber, destArray);
+      // A fit mode owns the zoom: an equation/link jump keeps fitting the pane
+      // and only scrolls to the target. Honor an explicit destination zoom
+      // (Fit*/XYZ links) only when the user is not currently in a fit mode.
+      const nextZoom =
+        fitModeRef.current !== "none"
+          ? null
+          : destinationZoom(pageNumber, destArray);
       if (nextZoom !== null && nextZoom !== zoom) {
         pendingDestinationRef.current = { pageNumber, destArray, requestId };
         setZoom(nextZoom);
@@ -1086,8 +1121,8 @@ export default function PdfViewer({ path }: { path: string }) {
 
   const applyGestureScale = useCallback((scale: number) => {
     if (!Number.isFinite(scale) || scale <= 0) return;
-    setZoomPreservingAnchor((current) => current * scale);
-  }, [setZoomPreservingAnchor]);
+    manualZoom((current) => current * scale);
+  }, [manualZoom]);
 
   // Trackpad pinch-zoom (Safari/WebKit gesture events) over the scroll area.
   useEffect(() => {
@@ -1126,11 +1161,11 @@ export default function PdfViewer({ path }: { path: string }) {
       if (!event.ctrlKey && !event.metaKey) return;
       event.preventDefault();
       event.stopPropagation();
-      setZoomPreservingAnchor((current) => zoomFromWheel(current, event.deltaY));
+      manualZoom((current) => zoomFromWheel(current, event.deltaY));
     };
     el.addEventListener("wheel", handler, { passive: false });
     return () => el.removeEventListener("wheel", handler);
-  }, [setZoomPreservingAnchor]);
+  }, [manualZoom]);
 
   // Load the document.
   useEffect(() => {
@@ -1307,11 +1342,68 @@ export default function PdfViewer({ path }: { path: string }) {
     );
   }, [zoom, performDestinationScroll]);
 
+  // Keep the viewport pinned when a page box is measured/resized. WKWebView has
+  // no CSS scroll anchoring, so when a page above the viewport changes size
+  // (fallback -> real intrinsic size), the content below it — the viewport —
+  // would otherwise shift down, reading as an intermittent upward-scroll
+  // "rollback". After the layout settles, re-pin scrollTop to the last scroll
+  // anchor (top page + ratio) so the visible content stays put. Runs on
+  // pageSizes only; zoom changes are re-pinned by the zoom-anchor effect above.
+  useLayoutEffect(() => {
+    const wrap = scrollRef.current;
+    const anchor = scrollAnchorRef.current;
+    if (!wrap || !anchor) return;
+    const pageEl = pageRefs.current.get(anchor.pageNumber);
+    if (!pageEl) return;
+    const padding = scrollPadding(wrap);
+    const offset = pageOffset(wrap, pageEl);
+    const nextTop = Math.max(
+      0,
+      offset.top + offset.height * anchor.ratioY - padding.top,
+    );
+    // Only correct a genuine shift; avoid a no-op write that would spam scroll
+    // events and, under fixed test layouts, move nothing.
+    if (Math.abs(nextTop - wrap.scrollTop) > 0.5) {
+      wrap.scrollTop = nextTop;
+    }
+  }, [pageSizes]);
+
+  // Keep the active fit mode applied as the surrounding layout (Explorer,
+  // terminal, preview split, window) resizes the PDF pane. The lastPaneSize
+  // guard ignores no-op callbacks and the initial observation (which must not
+  // disturb the restored zoom); rAF coalesces bursts. Manual zoom sets
+  // fitMode="none", which short-circuits the re-fit.
+  useEffect(() => {
+    const wrap = scrollRef.current;
+    if (!wrap || typeof ResizeObserver === "undefined") return;
+    let frame = 0;
+    const ro = new ResizeObserver(() => {
+      const w = wrap.clientWidth;
+      const h = wrap.clientHeight;
+      if (w <= 0 || h <= 0) return;
+      const last = lastPaneSizeRef.current;
+      if (last && last.w === w && last.h === h) return;
+      lastPaneSizeRef.current = { w, h };
+      if (last === null) return;
+      if (fitModeRef.current === "none") return;
+      if (frame) cancelFrame(frame);
+      frame = scheduleFrame(() => {
+        frame = 0;
+        reapplyFitRef.current();
+      });
+    });
+    ro.observe(wrap);
+    return () => {
+      ro.disconnect();
+      if (frame) cancelFrame(frame);
+    };
+  }, []);
+
   // Persist current page + zoom for restore-on-reopen.
   useEffect(() => {
     if (numPages === 0) return;
-    usePreviewStore.getState().setViewState(path, { page, zoom });
-  }, [page, zoom, path, numPages]);
+    usePreviewStore.getState().setViewState(path, { page, zoom, fitMode });
+  }, [page, zoom, fitMode, path, numPages]);
 
   // Build (once per document) a lowercased text index of every page. pdf.js
   // caches page proxies and their text content, so re-opening find is cheap.
@@ -1494,42 +1586,69 @@ export default function PdfViewer({ path }: { path: string }) {
     }
   };
 
-  const fitWidth = async () => {
-    const pdf = docRef.current;
-    const wrap = scrollRef.current;
-    if (!pdf || !wrap) return;
-    try {
-      const pdfPage = await pdf.getPage(page);
-      const base = pdfPage.getViewport({ scale: 1 });
-      if (base.width <= 0) return;
+  // Zoom the current page to fit the pane. Guards zero-size/hidden layouts so a
+  // collapsed pane never produces a bogus (zero/negative) zoom.
+  const applyFit = useCallback(
+    (mode: "width" | "page", base: PageSize) => {
+      const wrap = scrollRef.current;
+      if (!wrap || base.w <= 0 || base.h <= 0) return;
       const padding = scrollPadding(wrap);
-      setZoomPreservingAnchor(
-        () => (wrap.clientWidth - padding.left * 2) / base.width,
-      );
-    } catch {
-      // ignore; fit-width is best-effort
-    }
-  };
-
-  const fitPage = async () => {
-    const pdf = docRef.current;
-    const wrap = scrollRef.current;
-    if (!pdf || !wrap) return;
-    try {
-      const pdfPage = await pdf.getPage(page);
-      const base = pdfPage.getViewport({ scale: 1 });
-      if (base.width <= 0 || base.height <= 0) return;
-      const padding = scrollPadding(wrap);
+      const availWidth = wrap.clientWidth - padding.left * 2;
+      if (availWidth <= 0) return;
+      if (mode === "width") {
+        setZoomPreservingAnchor(() => availWidth / base.w);
+        return;
+      }
+      const availHeight = wrap.clientHeight - padding.top * 2;
+      if (availHeight <= 0) return;
       setZoomPreservingAnchor(() =>
-        Math.min(
-          (wrap.clientWidth - padding.left * 2) / base.width,
-          (wrap.clientHeight - padding.top * 2) / base.height,
-        ),
+        Math.min(availWidth / base.w, availHeight / base.h),
       );
-    } catch {
-      // ignore; fit-page is best-effort
-    }
-  };
+    },
+    [setZoomPreservingAnchor],
+  );
+
+  // Re-apply the active fit from the current pane + already-measured page size.
+  // Called by the ResizeObserver; cached sizes only (no async), so it is safe to
+  // run on every layout change.
+  const reapplyFit = useCallback(() => {
+    const mode = fitModeRef.current;
+    if (mode === "none") return;
+    const base = pageSizes[pageStateRef.current];
+    if (base) applyFit(mode, base);
+  }, [applyFit, pageSizes]);
+
+  useEffect(() => {
+    reapplyFitRef.current = reapplyFit;
+  }, [reapplyFit]);
+
+  // Toolbar fit: remember the mode (so resizes keep fitting) and apply now,
+  // preferring the measured intrinsic size and falling back to pdf.js for a
+  // current page that has not rendered yet.
+  const fitTo = useCallback(
+    async (mode: "width" | "page") => {
+      if (!scrollRef.current) return;
+      setFitMode(mode);
+      const cached = pageSizes[pageStateRef.current];
+      if (cached) {
+        applyFit(mode, cached);
+        return;
+      }
+      const pdf = docRef.current;
+      if (!pdf) return;
+      try {
+        const pdfPage = await pdf.getPage(pageStateRef.current);
+        const base = pdfPage.getViewport({ scale: 1 });
+        applyFit(mode, { w: base.width, h: base.height });
+      } catch {
+        // best-effort
+      }
+    },
+    [applyFit, pageSizes],
+  );
+
+  const fitWidth = () => void fitTo("width");
+  const fitPage = () => void fitTo("page");
 
   if (loadError) {
     return (
@@ -1581,7 +1700,7 @@ export default function PdfViewer({ path }: { path: string }) {
         <button
           type="button"
           aria-label="Zoom out"
-          onClick={() => setZoomPreservingAnchor(zoomOut)}
+          onClick={() => manualZoom(zoomOut)}
         >
           -
         </button>
@@ -1589,7 +1708,7 @@ export default function PdfViewer({ path }: { path: string }) {
         <button
           type="button"
           aria-label="Zoom in"
-          onClick={() => setZoomPreservingAnchor(zoomIn)}
+          onClick={() => manualZoom(zoomIn)}
         >
           +
         </button>

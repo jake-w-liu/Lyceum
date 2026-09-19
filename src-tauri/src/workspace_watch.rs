@@ -135,6 +135,16 @@ const FS_EVENT_QUEUE_CAPACITY: usize = 4096;
 /// frontend keys off `paths`/`gitChanged` only, so a burst of mixed kinds needs
 /// no per-kind fidelity.
 const COALESCED_EVENT_KIND: &str = "Coalesced";
+/// If the frontend has not acknowledged an emitted fs-change event within this
+/// window, assume the acknowledgement was lost (a transient IPC failure or a
+/// WebView reload) and reclaim the in-flight slot. Without this, one lost ack
+/// pins the capacity-1 `OutputFlow` forever and wedges this watcher's entire
+/// fs-change pipeline (tree AND Git refreshes) for the rest of the session. A
+/// live frontend acks within milliseconds, so this only fires when an ack was
+/// genuinely lost; re-emitting after a reclaim is idempotent (the frontend just
+/// re-queries the tree/Git), so a merely-slow ack costs at most one duplicate
+/// refresh.
+const FS_EVENT_ACK_WATCHDOG: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Merge every notification that arrives within `window` into one payload,
 /// de-duplicating paths and OR-ing `git_changed`.
@@ -200,6 +210,9 @@ fn spawn_fs_event_coalescer(
         .name("lyceum-fs-coalesce".to_string())
         .spawn(move || {
             let mut pending: Option<(Vec<String>, HashSet<String>, bool, bool)> = None;
+            // When set, the instant we first could not reserve an output slot for
+            // the current pending payload; drives the ack-loss watchdog below.
+            let mut blocked_since: Option<std::time::Instant> = None;
             loop {
                 if pending.is_none() {
                     let Ok(first) = rx.recv() else { break };
@@ -224,6 +237,7 @@ fn spawn_fs_event_coalescer(
                 }
 
                 if output_flow.try_reserve() {
+                    blocked_since = None;
                     let Some((paths, _, git_changed, rescan)) = pending.take() else {
                         output_flow.acknowledge(1);
                         continue;
@@ -250,6 +264,19 @@ fn spawn_fs_event_coalescer(
                 }
                 if output_flow.is_cancelled() {
                     break;
+                }
+
+                // A lost acknowledgement (transient IPC failure or a WebView
+                // reload) would otherwise pin the capacity-1 slot forever and
+                // wedge this watcher's whole fs-change pipeline for the session.
+                // Once we have been unable to emit for longer than the watchdog
+                // window, reclaim the stuck slot; the next iteration re-reserves
+                // and re-emits the pending payload (idempotent on the frontend).
+                let now = std::time::Instant::now();
+                if now.duration_since(*blocked_since.get_or_insert(now)) >= FS_EVENT_ACK_WATCHDOG {
+                    output_flow.acknowledge(1);
+                    blocked_since = None;
+                    continue;
                 }
 
                 // JavaScript has not acknowledged the prior event. Keep
@@ -755,10 +782,20 @@ fn workspace_event_paths_with_git_roots(
         return None;
     }
 
+    // A rescan means the backend coalesced or dropped native notifications
+    // (macOS FSEvents MUST_SCAN_SUBDIRS / user- or kernel-dropped), so notify
+    // reports EventKind::Other with Flag::Rescan and typically only the flagged
+    // ancestor directory (often the watch root, not a ".git" path). The dropped
+    // writes may include a commit's .git metadata whose path never reaches us,
+    // so per notify's own contract ("assume any file may have changed") we must
+    // conservatively refresh Git decorations too — otherwise a commit swept up
+    // in a dropped burst leaves the explorer showing stale decorations.
+    //
     // An empty native event does not identify which registered watch emitted
     // it. If this watcher has an external Git root, conservatively refresh both
     // the tree (the existing empty-event behavior) and Git decorations.
-    let mut git_changed = event.paths.is_empty() && !external_git_roots.is_empty();
+    let mut git_changed =
+        event.need_rescan() || (event.paths.is_empty() && !external_git_roots.is_empty());
     let mut paths = Vec::new();
     for path in &event.paths {
         if external_git_roots
@@ -1382,6 +1419,28 @@ mod tests {
                 &event,
             ),
             git_only()
+        );
+    }
+
+    #[test]
+    fn fsevents_rescan_refreshes_git_decorations() {
+        // Under load macOS FSEvents drops/coalesces notifications; notify then
+        // emits EventKind::Other with Flag::Rescan carrying only the flagged
+        // ancestor (here the watch root, NOT a .git path). The dropped writes
+        // can include a commit's .git metadata, so a rescan must still refresh
+        // Git decorations, or stale "modified" colors persist after a commit.
+        use notify::event::Flag;
+        let event = Event::new(EventKind::Other)
+            .set_flag(Flag::Rescan)
+            .add_path(PathBuf::from("/real/project"));
+        let result = workspace_event_paths(
+            Path::new("/real/project"),
+            Path::new("/link/project"),
+            &event,
+        );
+        assert!(
+            result.is_some_and(|paths| paths.git_changed),
+            "an FSEvents rescan must refresh Git decorations"
         );
     }
 

@@ -164,6 +164,7 @@ describe("PdfViewer", () => {
     expect(usePreviewStore.getState().viewState["/w/paper.pdf"]).toEqual({
       page: 1,
       zoom: 1,
+      fitMode: "none",
     });
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
@@ -297,6 +298,38 @@ describe("PdfViewer", () => {
     expect(await screen.findByText("150%")).toBeInTheDocument();
     await waitFor(() =>
       expect(pdfMocks.getViewport).toHaveBeenCalledWith({ scale: 1.5 }),
+    );
+  });
+
+  it("remembers fit-width mode and drops it on manual zoom", async () => {
+    mockPdfDocument(2);
+    const { container } = render(<PdfViewer path="/w/fit.pdf" />);
+    await screen.findByLabelText("Page number");
+    const scroll = container.querySelector(".pdf-scroll") as HTMLElement;
+    Object.defineProperty(scroll, "clientWidth", {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(scroll, "clientHeight", {
+      configurable: true,
+      value: 800,
+    });
+    // The current page must be measured so fit uses its cached intrinsic size.
+    await waitFor(() => expect(pdfMocks.getPage).toHaveBeenCalledWith(1));
+
+    fireEvent.click(screen.getByLabelText("Fit width"));
+    await waitFor(() =>
+      expect(
+        usePreviewStore.getState().viewState["/w/fit.pdf"]?.fitMode,
+      ).toBe("width"),
+    );
+
+    // An explicit zoom leaves fit mode so it won't snap back on the next resize.
+    fireEvent.click(screen.getByLabelText("Zoom in"));
+    await waitFor(() =>
+      expect(
+        usePreviewStore.getState().viewState["/w/fit.pdf"]?.fitMode,
+      ).toBe("none"),
     );
   });
 
