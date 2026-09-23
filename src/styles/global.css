@@ -1132,6 +1132,12 @@ kbd {
   overflow: auto;
   display: flex;
   flex-direction: column;
+  /* Load-bearing for JS scroll math: makes this pane the pages' offsetParent,
+     so pageEl.offsetTop is in scroll-content coordinates — the same space as
+     wrap.scrollTop (see pageAtVerticalOffset in PdfViewer). Without it,
+     offsetTop resolves against a higher positioned ancestor and the binary
+     search reads a value biased by the toolbar/panel-header height. */
+  position: relative;
   /* Pages are centered via `margin-inline: auto` on .pdf-page-layer, NOT
      `align-items: center`. With align-items centering, a page zoomed wider than
      the pane overflows equally on both sides and the left part can never be

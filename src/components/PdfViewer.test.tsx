@@ -54,8 +54,15 @@ vi.mock("pdfjs-dist", () => ({
   }),
 }));
 
+// `css: false` in vitest.config blanks *.css imports (even with ?raw), so the
+// stylesheet invariant test reads the file directly. Vitest runs under node
+// from the project root; the frontend tsconfig just lacks node types.
+// @ts-expect-error -- node builtins aren't in the frontend tsconfig lib set.
+import { readFileSync } from "node:fs";
 import PdfViewer from "./PdfViewer";
 import { initialPreviewData, usePreviewStore } from "../state/previewStore";
+
+const globalCss = readFileSync("src/styles/global.css", "utf8");
 
 const originalGetContext = HTMLCanvasElement.prototype.getContext;
 
@@ -202,8 +209,10 @@ describe("PdfViewer", () => {
     await waitFor(() => expect(pages[0].style.width).toBe("400px"));
     expect(pages[0].style.height).toBe("200px");
     expect(pdfMocks.getPage).not.toHaveBeenCalledWith(2);
-    expect(pages[1].style.width).toBe("612px");
-    expect(pages[1].style.height).toBe("792px");
+    // An unvisited page reserves space using the first measured sibling's size
+    // (uniform docs land exactly) rather than the fixed A4 fallback.
+    expect(pages[1].style.width).toBe("400px");
+    expect(pages[1].style.height).toBe("200px");
 
     fireEvent.click(screen.getByLabelText("Next page"));
     await waitFor(() => expect(pdfMocks.getPage).toHaveBeenCalledWith(2));
@@ -589,5 +598,147 @@ describe("PdfViewer", () => {
     expect(js.getAttribute("href")).toBe("");
     expect(js.title).toBe("Disabled: javascript:alert(1)");
     expect(file.getAttribute("href")).toBe("");
+  });
+
+  it("positions the scroll pane so page offsetTop matches scroll coordinates", () => {
+    // pageAtVerticalOffset compares pageEl.offsetTop against wrap.scrollTop.
+    // That only works when .pdf-scroll is the pages' offsetParent — i.e. the
+    // rule must keep `position: relative`; otherwise offsetTop resolves against
+    // a higher positioned ancestor and the page math is biased by the height of
+    // the toolbar/panel header in between.
+    const rule = /\.pdf-scroll\s*\{([^}]*)\}/.exec(globalCss);
+    expect(rule?.[1]).toMatch(/position:\s*relative/);
+  });
+
+  it("clamps a link destination above the page top to the page top", async () => {
+    // Mock page height is 240; y=300 in PDF space lands above the page top.
+    // pdf.js clamps such offsets at 0 — without the clamp the jump would scroll
+    // into the previous page and report the wrong page.
+    const dest = [1, { name: "XYZ" }, 0, 300, null];
+    pdfMocks.getAnnotations.mockResolvedValue([{ id: "link-1", dest }]);
+    pdfMocks.annotationLayerRender.mockImplementation(
+      async (
+        params: {
+          annotations: Array<{ dest?: unknown[] }>;
+          linkService: {
+            getDestinationHash: (d: unknown) => string;
+            goToDestination: (d: unknown) => Promise<void>;
+          };
+        },
+        div: HTMLDivElement,
+      ) => {
+        div.replaceChildren();
+        for (const annotation of params.annotations) {
+          if (!annotation.dest) continue;
+          const section = document.createElement("section");
+          section.className = "linkAnnotation";
+          const link = document.createElement("a");
+          link.href = params.linkService.getDestinationHash(annotation.dest);
+          link.onclick = () => {
+            void params.linkService.goToDestination(annotation.dest!);
+            return false;
+          };
+          section.append(link);
+          div.append(section);
+        }
+      },
+    );
+    mockPdfDocument(2);
+
+    const { container } = render(<PdfViewer path="/w/clamp.pdf" />);
+    await waitFor(() =>
+      expect(
+        container.querySelector(".pdf-annotation-layer a"),
+      ).not.toBeNull(),
+    );
+    const scroll = container.querySelector(".pdf-scroll") as HTMLDivElement;
+    const page2 = container.querySelector('[data-page="2"]') as HTMLElement;
+    // Page 2 sits at scroll-space top 1000 (rect space; scrollTop is 0).
+    page2.getBoundingClientRect = () =>
+      ({
+        top: 1000,
+        left: 12,
+        width: 180,
+        height: 240,
+        right: 192,
+        bottom: 1240,
+        x: 12,
+        y: 1000,
+        toJSON: () => ({}),
+      }) as DOMRect;
+
+    fireEvent.click(container.querySelector(".pdf-annotation-layer a")!);
+
+    // Destination top converts to -60 (300 - 240 above the page); the clamped
+    // scroll lands at page top minus padding, not 60px into the previous page.
+    await waitFor(() => expect(scroll.scrollTop).toBe(1000 - 12));
+    await waitFor(() =>
+      expect(screen.getByLabelText("Page number")).toHaveValue("2"),
+    );
+  });
+
+  it("keeps a centered page centered when zooming past the pane width", async () => {
+    usePreviewStore
+      .getState()
+      .setViewState("/w/centered-zoom.pdf", { page: 1, zoom: 3 });
+    mockPdfDocument(1);
+
+    const { container } = render(<PdfViewer path="/w/centered-zoom.pdf" />);
+    await screen.findByLabelText("Page number");
+    const scroll = container.querySelector(".pdf-scroll") as HTMLDivElement;
+    const page = container.querySelector('[data-page="1"]') as HTMLElement;
+    const paneWidth = 600;
+    const pad = 12; // jsdom has no layout; scrollPadding falls back to 12
+    const available = paneWidth - pad * 2;
+    Object.defineProperty(scroll, "clientWidth", {
+      configurable: true,
+      value: paneWidth,
+    });
+    scroll.getBoundingClientRect = () =>
+      ({
+        top: 0,
+        left: 0,
+        width: paneWidth,
+        height: 800,
+        right: paneWidth,
+        bottom: 800,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }) as DOMRect;
+    // Mirror the margin-inline:auto layout: centered while the box fits the
+    // pane, pinned to the padding edge once it overflows.
+    page.getBoundingClientRect = () => {
+      const w = Number.parseFloat(page.style.width) || 0;
+      const left = pad + (w <= available ? (available - w) / 2 : 0);
+      return {
+        top: pad,
+        left,
+        width: w,
+        height: w * (240 / 180),
+        right: left + w,
+        bottom: 1000,
+        x: left,
+        y: pad,
+        toJSON: () => ({}),
+      } as DOMRect;
+    };
+    Object.defineProperty(page, "offsetTop", {
+      configurable: true,
+      value: pad,
+    });
+    Object.defineProperty(page, "offsetHeight", {
+      configurable: true,
+      value: 720,
+    });
+    // 180x240 page at zoom 3 -> 540px box, which still fits the 576px pane.
+    await waitFor(() => expect(page.style.width).toBe("540px"));
+
+    fireEvent.click(screen.getByLabelText("Zoom in"));
+    // Zoom 3.75 -> 675px box, now overflowing: the point that was centered must
+    // stay centered rather than snapping the content to the left edge.
+    await waitFor(() => expect(page.style.width).toBe("675px"));
+    expect(scroll.scrollLeft).toBeCloseTo(pad + 675 / 2 - paneWidth / 2, 5);
+    expect(screen.getByLabelText("Page number")).toHaveValue("1");
   });
 });

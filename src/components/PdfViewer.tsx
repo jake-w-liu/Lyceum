@@ -198,7 +198,12 @@ function captureViewportAnchor(
   if (numPages < 1) return null;
   const padding = scrollPadding(wrap);
   const viewportY = wrap.scrollTop + padding.top;
-  const viewportX = wrap.scrollLeft + padding.left;
+  // Anchor X to the viewport's horizontal CENTER, not its left edge: a page
+  // narrower than the pane is centered by auto margins, so its left edge does
+  // not correspond to scrollLeft + padding. Anchoring the edge would drop
+  // ratioX to 0 for every centered page and snap the content to the left on the
+  // next zoom-in past the pane width, instead of keeping the centered point.
+  const viewportX = wrap.scrollLeft + wrap.clientWidth / 2;
   const pageNumber = pageAtVerticalOffset(pageRefs, numPages, viewportY);
   if (pageNumber === null) return null;
   const pageEl = pageRefs.current.get(pageNumber);
@@ -206,14 +211,10 @@ function captureViewportAnchor(
   const offset = pageOffset(wrap, pageEl);
   const height = Math.max(1, offset.height);
   const width = Math.max(1, offset.width);
-  const right = offset.left + width;
   return {
     pageNumber,
     ratioY: Math.min(1, Math.max(0, (viewportY - offset.top) / height)),
-    ratioX:
-      viewportX >= offset.left && viewportX < right
-        ? Math.min(1, Math.max(0, (viewportX - offset.left) / width))
-        : 0,
+    ratioX: Math.min(1, Math.max(0, (viewportX - offset.left) / width)),
   };
 }
 
@@ -319,8 +320,16 @@ class LocalPdfLinkService implements LocalPdfLinkServiceContract {
   async goToDestination(dest: string | PdfDestArray): Promise<void> {
     const pdf = this.handlers.current.getPdf();
     if (!pdf) return;
-    const explicitDest =
-      typeof dest === "string" ? await pdf.getDestination(dest) : await dest;
+    let explicitDest: PdfDestArray | null;
+    try {
+      explicitDest =
+        typeof dest === "string" ? await pdf.getDestination(dest) : await dest;
+    } catch (error) {
+      // A corrupt name tree must not turn a link click into an unhandled
+      // rejection (pdf.js logs and ignores the same failure).
+      console.warn(`Unable to resolve PDF destination "${String(dest)}":`, error);
+      return;
+    }
     if (!Array.isArray(explicitDest)) return;
 
     const pageNumber = await this.pageNumberFromDestination(pdf, explicitDest);
@@ -862,6 +871,16 @@ export default function PdfViewer({ path }: { path: string }) {
   );
   const searchQuery = findQuery.trim();
 
+  // Placeholder size for a not-yet-rendered page box. Most PDFs are uniform,
+  // so the first measured page is a far better guess than the A4 fallback —
+  // without it, a link jump to an unvisited page in a non-letter document sums
+  // the wrong heights for every page above the target and lands off-target,
+  // then visibly shifts as the real sizes stream in.
+  const commonPageSize = useMemo(
+    () => Object.values(pageSizes)[0] ?? FALLBACK_SIZE,
+    [pageSizes],
+  );
+
   useEffect(() => {
     pageStateRef.current = page;
   }, [page]);
@@ -891,6 +910,10 @@ export default function PdfViewer({ path }: { path: string }) {
       const padding = scrollPadding(wrap);
       const offset = pageOffset(wrap, pageEl);
       wrap.scrollTop = Math.max(0, offset.top - padding.top);
+      // Refresh the re-pin anchor immediately rather than waiting for the
+      // scroll event: a page-size commit landing in that gap would otherwise
+      // re-pin to the pre-jump position and undo the navigation.
+      scrollAnchorRef.current = captureViewportAnchor(wrap, pageRefs, numPages);
     },
     [numPages],
   );
@@ -1058,7 +1081,10 @@ export default function PdfViewer({ path }: { path: string }) {
 
       const padding = scrollPadding(wrap);
       const offset = pageOffset(wrap, pageEl);
-      wrap.scrollTop = Math.max(0, offset.top + top - padding.top);
+      // pdf.js clamps destination offsets at 0 (allowNegativeOffset is off): a
+      // dest pointing above the page top must land on the page top, not inside
+      // the previous page (which would also misreport the current page).
+      wrap.scrollTop = Math.max(0, offset.top + Math.max(0, top) - padding.top);
       const availableWidth = Math.max(
         1,
         wrap.clientWidth - padding.left * 2,
@@ -1069,11 +1095,18 @@ export default function PdfViewer({ path }: { path: string }) {
       // destination x-coordinates when the page genuinely overflows the pane.
       wrap.scrollLeft =
         offset.width > availableWidth
-          ? Math.max(0, offset.left + left - padding.left)
+          ? Math.max(0, offset.left + Math.max(0, left) - padding.left)
           : 0;
       setPage(pageNumber);
+      // Same eager-anchor rule as scrollToPage: pin the destination, not the
+      // spot we just left, if a page-size commit lands before the scroll event.
+      scrollAnchorRef.current = captureViewportAnchor(
+        wrap,
+        pageRefs,
+        numPages,
+      );
     },
-    [zoom],
+    [numPages, zoom],
   );
 
   const scrollToDestination = useCallback(
@@ -1324,9 +1357,11 @@ export default function PdfViewer({ path }: { path: string }) {
       0,
       offset.top + offset.height * anchor.ratioY - padding.top,
     );
+    // ratioX anchors the viewport's horizontal center (see
+    // captureViewportAnchor), so the restore mirrors the same center.
     wrap.scrollLeft = Math.max(
       0,
-      offset.left + offset.width * anchor.ratioX - padding.left,
+      offset.left + offset.width * anchor.ratioX - wrap.clientWidth / 2,
     );
     updateCurrentPageFromScroll();
   }, [zoom, updateCurrentPageFromScroll]);
@@ -1577,6 +1612,13 @@ export default function PdfViewer({ path }: { path: string }) {
           default:
             break;
         }
+        // Programmatic key scroll: refresh the re-pin anchor now so a page-size
+        // commit before the scroll event cannot pin back the stale position.
+        scrollAnchorRef.current = captureViewportAnchor(
+          wrap,
+          pageRefs,
+          numPages,
+        );
       }
     }
     if ((event.metaKey || event.ctrlKey) && (event.key === "f" || event.key === "F")) {
@@ -1796,7 +1838,7 @@ export default function PdfViewer({ path }: { path: string }) {
               linkService={linkService}
               searchQuery={searchQuery}
               highlights={highlightsByPage.get(n)}
-              initialSize={pageSizes[n] ?? FALLBACK_SIZE}
+              initialSize={pageSizes[n] ?? commonPageSize}
               onSize={recordPageSize}
             />
           ))}
