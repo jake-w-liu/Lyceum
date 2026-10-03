@@ -176,6 +176,30 @@ describe("PdfViewer", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
+  it("opens documents with pdf.js runtime asset URLs (JBIG2/JPX fonts cmaps)", async () => {
+    mockPdfDocument(1);
+    render(<PdfViewer path="/w/paper.pdf" />);
+    await screen.findByLabelText("Page number");
+
+    // Without wasmUrl, JBIG2/JPEG2000 pages (image-scanned PDFs) fail to decode.
+    await waitFor(() => expect(pdfMocks.getDocument).toHaveBeenCalled());
+    const params = pdfMocks.getDocument.mock.calls[0][0] as Record<
+      string,
+      unknown
+    >;
+    expect(params.data).toBeInstanceOf(Uint8Array);
+    expect(params.cMapPacked).toBe(true);
+    for (const key of [
+      "wasmUrl",
+      "standardFontDataUrl",
+      "cMapUrl",
+      "iccUrl",
+    ]) {
+      expect(String(params[key])).toMatch(/\/pdfjs-assets\/[^/]+\/$/);
+    }
+    expect(String(params.wasmUrl)).toContain("/pdfjs-assets/wasm/");
+  });
+
   it("loads exact page dimensions only when a page becomes visible", async () => {
     mockPdfDocument(2);
     pdfMocks.getPage.mockImplementation(async (pageNumber: number) => {

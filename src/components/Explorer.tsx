@@ -14,10 +14,14 @@ import {
   movePaths,
   movePathsToTrash,
   nativeWindowContentInset,
+  readClipboardFilePaths,
   readDirectory,
   redoTrashBatch,
   renamePath,
   restoreTrashBatch,
+  writeClipboardFilePaths,
+  type ClipboardFileEntry,
+  type ClipboardFileList,
   type DirEntry,
   type MovedPath,
 } from "../lib/ipc";
@@ -45,6 +49,11 @@ import { Icon } from "./Icon";
 // Delay before a click on an already-selected file opens its inline rename.
 // Long enough that a double-click (which opens the file) cancels it first.
 const RENAME_CLICK_DELAY_MS = 400;
+
+// One ⌘V press delivers both a keydown and a DOM paste event (and the native
+// Edit→Paste menu item delivers only the event). Pastes arriving within this
+// window are repeats of the same press, not a second intentional paste.
+const PASTE_EVENT_DEDUP_MS = 400;
 
 // VS Code-style badge for a changed entry: files get a letter, folders a dot.
 // Nested-repository entries use lowercase letters and a hollow dot so the
@@ -304,6 +313,19 @@ interface ExplorerClipboard {
   entries: DirEntry[];
 }
 
+// Adapt a pasteboard file entry into the DirEntry shape the shared
+// copy-validity checks (`canCopyEntriesTo`, `topLevelEntries`) operate on.
+function clipboardFileToDirEntry(file: ClipboardFileEntry): DirEntry {
+  // Directory file URLs may carry a trailing slash, which would leave the
+  // basename empty — strip it before splitting.
+  const trimmed = file.path.replace(/[\\/]+$/, "");
+  return {
+    name: trimmed.split(/[\\/]/).pop() || file.path,
+    path: file.path,
+    isDir: file.isDir,
+  };
+}
+
 interface ReplacementDocSnapshot {
   content: string;
   savedContent: string;
@@ -438,7 +460,6 @@ interface NodeProps {
   setDraggingEntries: (entries: DirEntry[]) => void;
   resolveDraggingEntries: (dataTransfer: DataTransfer) => DirEntry[];
   onDragFinished: (dataTransfer: DataTransfer) => void;
-  clipboard: ExplorerClipboard | null;
   onCopyEntries: (entries: DirEntry[]) => void;
   onCutEntries: (entries: DirEntry[]) => void;
   onPasteInto: (destinationDir: string) => void;
@@ -466,7 +487,6 @@ function TreeNode({
   setDraggingEntries,
   resolveDraggingEntries,
   onDragFinished,
-  clipboard,
   onCopyEntries,
   onCutEntries,
   onPasteInto,
@@ -599,7 +619,7 @@ function TreeNode({
       {
         label: "Paste",
         run: () => onPasteInto(pasteDestinationDir()),
-        disabled: !clipboard || !canPasteHere(),
+        disabled: !canPasteHere(),
       },
       {
         label: "Rename",
@@ -838,7 +858,6 @@ function TreeNode({
               setDraggingEntries={setDraggingEntries}
               resolveDraggingEntries={resolveDraggingEntries}
               onDragFinished={onDragFinished}
-              clipboard={clipboard}
               onCopyEntries={onCopyEntries}
               onCutEntries={onCutEntries}
               onPasteInto={onPasteInto}
@@ -990,6 +1009,19 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
   const [creating, setCreating] = useState<CreatingState | null>(null);
   const [draggingEntries, setDraggingEntries] = useState<DirEntry[]>([]);
   const [clipboard, setClipboard] = useState<ExplorerClipboard | null>(null);
+  // Cached view of the OS pasteboard's file list, so paste enablement can be
+  // answered synchronously. Refreshed on mount, on window focus, and after our
+  // own writes. `clipboardChangeCountRef` is the generation recorded by OUR
+  // latest write: the internal clipboard only applies while a live read still
+  // reports that count (otherwise another app overwrote the board). The write
+  // tail lets an immediate ⌘V await an in-flight copy/cut write before reading.
+  const [osClipboard, setOsClipboard] = useState<ClipboardFileList>({
+    entries: [],
+    changeCount: -1,
+  });
+  const clipboardChangeCountRef = useRef(-1);
+  const clipboardWriteTail = useRef<Promise<number>>(Promise.resolve(-1));
+  const pasteHandledAtRef = useRef(0);
   const [dropTargetPath, setDropTargetPath] = useState<string | null>(null);
   const dragDropCommittedRef = useRef(false);
   const [pendingFocusPath, setPendingFocusPath] = useState<string | null>(null);
@@ -1093,6 +1125,37 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
   // fallback (and for tests / plain-browser dev where getCurrentWindow throws).
   useEffect(() => {
     const refresh = () => void useGitStore.getState().refresh();
+    window.addEventListener("focus", refresh);
+    let disposed = false;
+    let unlistenNative: (() => void) | undefined;
+    void (async () => {
+      try {
+        const off = await getCurrentWindow().onFocusChanged(
+          ({ payload: focused }) => {
+            if (focused) refresh();
+          },
+        );
+        if (disposed) off();
+        else unlistenNative = off;
+      } catch {
+        /* not inside Tauri (tests / browser): the DOM listener is the fallback */
+      }
+    })();
+    return () => {
+      disposed = true;
+      window.removeEventListener("focus", refresh);
+      unlistenNative?.();
+    };
+  }, []);
+
+  // Cache the OS pasteboard's file list so paste enablement is synchronous.
+  // Refresh on mount and window focus (the board may have changed in another
+  // app while Lyceum was unfocused); copy/cut/paste paths update it eagerly.
+  useEffect(() => {
+    const refresh = () => {
+      void readClipboardFilePaths().then(setOsClipboard);
+    };
+    refresh();
     window.addEventListener("focus", refresh);
     let disposed = false;
     let unlistenNative: (() => void) | undefined;
@@ -1520,14 +1583,40 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     }
   }
 
+  // Mirror internal copy/cut onto the OS pasteboard as file URLs so the same
+  // entries can paste into Finder, other apps, or another Lyceum window. The
+  // returned changeCount tags OUR write; only a read reporting it still holds
+  // those entries gets internal copy/cut semantics (in particular, `cut` is a
+  // Lyceum-only concept — a foreign overwrite degrades the next paste to the
+  // system's copy semantics).
+  function writeEntriesToOsClipboard(entries: DirEntry[]) {
+    const write = writeClipboardFilePaths(entries.map((entry) => entry.path));
+    clipboardWriteTail.current = write;
+    void write.then((changeCount) => {
+      if (clipboardWriteTail.current !== write) return; // superseded
+      clipboardChangeCountRef.current = changeCount;
+      setOsClipboard({
+        entries: entries.map((entry) => ({
+          path: entry.path,
+          isDir: entry.isDir,
+        })),
+        changeCount,
+      });
+    });
+  }
+
   function copyEntriesToExplorerClipboard(entries: DirEntry[]) {
     const copied = topLevelEntries(entries);
-    if (copied.length > 0) setClipboard({ operation: "copy", entries: copied });
+    if (copied.length === 0) return;
+    setClipboard({ operation: "copy", entries: copied });
+    writeEntriesToOsClipboard(copied);
   }
 
   function cutEntriesToExplorerClipboard(entries: DirEntry[]) {
     const cut = topLevelEntries(entries);
-    if (cut.length > 0) setClipboard({ operation: "cut", entries: cut });
+    if (cut.length === 0) return;
+    setClipboard({ operation: "cut", entries: cut });
+    writeEntriesToOsClipboard(cut);
   }
 
   function resolveDraggingEntries(dataTransfer: DataTransfer): DirEntry[] {
@@ -1560,11 +1649,26 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
     }, 0);
   }
 
+  // The internal clipboard applies only while the OS board still reports the
+  // generation our last write produced; once another app overwrites it, the
+  // cached board contents (external files, if any) are what a paste means.
+  function liveClipboard(): ExplorerClipboard | null {
+    return clipboardChangeCountRef.current === osClipboard.changeCount
+      ? clipboard
+      : null;
+  }
+
   function canPasteInto(destinationDir: string): boolean {
-    if (!clipboard) return false;
-    return clipboard.operation === "copy"
-      ? canCopyEntriesTo(clipboard.entries, destinationDir)
-      : canMoveEntriesTo(clipboard.entries, destinationDir);
+    const internal = liveClipboard();
+    if (internal) {
+      return internal.operation === "copy"
+        ? canCopyEntriesTo(internal.entries, destinationDir)
+        : canMoveEntriesTo(internal.entries, destinationDir);
+    }
+    const external = topLevelEntries(
+      osClipboard.entries.map(clipboardFileToDirEntry),
+    );
+    return external.length > 0 && canCopyEntriesTo(external, destinationDir);
   }
 
   function selectedPasteDestination(): string {
@@ -1574,15 +1678,46 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
   }
 
   async function pasteInto(destinationDir: string) {
-    const pending = clipboard;
-    if (!pending) return;
-    if (pending.operation === "cut") {
-      const moved = await moveEntries(pending.entries, destinationDir);
-      if (moved) setClipboard(null);
+    // Let an in-flight copy/cut board write land before reading, so ⌘C ⌘V
+    // typed faster than one IPC round-trip still sees our own entries.
+    await clipboardWriteTail.current;
+    const board = await readClipboardFilePaths();
+    setOsClipboard(board);
+    const internal =
+      clipboard !== null &&
+      clipboardChangeCountRef.current === board.changeCount
+        ? clipboard
+        : null;
+    if (!internal) {
+      // The board is not ours (foreign overwrite, or we never wrote it):
+      // import whatever files it currently holds, like a native drag-drop.
+      const external = topLevelEntries(
+        board.entries.map(clipboardFileToDirEntry),
+      );
+      if (
+        external.length === 0 ||
+        !canCopyEntriesTo(external, destinationDir)
+      ) {
+        return;
+      }
+      await importPaths(
+        external.map((entry) => entry.path),
+        destinationDir,
+      );
       return;
     }
-    if (!canCopyEntriesTo(pending.entries, destinationDir)) return;
-    const sourcePaths = pending.entries.map((entry) => entry.path);
+    if (internal.operation === "cut") {
+      const moved = await moveEntries(internal.entries, destinationDir);
+      if (moved) {
+        setClipboard(null);
+        // The board still lists the moved entries' now-deleted source paths;
+        // clear it so a repeat ⌘V no-ops instead of importing a stale path.
+        writeEntriesToOsClipboard([]);
+      }
+      return;
+    }
+    if (!canCopyEntriesTo(internal.entries, destinationDir)) return;
+    const sourcePaths = internal.entries.map((entry) => entry.path);
     try {
       const outcome = await transferWithReplaceOption(
         destinationDir,
@@ -1856,16 +1991,46 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
       return;
     }
     if (mod && !e.altKey && !e.shiftKey && key === "v") {
-      if (clipboard) {
-        e.preventDefault();
-        void pasteInto(selectedPasteDestination());
-      }
+      // The OS pasteboard may hold files even when the internal clipboard is
+      // empty (e.g. a Finder copy), so always attempt the paste.
+      e.preventDefault();
+      requestExplorerPaste();
       return;
     }
     if (!mod && !e.altKey && (e.key === "Delete" || e.key === "Backspace")) {
       e.preventDefault();
       void deleteEntries(resolvedSelectedEntries);
     }
+  }
+
+  // ⌘V produces a keydown AND a DOM paste event (the native Edit→Paste menu
+  // item produces only the event). Collapse any repeat arriving within one
+  // press so a single paste can't import twice.
+  function requestExplorerPaste() {
+    const now = Date.now();
+    if (now - pasteHandledAtRef.current < PASTE_EVENT_DEDUP_MS) return;
+    pasteHandledAtRef.current = now;
+    void pasteInto(selectedPasteDestination());
+  }
+
+  function onExplorerPaste(e: React.ClipboardEvent) {
+    if (isEditableEventTarget(e.target)) return;
+    e.preventDefault();
+    requestExplorerPaste();
+  }
+
+  function onExplorerCopy(e: React.ClipboardEvent) {
+    if (isEditableEventTarget(e.target)) return;
+    if (resolvedSelectedEntries.length === 0) return;
+    e.preventDefault();
+    copyEntriesToExplorerClipboard(resolvedSelectedEntries);
+  }
+
+  function onExplorerCut(e: React.ClipboardEvent) {
+    if (isEditableEventTarget(e.target)) return;
+    if (resolvedSelectedEntries.length === 0) return;
+    e.preventDefault();
+    cutEntriesToExplorerClipboard(resolvedSelectedEntries);
   }
 
   // Arrow-key navigation for the tree (role="tree"), VS Code style:
@@ -1970,6 +2135,9 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
       tabIndex={0}
       ref={explorerRef}
       onKeyDown={onExplorerKeyDown}
+      onCopy={onExplorerCopy}
+      onCut={onExplorerCut}
+      onPaste={onExplorerPaste}
     >
       <div className="explorer-toolbar">
         <button
@@ -2117,7 +2285,6 @@ export function Explorer({ rootPath, onOpenFile }: ExplorerProps) {
             setDraggingEntries={setDraggingEntries}
             resolveDraggingEntries={resolveDraggingEntries}
             onDragFinished={finishDrag}
-            clipboard={clipboard}
             onCopyEntries={copyEntriesToExplorerClipboard}
             onCutEntries={cutEntriesToExplorerClipboard}
             onPasteInto={(destinationDir) => void pasteInto(destinationDir)}

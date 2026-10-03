@@ -29,6 +29,8 @@ vi.mock("./lib/ipc", () => ({
   unwatchWorkspace: vi.fn(async () => {}),
   watchWorkspace: vi.fn(async () => {}),
   writeFile: vi.fn(async () => {}),
+  readClipboardFilePaths: vi.fn(async () => ({ entries: [], changeCount: -1 })),
+  writeClipboardFilePaths: vi.fn(async () => -1),
 }));
 
 // The terminal mounts xterm (needs canvas/layout); stub it in the shell test.

@@ -63,6 +63,8 @@ vi.mock("../lib/ipc", () => ({
   emptyWorkspaceTrash: vi.fn(async () => 0),
   gitStatus: vi.fn(async () => ({ isRepo: false, files: {} })),
   nativeWindowContentInset: vi.fn(async () => ({ x: 0, y: 0 })),
+  readClipboardFilePaths: vi.fn(async () => ({ entries: [], changeCount: -1 })),
+  writeClipboardFilePaths: vi.fn(async () => -1),
 }));
 import {
   createDirectory,
@@ -77,6 +79,8 @@ import {
   gitStatus,
   renamePath,
   restoreTrashBatch,
+  readClipboardFilePaths,
+  writeClipboardFilePaths,
 } from "../lib/ipc";
 import { ask, message } from "@tauri-apps/plugin-dialog";
 import {
@@ -197,6 +201,13 @@ beforeEach(() => {
   vi.mocked(emptyWorkspaceTrash).mockResolvedValue(0);
   vi.mocked(gitStatus).mockReset();
   vi.mocked(gitStatus).mockResolvedValue({ isRepo: false, files: {} });
+  vi.mocked(readClipboardFilePaths).mockReset();
+  vi.mocked(readClipboardFilePaths).mockResolvedValue({
+    entries: [],
+    changeCount: -1,
+  });
+  vi.mocked(writeClipboardFilePaths).mockReset();
+  vi.mocked(writeClipboardFilePaths).mockResolvedValue(-1);
   vi.mocked(ask).mockClear();
   vi.mocked(ask).mockResolvedValue(true);
   vi.mocked(message).mockClear();
@@ -1354,6 +1365,234 @@ describe("Explorer", () => {
 
     await waitFor(() =>
       expect(movePaths).toHaveBeenCalledWith(ROOT, ["/ws/src/main.tsx"], ROOT),
+    );
+  });
+
+  it("copies explorer entries onto the OS pasteboard on Cmd+C", async () => {
+    const { container } = render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await screen.findByText("README.md");
+    fireEvent.click(screen.getByRole("treeitem", { name: "README.md" }));
+    const explorer = container.querySelector(".explorer") as HTMLElement;
+
+    fireEvent.keyDown(explorer, { key: "c", metaKey: true });
+
+    await waitFor(() =>
+      expect(writeClipboardFilePaths).toHaveBeenCalledWith(["/ws/README.md"]),
+    );
+  });
+
+  it("pastes OS-pasteboard files into the workspace root on Cmd+V", async () => {
+    vi.mocked(readClipboardFilePaths).mockResolvedValue({
+      entries: [
+        { path: "/external/report.pdf", isDir: false },
+        { path: "/external/data", isDir: true },
+      ],
+      changeCount: 42,
+    });
+    vi.mocked(copyPaths).mockResolvedValue([
+      { from: "/external/report.pdf", to: "/ws/report.pdf", isDir: false },
+      { from: "/external/data", to: "/ws/data", isDir: true },
+    ]);
+    const { container } = render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await screen.findByText("README.md");
+    const explorer = container.querySelector(".explorer") as HTMLElement;
+
+    fireEvent.keyDown(explorer, { key: "v", metaKey: true });
+
+    await waitFor(() =>
+      expect(copyPaths).toHaveBeenCalledWith(
+        ROOT,
+        ["/external/report.pdf", "/external/data"],
+        ROOT,
+      ),
+    );
+    expect(movePaths).not.toHaveBeenCalled();
+  });
+
+  it("pastes OS-pasteboard files into the selected folder", async () => {
+    vi.mocked(readClipboardFilePaths).mockResolvedValue({
+      entries: [{ path: "/external/report.pdf", isDir: false }],
+      changeCount: 42,
+    });
+    vi.mocked(copyPaths).mockResolvedValue([
+      { from: "/external/report.pdf", to: "/ws/src/report.pdf", isDir: false },
+    ]);
+    const { container } = render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await screen.findByText("src");
+    fireEvent.click(screen.getByRole("treeitem", { name: "src" }));
+    const explorer = container.querySelector(".explorer") as HTMLElement;
+
+    fireEvent.keyDown(explorer, { key: "v", metaKey: true });
+
+    await waitFor(() =>
+      expect(copyPaths).toHaveBeenCalledWith(
+        ROOT,
+        ["/external/report.pdf"],
+        "/ws/src",
+      ),
+    );
+  });
+
+  it("pastes once when a keydown and a DOM paste event arrive together", async () => {
+    vi.mocked(readClipboardFilePaths).mockResolvedValue({
+      entries: [{ path: "/external/report.pdf", isDir: false }],
+      changeCount: 42,
+    });
+    const { container } = render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await screen.findByText("README.md");
+    const explorer = container.querySelector(".explorer") as HTMLElement;
+
+    fireEvent.keyDown(explorer, { key: "v", metaKey: true });
+    fireEvent(explorer, new Event("paste", { bubbles: true }));
+
+    await waitFor(() => expect(copyPaths).toHaveBeenCalled());
+    expect(copyPaths).toHaveBeenCalledTimes(1);
+  });
+
+  it("does nothing when the OS pasteboard holds no files", async () => {
+    vi.mocked(readClipboardFilePaths).mockResolvedValue({
+      entries: [],
+      changeCount: 42,
+    });
+    const { container } = render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await screen.findByText("README.md");
+    const explorer = container.querySelector(".explorer") as HTMLElement;
+
+    fireEvent.keyDown(explorer, { key: "v", metaKey: true });
+
+    await waitFor(() =>
+      expect(readClipboardFilePaths).toHaveBeenCalledTimes(2),
+    ); // mount refresh + paste read
+    expect(copyPaths).not.toHaveBeenCalled();
+    expect(movePaths).not.toHaveBeenCalled();
+  });
+
+  it("keeps internal cut semantics while the board still holds our write", async () => {
+    // The write returns the generation OUR copy/cut produced; a paste read
+    // reporting the same count means the board still holds our entries, so the
+    // internal `cut` (move) applies rather than a re-import.
+    vi.mocked(writeClipboardFilePaths).mockResolvedValue(7);
+    vi.mocked(readClipboardFilePaths).mockResolvedValue({
+      entries: [{ path: "/ws/src/main.tsx", isDir: false }],
+      changeCount: 7,
+    });
+    vi.mocked(readDirectory).mockImplementation(async (p: string) => {
+      if (p === ROOT) return [dir("src")];
+      if (p === "/ws/src") return [file("main.tsx", "/ws/src")];
+      return [];
+    });
+    vi.mocked(movePaths).mockResolvedValue([
+      { from: "/ws/src/main.tsx", to: "/ws/main.tsx", isDir: false },
+    ]);
+    const { container } = render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await userEvent.click(await screen.findByText("src"));
+    await screen.findByText("main.tsx");
+    const explorer = container.querySelector(".explorer") as HTMLElement;
+
+    fireEvent.click(screen.getByRole("treeitem", { name: "main.tsx" }));
+    fireEvent.keyDown(explorer, { key: "x", metaKey: true });
+    await waitFor(() => expect(writeClipboardFilePaths).toHaveBeenCalled());
+    // Clear the selection so the paste destination is the workspace root, not
+    // the still-selected file's parent (which would be a same-dir no-op).
+    fireEvent.mouseDown(container.querySelector(".tree-root-drop-spacer")!);
+    fireEvent.keyDown(explorer, { key: "v", metaKey: true });
+
+    await waitFor(() =>
+      expect(movePaths).toHaveBeenCalledWith(ROOT, ["/ws/src/main.tsx"], ROOT),
+    );
+    expect(copyPaths).not.toHaveBeenCalled();
+  });
+
+  it("drops internal cut semantics after another app overwrites the board", async () => {
+    vi.mocked(writeClipboardFilePaths).mockResolvedValue(7);
+    vi.mocked(readDirectory).mockImplementation(async (p: string) => {
+      if (p === ROOT) return [dir("src")];
+      if (p === "/ws/src") return [file("main.tsx", "/ws/src")];
+      return [];
+    });
+    const { container } = render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await userEvent.click(await screen.findByText("src"));
+    await screen.findByText("main.tsx");
+    const explorer = container.querySelector(".explorer") as HTMLElement;
+
+    fireEvent.click(screen.getByRole("treeitem", { name: "main.tsx" }));
+    fireEvent.keyDown(explorer, { key: "x", metaKey: true });
+    await waitFor(() => expect(writeClipboardFilePaths).toHaveBeenCalled());
+
+    // Another app copied text: the board advanced (99) and holds no files.
+    vi.mocked(readClipboardFilePaths).mockResolvedValue({
+      entries: [],
+      changeCount: 99,
+    });
+    fireEvent.keyDown(explorer, { key: "v", metaKey: true });
+
+    await waitFor(() =>
+      expect(readClipboardFilePaths).toHaveBeenCalledTimes(2),
+    );
+    expect(movePaths).not.toHaveBeenCalled();
+    expect(copyPaths).not.toHaveBeenCalled();
+  });
+
+  it("imports foreign files over a stale internal clipboard", async () => {
+    vi.mocked(writeClipboardFilePaths).mockResolvedValue(7);
+    const { container } = render(<Explorer rootPath={ROOT} onOpenFile={() => {}} />);
+    await screen.findByText("README.md");
+    const explorer = container.querySelector(".explorer") as HTMLElement;
+
+    fireEvent.click(screen.getByRole("treeitem", { name: "README.md" }));
+    fireEvent.keyDown(explorer, { key: "c", metaKey: true });
+    await waitFor(() => expect(writeClipboardFilePaths).toHaveBeenCalled());
+
+    // Finder copy overwrote our board entries with different files.
+    vi.mocked(readClipboardFilePaths).mockResolvedValue({
+      entries: [{ path: "/external/report.pdf", isDir: false }],
+      changeCount: 99,
+    });
+    vi.mocked(copyPaths).mockResolvedValue([
+      { from: "/external/report.pdf", to: "/ws/report.pdf", isDir: false },
+    ]);
+    fireEvent.keyDown(explorer, { key: "v", metaKey: true });
+
+    await waitFor(() =>
+      expect(copyPaths).toHaveBeenCalledWith(
+        ROOT,
+        ["/external/report.pdf"],
+        ROOT,
+      ),
+    );
+  });
+
+  it("enables the context-menu Paste item for OS-pasteboard files", async () => {
+    vi.mocked(readClipboardFilePaths).mockResolvedValue({
+      entries: [{ path: "/external/report.pdf", isDir: false }],
+      changeCount: 42,
+    });
+    vi.mocked(copyPaths).mockResolvedValue([
+      { from: "/external/report.pdf", to: "/ws/report.pdf", isDir: false },
+    ]);
+    const { container } = render(
+      <>
+        <Explorer rootPath={ROOT} onOpenFile={() => {}} />
+        <ContextMenu />
+      </>,
+    );
+    await screen.findByText("README.md");
+    // Let the mount-time board read land before opening the menu.
+    await waitFor(() => expect(readClipboardFilePaths).toHaveBeenCalled());
+
+    fireEvent.contextMenu(
+      container.querySelector(".tree-root-drop-spacer")!,
+    );
+    const pasteItem = await screen.findByRole("menuitem", { name: "Paste" });
+    expect(pasteItem).not.toHaveAttribute("aria-disabled", "true");
+    await userEvent.click(pasteItem);
+
+    await waitFor(() =>
+      expect(copyPaths).toHaveBeenCalledWith(
+        ROOT,
+        ["/external/report.pdf"],
+        ROOT,
+      ),
     );
   });
 

@@ -309,8 +309,9 @@ export async function restoreWorkspace(): Promise<void> {
 }
 
 /**
- * If launched with a folder argument (`lyceum /path`, i.e. `open -na Lyceum
- * --args /path`), open it as the workspace — overriding any restored workspace.
+ * If launched with a folder argument (`lyceum /path`, or Finder's "Open in
+ * Lyceum" — both exec the app binary with the folder in argv), open it as the
+ * workspace — overriding any restored workspace.
  * No-op for a plain launch or outside Tauri.
  */
 async function launchDirPath(): Promise<string | null> {

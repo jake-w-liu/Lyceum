@@ -281,6 +281,54 @@ export async function copyPaths(
   });
 }
 
+/** A filesystem path on the OS pasteboard, mirroring Rust `ClipboardFileEntry`. */
+export interface ClipboardFileEntry {
+  path: string;
+  isDir: boolean;
+}
+
+/** Files on the OS pasteboard plus its generation counter. */
+export interface ClipboardFileList {
+  entries: ClipboardFileEntry[];
+  /**
+   * NSPasteboard `changeCount` at read time. The Explorer writes file URLs when
+   * entries are copied/cut and remembers the resulting generation: a later read
+   * with the same count means the board still holds that write (so internal
+   * copy/cut semantics apply); a different count means another app overwrote it.
+   * -1 when pasteboard access is unavailable (e.g. outside Tauri).
+   */
+  changeCount: number;
+}
+
+const UNAVAILABLE_CLIPBOARD: ClipboardFileList = {
+  entries: [],
+  changeCount: -1,
+};
+
+/**
+ * Read filesystem paths currently on the OS pasteboard (e.g. a Finder copy).
+ * Returns an empty list outside Tauri or when the backend is unavailable.
+ */
+export async function readClipboardFilePaths(): Promise<ClipboardFileList> {
+  try {
+    return await invoke<ClipboardFileList>("clipboard_file_paths");
+  } catch {
+    return UNAVAILABLE_CLIPBOARD;
+  }
+}
+
+/**
+ * Replace the OS pasteboard contents with file URLs for `paths`.
+ * Returns the new pasteboard generation, or -1 when unavailable.
+ */
+export async function writeClipboardFilePaths(paths: string[]): Promise<number> {
+  try {
+    return await invoke<number>("set_clipboard_file_paths", { paths });
+  } catch {
+    return -1;
+  }
+}
+
 /** Move files/directories into Lyceum's workspace-local trash for undoable delete. */
 export async function movePathsToTrash(
   root: string,

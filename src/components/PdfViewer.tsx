@@ -54,6 +54,15 @@ import { readPdfTextContent } from "../lib/pdfTextContent";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
+// pdf.js decodes some content with runtime files it fetches itself: wasm
+// decoders for JBIG2/JPEG2000 images (scanned PDFs), ICC color profiles,
+// non-embedded base fonts, and CID-keyed CMaps. They are served under
+// /pdfjs-assets/ (see vite.config.ts) — the worker resolves them itself, so
+// they must be absolute URLs that work under the tauri:// origin too.
+function pdfJsAssetUrl(dir: string): string {
+  return new URL(`pdfjs-assets/${dir}`, document.baseURI).href;
+}
+
 type TextLayerRender = {
   cancel: () => void;
   render: () => Promise<unknown>;
@@ -1209,7 +1218,19 @@ export default function PdfViewer({ path }: { path: string }) {
       try {
         const data = await readFileBytes(path);
         if (cancelled) return;
-        const task = pdfjsLib.getDocument({ data });
+        const task = pdfjsLib.getDocument({
+          data,
+          cMapUrl: pdfJsAssetUrl("cmaps/"),
+          cMapPacked: true,
+          iccUrl: pdfJsAssetUrl("iccs/"),
+          standardFontDataUrl: pdfJsAssetUrl("standard_fonts/"),
+          wasmUrl: pdfJsAssetUrl("wasm/"),
+          // Fetch wasm/cmaps/fonts on the main thread: WKWebView does not
+          // reliably route WORKER fetch() calls through the tauri:// custom
+          // scheme, and the payloads are small enough that relaying them is
+          // cheap.
+          useWorkerFetch: false,
+        });
         loadingTask = task;
         const pdf = await task.promise;
         if (cancelled) return;

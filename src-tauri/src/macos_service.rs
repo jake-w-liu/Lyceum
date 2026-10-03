@@ -8,9 +8,16 @@
 //! the app's own `Info.plist` because that route needs a native Cocoa service
 //! handler that Tauri doesn't expose — so we drop the bundle on disk on startup.
 //!
-//! The workflow runs `open -na "Lyceum" --args <folder>`, which the
-//! single-instance plugin in `lib.rs` turns into a new window for that folder.
-//! It targets the app by name via LaunchServices, so it needs no CLI shim.
+//! The workflow execs the app binary directly with the folders as arguments —
+//! `("<bundle>/Contents/MacOS/lyceum" "$@" >/dev/null 2>&1 &)` — which the
+//! single-instance plugin in `lib.rs` turns into a new window per folder.
+//! We deliberately do NOT use `open -n`: each forced instance registers a
+//! launch with LaunchServices, so every invocation added a running Dock tile
+//! that then lingered as a duplicate "recent apps" Dock entry. Exec'ing the
+//! binary still reaches the plugin's argv handoff (forward, then exit) but
+//! never touches LaunchServices, so no extra Dock entries are created. Using
+//! this bundle's own binary path also keeps the target deterministic no matter
+//! how many Lyceum.app copies LaunchServices happens to know about.
 //!
 //! Idempotent: the files are rewritten only when missing or out of date, and the
 //! Services cache is flushed only when something actually changed — so a normal
@@ -114,9 +121,7 @@ const DOCUMENT_WFLOW: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 				<key>ActionParameters</key>
 				<dict>
 					<key>COMMAND_STRING</key>
-					<string>for f in "$@"; do
-  open -na "Lyceum" --args "$f"
-done</string>
+					<string>@@OPEN_COMMAND@@</string>
 					<key>CheckedForUserDefaultShell</key>
 					<true/>
 					<key>inputMethod</key>
@@ -254,6 +259,47 @@ done</string>
 </plist>
 "#;
 
+/// The direct-exec command when `exe` lives inside a `.app` bundle.
+fn command_for_exe(exe: &std::path::Path) -> Option<String> {
+    exe.ancestors()
+        .find(|p| p.extension().is_some_and(|ext| ext == "app"))?;
+    // The path sits inside a double-quoted shell string, so the four chars
+    // that stay special there must be escaped (an install path containing a
+    // quote or `$` would otherwise corrupt or inject into the command).
+    let escaped = exe
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('`', "\\`")
+        .replace('$', "\\$");
+    Some(format!("(\"{escaped}\" \"$@\" >/dev/null 2>&1 &)"))
+}
+
+/// The shell command the workflow runs for its selected folders: exec THIS
+/// app binary with the folders as argv, detached. Direct exec skips
+/// LaunchServices entirely — no forced second instance, so no transient Dock
+/// tile and no duplicate "recent apps" entries — while the single-instance
+/// plugin still forwards the argv to the running Lyceum and exits. A detached
+/// `(… &)` is required for the cold-start case: when nothing is running the
+/// exec'd process becomes the primary instance and never returns, so an
+/// un-detached command would leave the service hanging until Lyceum quits.
+fn open_command() -> String {
+    let exe = std::env::current_exe().unwrap_or_default();
+    command_for_exe(&exe).unwrap_or_else(|| {
+        // A bare binary (cargo dev/test) is not inside a bundle, so there is no
+        // stable path to exec — keep the pre-fix LaunchServices handoff, which
+        // resolves the installed app by name.
+        "for f in \"$@\"; do\n  open -na \"Lyceum\" --args \"$f\"\ndone".to_string()
+    })
+}
+
+/// Escape for embedding in the plist XML `<string>` element.
+fn xml_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 /// Ensure the "Open in Lyceum" Finder Quick Action is installed and current.
 /// Best-effort: any error is returned for the caller to log, never fatal.
 pub fn ensure_installed() -> std::io::Result<()> {
@@ -268,16 +314,17 @@ pub fn ensure_installed() -> std::io::Result<()> {
 
     let info = contents.join("Info.plist");
     let wflow = contents.join("document.wflow");
+    let wflow_text = DOCUMENT_WFLOW.replace("@@OPEN_COMMAND@@", &xml_escape(&open_command()));
 
     // Only touch disk when content differs, so a normal launch is a no-op.
-    let changed = file_differs(&info, INFO_PLIST) || file_differs(&wflow, DOCUMENT_WFLOW);
+    let changed = file_differs(&info, INFO_PLIST) || file_differs(&wflow, &wflow_text);
     if !changed {
         return Ok(());
     }
 
     std::fs::create_dir_all(&contents)?;
     std::fs::write(&info, INFO_PLIST)?;
-    std::fs::write(&wflow, DOCUMENT_WFLOW)?;
+    std::fs::write(&wflow, wflow_text)?;
 
     // Refresh the Services cache so the menu item appears without a re-login.
     // Best-effort: if pbs is missing or fails, the item still registers on the
@@ -294,5 +341,50 @@ fn file_differs(path: &PathBuf, want: &str) -> bool {
     match std::fs::read_to_string(path) {
         Ok(have) => have != want,
         Err(_) => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{command_for_exe, xml_escape, DOCUMENT_WFLOW};
+    use std::path::Path;
+
+    #[test]
+    fn command_execs_the_bundled_binary_detached() {
+        let cmd =
+            command_for_exe(Path::new("/Applications/Lyceum.app/Contents/MacOS/lyceum")).unwrap();
+        assert_eq!(
+            cmd,
+            "(\"/Applications/Lyceum.app/Contents/MacOS/lyceum\" \"$@\" >/dev/null 2>&1 &)"
+        );
+    }
+
+    #[test]
+    fn command_is_none_for_a_bare_binary() {
+        assert!(command_for_exe(Path::new("/Users/x/lyceum/target/debug/lyceum")).is_none());
+    }
+
+    #[test]
+    fn command_escapes_shell_metachars_in_the_exe_path() {
+        let cmd = command_for_exe(Path::new(
+            "/Users/x/My \"Apps\"/Lyceum $copy.app/Contents/MacOS/lyceum",
+        ))
+        .unwrap();
+        assert_eq!(
+            cmd,
+            "(\"/Users/x/My \\\"Apps\\\"/Lyceum \\$copy.app/Contents/MacOS/lyceum\" \"$@\" >/dev/null 2>&1 &)"
+        );
+    }
+
+    #[test]
+    fn xml_escape_escapes_ampersand_first() {
+        assert_eq!(xml_escape("a&<b>"), "a&amp;&lt;b&gt;");
+    }
+
+    #[test]
+    fn wflow_template_placeholder_is_substituted() {
+        let rendered = DOCUMENT_WFLOW.replace("@@OPEN_COMMAND@@", "test-command");
+        assert!(rendered.contains("test-command"));
+        assert!(!rendered.contains("@@OPEN_COMMAND@@"));
     }
 }

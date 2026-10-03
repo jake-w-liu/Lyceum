@@ -16,6 +16,7 @@ mod lsp;
 mod macos_service;
 mod menu;
 mod output_flow;
+mod pasteboard;
 mod path_access;
 mod search;
 mod terminal;
@@ -30,30 +31,47 @@ use std::sync::Mutex;
 use app_info::AppInfo;
 use tauri::{Emitter, Manager, RunEvent};
 
-/// Folders Lyceum was asked to open, e.g. via `lyceum .` which runs
-/// `open -na Lyceum --args /abs/path`, keyed by the window label that should
-/// open them. Seeded in `setup` with the cold-start folder for the initial
-/// window, then extended whenever the single-instance plugin forwards a second
-/// launch (keyed to the window opened for it). Each window's frontend reads its
-/// own entry once on mount, taking precedence over the restored workspace.
+/// Folders Lyceum was asked to open, e.g. via `lyceum .` or the "Open in
+/// Lyceum" service, which exec the app binary with folder paths as arguments;
+/// the single-instance plugin forwards them to the running process. Entries
+/// are keyed by the window label that should open them. Seeded with the
+/// cold-start folder for the initial window, then extended whenever the
+/// single-instance plugin forwards a second launch (keyed to the window
+/// opened for it). Each window's frontend reads its own entry once on mount,
+/// taking precedence over the restored workspace.
 ///
 /// Keying by window label (not a FIFO queue) avoids a race: webviews load
 /// asynchronously, so a later-created window can call `get_launch_dir` before an
 /// earlier one — a queue would then hand it the wrong folder. The lookup is by
 /// the *calling* window's label, so each window always gets its own folder.
-struct LaunchDir(Mutex<HashMap<String, String>>);
+struct LaunchDir {
+    dirs: Mutex<HashMap<String, String>>,
+    /// Cold-start folder arguments beyond the first (the first goes to the
+    /// initial window). Spilled to their own windows once the event loop is
+    /// running and can build them (RunEvent::Ready).
+    extra: Mutex<Vec<String>>,
+}
 
 impl LaunchDir {
-    fn seeded(window_label: &str, dir: Option<String>) -> Self {
-        let mut dirs = HashMap::new();
-        if let Some(dir) = dir {
-            dirs.insert(window_label.to_string(), dir);
+    fn seeded(window_label: &str, dirs: Vec<String>) -> Self {
+        let mut map = HashMap::new();
+        let mut extra = dirs.into_iter();
+        if let Some(dir) = extra.next() {
+            map.insert(window_label.to_string(), dir);
         }
-        Self(Mutex::new(dirs))
+        Self {
+            dirs: Mutex::new(map),
+            extra: Mutex::new(extra.collect()),
+        }
+    }
+
+    /// Take the cold-start extra folders, for the one-shot Ready drain.
+    fn take_extra(&self) -> Vec<String> {
+        std::mem::take(&mut *self.extra.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     fn insert(&self, window_label: &str, dir: String) -> Result<(), String> {
-        self.0
+        self.dirs
             .lock()
             .map_err(|_| "launch directory lock poisoned".to_string())?
             .insert(window_label.to_string(), dir);
@@ -61,42 +79,64 @@ impl LaunchDir {
     }
 
     fn remove(&self, window_label: &str) -> Option<String> {
-        self.0.lock().ok()?.remove(window_label)
+        self.dirs.lock().ok()?.remove(window_label)
     }
 }
 
-/// First argv entry that is an existing directory, canonicalized to an absolute
-/// path. Filtering on `is_dir` skips the program name and macOS-injected flags
-/// like `-psn_0_12345`, so a plain launch yields `None`.
-fn first_dir_arg<I: IntoIterator<Item = String>>(args: I) -> Option<String> {
-    args.into_iter()
-        .map(std::path::PathBuf::from)
-        .find(|p| p.is_dir())
-        .and_then(|p| std::fs::canonicalize(&p).ok())
-        .map(|p| p.to_string_lossy().into_owned())
-}
-
-fn first_dir_arg_from<I: IntoIterator<Item = String>>(
+/// Every argv entry that is an existing directory, canonicalized to absolute
+/// paths and kept in argument order. Filtering on `is_dir` skips the program
+/// name and macOS-injected flags like `-psn_0_12345`, so a plain launch yields
+/// an empty list. Relative entries resolve against `launch_cwd` when given —
+/// for a forwarded second launch that is the *launching* process's cwd, not
+/// the already-running GUI process's cwd.
+fn dir_args_from<I: IntoIterator<Item = String>>(
     args: I,
-    launch_cwd: &std::path::Path,
-) -> Option<String> {
+    launch_cwd: Option<&std::path::Path>,
+) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
     args.into_iter()
         .map(std::path::PathBuf::from)
-        .map(|path| {
-            if path.is_absolute() {
-                path
-            } else {
-                launch_cwd.join(path)
-            }
+        .map(|path| match launch_cwd {
+            Some(cwd) if path.is_relative() => cwd.join(path),
+            _ => path,
         })
-        .find(|path| path.is_dir())
-        .and_then(|path| std::fs::canonicalize(path).ok())
+        .filter(|path| path.is_dir())
+        .filter_map(|path| std::fs::canonicalize(path).ok())
         .map(|path| path.to_string_lossy().into_owned())
+        // Duplicate args (`lyceum . .`) would open the same folder twice.
+        .filter(|dir| seen.insert(dir.clone()))
+        .collect()
 }
 
-/// The launch folder for a cold start, resolved from this process's argv.
-fn launch_dir_from_args() -> Option<String> {
-    first_dir_arg(std::env::args().skip(1))
+/// The launch folders for a cold start, resolved from this process's argv.
+fn launch_dirs_from_args() -> Vec<String> {
+    dir_args_from(std::env::args().skip(1), None)
+}
+
+/// Open a window that opens `dir` as its workspace (a plain window for
+/// `None`). Shared by the single-instance argv handoff and the cold-start
+/// extra-folder drain so both delivery paths behave identically.
+fn open_window_for_launch(app: &tauri::AppHandle, dir: Option<String>) {
+    let has_launch_dir = dir.is_some();
+    let state = app.try_state::<LaunchDir>();
+    let result = window_ops::open_new_window_prepared(
+        app,
+        |label| match (dir, state.as_ref()) {
+            (Some(dir), Some(state)) => state.insert(label, dir),
+            (Some(_), None) => Err("launch directory state unavailable".to_string()),
+            (None, _) => Ok(()),
+        },
+        |label| {
+            if has_launch_dir {
+                if let Some(state) = state.as_ref() {
+                    state.remove(label);
+                }
+            }
+        },
+    );
+    if let Err(err) = result {
+        eprintln!("failed to open window for launch: {err}");
+    }
 }
 
 /// Preserve the cross-manager teardown invariant for a destroyed window. The
@@ -173,48 +213,29 @@ pub fn run() {
     // The configured initial window label is `main`. Seed its launch directory
     // before Tauri constructs the WebView, so even an immediate frontend invoke
     // cannot beat setup and observe a false `None`.
-    let initial_launch_dir = LaunchDir::seeded("main", launch_dir_from_args());
+    let initial_launch_dir = LaunchDir::seeded("main", launch_dirs_from_args());
     tauri::Builder::default()
-        // Must be the first plugin: a second launch (double-click or `lyceum .`)
-        // hands its argv to the already-running process and exits, so macOS keeps
-        // one dock icon. We open a window for it and record any folder it carried.
+        // Must be the first plugin: a second launch (`lyceum .`, the Finder
+        // service, or a direct binary exec) hands its argv to the already-running
+        // process and exits, so macOS keeps one dock icon. We open a window per
+        // folder it carried, or one plain window when it carried none.
         .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
             // Relative argv entries belong to the SECOND process's cwd, not the
             // already-running GUI process's cwd. The plugin forwards that cwd
             // explicitly; ignoring it makes `lyceum .` open the wrong folder (or
             // none) whenever the first instance was launched elsewhere.
-            let dir = if cwd.is_empty() {
-                first_dir_arg(argv)
+            let dirs = if cwd.is_empty() {
+                dir_args_from(argv, None)
             } else {
-                first_dir_arg_from(argv, std::path::Path::new(&cwd))
+                dir_args_from(argv, Some(std::path::Path::new(&cwd)))
             };
-            // Reserve the label and publish the launch directory BEFORE building
-            // the WebView. Building first allowed the frontend's one-shot
-            // `get_launch_dir` invoke to win the race and leave a blank window.
-            let has_launch_dir = dir.is_some();
-            let state = app.try_state::<LaunchDir>();
-            let result = window_ops::open_new_window_prepared(
-                app,
-                |label| match (dir, state.as_ref()) {
-                    (Some(dir), Some(state)) => state.insert(label, dir),
-                    (Some(_), None) => Err("launch directory state unavailable".to_string()),
-                    (None, _) => Ok(()),
-                },
-                |label| {
-                    if has_launch_dir {
-                        if let Some(state) = state.as_ref() {
-                            state.remove(label);
-                        }
-                    }
-                },
-            );
-            if let Err(err) = result {
-                if has_launch_dir && state.is_none() {
-                    eprintln!("failed to prepare second-instance window: {err}");
-                } else {
-                    eprintln!("failed to open window for second instance: {err}");
+            if dirs.is_empty() {
+                open_window_for_launch(app, None);
+            } else {
+                for dir in dirs {
+                    open_window_for_launch(app, Some(dir));
                 }
-            };
+            }
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -344,6 +365,8 @@ pub fn run() {
             fs_ops::restore_trash_batch,
             fs_ops::redo_trash_batch,
             fs_ops::empty_workspace_trash,
+            pasteboard::clipboard_file_paths,
+            pasteboard::set_clipboard_file_paths,
             search::search_workspace,
             git::git_status,
             file_ops::read_file,
@@ -410,6 +433,16 @@ pub fn run() {
                 } if destroyed_window_was_last(app.webview_windows().into_keys(), &label) => {
                     app.exit(0);
                 }
+                // Cold-start folder args beyond the first (which seeds the
+                // initial window). Windows can only be built once the event
+                // loop is running, so these spill to their own windows here.
+                RunEvent::Ready => {
+                    if let Some(state) = app.try_state::<LaunchDir>() {
+                        for dir in state.take_extra() {
+                            open_window_for_launch(app, Some(dir));
+                        }
+                    }
+                }
                 #[cfg(target_os = "macos")]
                 RunEvent::Reopen {
                     has_visible_windows: false,
@@ -431,8 +464,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        destroyed_window_was_last, first_dir_arg_from, teardown_window_workspace_ownership,
-        LaunchDir,
+        destroyed_window_was_last, dir_args_from, teardown_window_workspace_ownership, LaunchDir,
     };
     use std::cell::RefCell;
 
@@ -457,27 +489,67 @@ mod tests {
         let workspace = tmp.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
 
-        let resolved =
-            first_dir_arg_from(["lyceum".to_string(), "workspace".to_string()], tmp.path());
+        let resolved = dir_args_from(
+            ["lyceum".to_string(), "workspace".to_string()],
+            Some(tmp.path()),
+        );
 
         let expected = workspace.canonicalize().unwrap();
-        assert_eq!(
-            resolved.as_deref(),
-            Some(expected.to_string_lossy().as_ref())
+        assert_eq!(resolved, [expected.to_string_lossy().as_ref()]);
+    }
+
+    #[test]
+    fn second_instance_directories_keep_argument_order() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let a = tmp.path().join("a");
+        let b = tmp.path().join("b");
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+
+        let resolved = dir_args_from(
+            [
+                "lyceum".to_string(),
+                a.to_string_lossy().into_owned(),
+                "missing".to_string(),
+                b.to_string_lossy().into_owned(),
+            ],
+            Some(tmp.path()),
         );
+
+        let expected: Vec<String> = [a, b]
+            .into_iter()
+            .map(|p| p.canonicalize().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(resolved, expected);
     }
 
     #[test]
     fn cold_start_launch_directory_is_available_before_window_setup() {
-        let launch_dirs = LaunchDir::seeded("main", Some("/workspace".to_string()));
+        let launch_dirs = LaunchDir::seeded("main", vec!["/workspace".to_string()]);
 
         assert_eq!(launch_dirs.remove("main").as_deref(), Some("/workspace"));
         assert_eq!(launch_dirs.remove("main"), None);
     }
 
     #[test]
+    fn cold_start_extra_directories_wait_for_ready_drain() {
+        let launch_dirs = LaunchDir::seeded(
+            "main",
+            vec![
+                "/first".to_string(),
+                "/second".to_string(),
+                "/third".to_string(),
+            ],
+        );
+
+        assert_eq!(launch_dirs.remove("main").as_deref(), Some("/first"));
+        assert_eq!(launch_dirs.take_extra(), ["/second", "/third"]);
+        assert!(launch_dirs.take_extra().is_empty());
+    }
+
+    #[test]
     fn second_instance_launch_directory_is_keyed_before_consumption() {
-        let launch_dirs = LaunchDir::seeded("main", None);
+        let launch_dirs = LaunchDir::seeded("main", Vec::new());
         launch_dirs
             .insert("main7", "/second".to_string())
             .expect("insert launch directory");
