@@ -70,6 +70,7 @@ function ensureSelectionListeners(): void {
   const resetAll = (): void => {
     for (const [textLayer, { endOfContent }] of textLayers) {
       resetTextLayer(textLayer, endOfContent);
+      textLayer.classList.remove("dragging");
     }
   };
 
@@ -82,6 +83,16 @@ function ensureSelectionListeners(): void {
   );
   document.addEventListener(
     "pointerup",
+    () => {
+      pointerDown = false;
+      resetAll();
+    },
+    { signal },
+  );
+  document.addEventListener(
+    // An OS-stolen gesture (pointercancel) must not leave `dragging` latched,
+    // which would silence the page's links until the next completed press.
+    "pointercancel",
     () => {
       pointerDown = false;
       resetAll();
@@ -202,7 +213,12 @@ export function registerPdfTextSelection(textLayer: HTMLDivElement): () => void 
   textLayer.append(endOfContent);
 
   const onMouseDown = (): void => {
-    textLayer.classList.add("selecting");
+    // `selecting` persists for as long as a selection intersects the layer
+    // (selectionchange re-adds it), while `dragging` lives only between
+    // pointerdown and pointerup/blur. The CSS suppresses annotation links
+    // under `dragging` only: gating on `selecting` left every link on the
+    // page dead for the lifetime of a finished selection.
+    textLayer.classList.add("selecting", "dragging");
   };
   const onCopy = (event: ClipboardEvent): void => {
     const selection = document.getSelection();
@@ -230,7 +246,7 @@ export function registerPdfTextSelection(textLayer: HTMLDivElement): () => void 
     if (textLayers.get(textLayer) !== registration) return;
     textLayer.removeEventListener("copy", onCopy);
     textLayer.removeEventListener("mousedown", onMouseDown);
-    textLayer.classList.remove("selecting");
+    textLayer.classList.remove("selecting", "dragging");
     endOfContent.remove();
     textLayers.delete(textLayer);
     removeSelectionListenersIfUnused();

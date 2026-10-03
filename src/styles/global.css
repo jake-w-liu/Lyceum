@@ -1255,8 +1255,10 @@ kbd {
 }
 
 /* Links and widgets sit above the text layer. Let an in-progress text drag
-   cross them without the annotation layer stealing pointer events. */
-.pdf-text-layer.selecting ~ .pdf-annotation-layer section {
+   cross them without the annotation layer stealing pointer events. Scoped to
+   `dragging` (pointer-held) only: `selecting` stays on while a finished
+   selection intersects the layer, which would leave its links unclickable. */
+.pdf-text-layer.dragging ~ .pdf-annotation-layer section {
   pointer-events: none;
 }
 

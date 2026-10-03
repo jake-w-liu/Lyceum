@@ -249,10 +249,16 @@ function isPdfRefProxy(value: unknown): value is RefProxy {
 // Only everyday web schemes may leave the app. A crafted PDF annotation can
 // carry javascript:/file:/custom-handler URIs; handing those to the OS opener
 // could invoke external handlers, so anything else is refused.
+const ALLOWED_EXTERNAL_SCHEMES = new Set([
+  "http:",
+  "https:",
+  "mailto:",
+  "tel:",
+]);
+
 function isAllowedExternalUrl(url: string): boolean {
   try {
-    const scheme = new URL(url).protocol.toLowerCase();
-    return scheme === "http:" || scheme === "https:" || scheme === "mailto:";
+    return ALLOWED_EXTERNAL_SCHEMES.has(new URL(url).protocol.toLowerCase());
   } catch {
     return false;
   }
@@ -1093,7 +1099,23 @@ export default function PdfViewer({ path }: { path: string }) {
       // pdf.js clamps destination offsets at 0 (allowNegativeOffset is off): a
       // dest pointing above the page top must land on the page top, not inside
       // the previous page (which would also misreport the current page).
-      wrap.scrollTop = Math.max(0, offset.top + Math.max(0, top) - padding.top);
+      // Point destinations (XYZ/FitH/FitBH/FitR) name a spot inside the page —
+      // center it vertically instead of pinning it to the top edge, where an
+      // already-on-screen target produces no visible motion and reads as
+      // "the link did nothing". Whole-page/edge fits (Fit/FitB/FitV/FitBV)
+      // keep the top-pinned page layout.
+      const pointDest =
+        command === "XYZ" ||
+        command === "FitH" ||
+        command === "FitBH" ||
+        command === "FitR";
+      const centerOffset = pointDest
+        ? Math.max(0, (wrap.clientHeight - padding.top) / 2)
+        : 0;
+      wrap.scrollTop = Math.max(
+        0,
+        offset.top + Math.max(0, top) - padding.top - centerOffset,
+      );
       const availableWidth = Math.max(
         1,
         wrap.clientWidth - padding.left * 2,

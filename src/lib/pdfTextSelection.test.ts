@@ -113,6 +113,30 @@ describe("PDF text selection geometry", () => {
     }
   });
 
+  it("marks drag state only while the pointer is held", () => {
+    // `dragging` gates the CSS rule that silences annotation links during a
+    // text drag. If a finished selection re-added it, every link on the page
+    // would stay unclickable until the selection was cleared.
+    const { layer, spans } = makeTextLayer();
+    const unregister = registerPdfTextSelection(layer);
+
+    try {
+      layer.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      expect(layer).toHaveClass("dragging");
+
+      document.dispatchEvent(new Event("pointerup"));
+      expect(layer).not.toHaveClass("dragging");
+
+      // A later selectionchange (selection still intersects the layer) may
+      // re-add `selecting` for the sentinel, but must never revive `dragging`.
+      selectBetween(spans[0].firstChild!, spans[1].firstChild!);
+      expect(layer).toHaveClass("selecting");
+      expect(layer).not.toHaveClass("dragging");
+    } finally {
+      unregister();
+    }
+  });
+
   it("leaves sentinel relocation to Firefox's native selection handling", () => {
     const { layer, spans } = makeTextLayer();
     const unregister = registerPdfTextSelection(layer);

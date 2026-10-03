@@ -701,6 +701,73 @@ describe("PdfViewer", () => {
     );
   });
 
+  it("centers a link's point destination vertically in the scroll pane", async () => {
+    const dest = [1, { name: "XYZ" }, 0, 120, null];
+    pdfMocks.getAnnotations.mockResolvedValue([{ id: "link-1", dest }]);
+    pdfMocks.annotationLayerRender.mockImplementation(
+      async (
+        params: {
+          annotations: Array<{ dest?: unknown[] }>;
+          linkService: {
+            getDestinationHash: (d: unknown) => string;
+            goToDestination: (d: unknown) => Promise<void>;
+          };
+        },
+        div: HTMLDivElement,
+      ) => {
+        div.replaceChildren();
+        for (const annotation of params.annotations) {
+          if (!annotation.dest) continue;
+          const section = document.createElement("section");
+          section.className = "linkAnnotation";
+          const link = document.createElement("a");
+          link.href = params.linkService.getDestinationHash(annotation.dest);
+          link.onclick = () => {
+            void params.linkService.goToDestination(annotation.dest!);
+            return false;
+          };
+          section.append(link);
+          div.append(section);
+        }
+      },
+    );
+    mockPdfDocument(2);
+
+    const { container } = render(<PdfViewer path="/w/center.pdf" />);
+    await waitFor(() =>
+      expect(
+        container.querySelector(".pdf-annotation-layer a"),
+      ).not.toBeNull(),
+    );
+    const scroll = container.querySelector(".pdf-scroll") as HTMLDivElement;
+    const page2 = container.querySelector('[data-page="2"]') as HTMLElement;
+    // Page 2 sits at scroll-space top 1000; pane shows 400px of content.
+    page2.getBoundingClientRect = () =>
+      ({
+        top: 1000,
+        left: 12,
+        width: 180,
+        height: 240,
+        right: 192,
+        bottom: 1240,
+        x: 12,
+        y: 1000,
+        toJSON: () => ({}),
+      }) as DOMRect;
+    Object.defineProperty(scroll, "clientHeight", { value: 400 });
+
+    fireEvent.click(container.querySelector(".pdf-annotation-layer a")!);
+
+    // PDF y=120 converts to a viewport top of 120: the destination's content
+    // position is 1120. Centering targets scrollTop = dest - padding.top -
+    // (clientHeight - padding.top)/2 = 1120 - 12 - 194 = 914, putting the
+    // point at 206 — the middle of the visible 12..400 region — not at top.
+    await waitFor(() => expect(scroll.scrollTop).toBe(914));
+    await waitFor(() =>
+      expect(screen.getByLabelText("Page number")).toHaveValue("2"),
+    );
+  });
+
   it("keeps a centered page centered when zooming past the pane width", async () => {
     usePreviewStore
       .getState()
