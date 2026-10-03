@@ -477,7 +477,14 @@ describe("PdfViewer", () => {
     const delayedDestination = new Promise<typeof destinationPage>((resolve) => {
       resolveDestination = resolve;
     });
-    pdfMocks.getPage.mockReturnValueOnce(delayedDestination);
+    // Delay only page-3 lookups: an arg-blind mockReturnValueOnce can be
+    // consumed by an unrelated render-effect getPage, letting the destination
+    // resolve before the wheel gesture and silently invalidating the test.
+    pdfMocks.getPage.mockImplementation((pageNumber: number) =>
+      pageNumber === 3
+        ? delayedDestination
+        : Promise.resolve(destinationPage),
+    );
     const callsBeforeDelayedJump = pdfMocks.getPage.mock.calls.length;
     scroll.scrollTop = 77;
     fireEvent.click(container.querySelector(".pdf-annotation-layer a")!);
@@ -677,17 +684,20 @@ describe("PdfViewer", () => {
     );
     const scroll = container.querySelector(".pdf-scroll") as HTMLDivElement;
     const page2 = container.querySelector('[data-page="2"]') as HTMLElement;
-    // Page 2 sits at scroll-space top 1000 (rect space; scrollTop is 0).
+    // Page 2 sits at scroll-space top 1000. The rect must stay viewport-relative
+    // (top = 1000 - scrollTop): a constant top would break pageOffset's
+    // rect.top + scrollTop invariant and let the scroll-anchor re-pin compound
+    // scrollTop on every pageSizes commit.
     page2.getBoundingClientRect = () =>
       ({
-        top: 1000,
+        top: 1000 - scroll.scrollTop,
         left: 12,
         width: 180,
         height: 240,
         right: 192,
-        bottom: 1240,
+        bottom: 1240 - scroll.scrollTop,
         x: 12,
-        y: 1000,
+        y: 1000 - scroll.scrollTop,
         toJSON: () => ({}),
       }) as DOMRect;
 
@@ -742,16 +752,18 @@ describe("PdfViewer", () => {
     const scroll = container.querySelector(".pdf-scroll") as HTMLDivElement;
     const page2 = container.querySelector('[data-page="2"]') as HTMLElement;
     // Page 2 sits at scroll-space top 1000; pane shows 400px of content.
+    // Viewport-relative rect (see the clamp test) so pageOffset stays stable
+    // across scroll-anchor re-pins.
     page2.getBoundingClientRect = () =>
       ({
-        top: 1000,
+        top: 1000 - scroll.scrollTop,
         left: 12,
         width: 180,
         height: 240,
         right: 192,
-        bottom: 1240,
+        bottom: 1240 - scroll.scrollTop,
         x: 12,
-        y: 1000,
+        y: 1000 - scroll.scrollTop,
         toJSON: () => ({}),
       }) as DOMRect;
     Object.defineProperty(scroll, "clientHeight", { value: 400 });
